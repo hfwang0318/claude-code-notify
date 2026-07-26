@@ -1866,15 +1866,17 @@ class MacServices(PlatformServices):
                 False,
             )
 
-            # 配置完成后重新置前，确保出现在当前活跃 Space。
-            objc.objc_msgSend.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-            ]
-            objc.objc_msgSend(
-                ns_window,
-                objc.sel_registerName(b"orderFrontRegardless"),
-            )
+            # 构造阶段会在首次 show 前预配置 NSWindow，不能因此把隐藏
+            # 窗口提前显示；showEvent 后的幂等调用才负责重新置前。
+            if window.isVisible():
+                objc.objc_msgSend.argtypes = [
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                ]
+                objc.objc_msgSend(
+                    ns_window,
+                    objc.sel_registerName(b"orderFrontRegardless"),
+                )
             return True
         except Exception:
             return False
@@ -2011,6 +2013,11 @@ class ApprovalPopup(QWidget):
 
         self.build_ui(request, queued_count)
         self.move_to_corner()
+
+        # macOS 必须在 NSWindow 第一次显示、被归入当前 Space 之前设置
+        # collectionBehavior。showEvent 中还会再次配置，以防 Qt 在显示
+        # 过程中重建或调整原生窗口。
+        PLATFORM.follow_active_space(self)
 
         # 倒计时
         self.countdown_timer = QTimer(self)
