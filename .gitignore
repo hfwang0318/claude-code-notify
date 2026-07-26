@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# PyInstaller outputs
+build/
+dist/
+
+# Local logs and diagnostics
+*.log
+*.jsonl
+*_err.txt
+
+# Vendored UI/UX reference repository; not required at runtime
+uiux_skill_repo/
