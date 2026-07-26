@@ -7,6 +7,8 @@ Claude Code Notify - 跨平台托盘通知服务（审批弹窗版）
 - POST /claude-approval  双向审批：HTTP 请求保持挂起，弹出置顶小窗等待
                          用户点击按钮后才返回 {"decision": ...}，
                          供服务器端 PreToolUse 钩子回传 permissionDecision
+- POST /claude-approval-resolved
+                         hook 观察到终端已处理后，关闭对应桌面弹窗
 - GET  /health           健康检查
 
 数据目录 ~/.claude-notify/ 沿用（Token 不变，服务器端配置无需改动）。
@@ -88,6 +90,7 @@ PORT = 18765
 
 NOTIFY_PATH = "/claude-notify"
 APPROVAL_PATH = "/claude-approval"
+APPROVAL_RESOLVED_PATH = "/claude-approval-resolved"
 HEALTH_PATH = "/health"
 
 MAX_REQUEST_SIZE = 1024 * 1024
@@ -509,14 +512,14 @@ def merge_settings_json(
 ) -> str:
     """
     把所选模式的钩子合并进现有 settings.json（幂等）：
-    - PreToolUse（旧版本遗留）、PermissionRequest、Notification
+    - PreToolUse、PermissionRequest、Notification
       三个分区里，凡引用我们两种钩子脚本的条目全部移除
     - 再按所选模式追加最新配置：
       popup  → PermissionRequest（只在真正弹权限框时触发，误判少）
       notify → Notification（单向提醒）
     - popup 模式且提供 question_entry 时，额外向 PreToolUse 写入
-      matcher=AskUserQuestion 的代答钩子（官方认可的提问代答通道；
-      代答成功后 PermissionRequest 不会再触发，两条通道天然互斥）
+      matcher="" 的关联/代答钩子：普通工具只记录官方 tool_use_id 后退出，
+      AskUserQuestion 则继续走桌面代答
     - 其他钩子与设置原样保留
 
     hook_entry / question_entry 是不含 timeout 的 handler 字典，支持两种形态：
@@ -564,13 +567,14 @@ def merge_settings_json(
     section = hooks.setdefault(section_name, [])
     section.append({"matcher": matcher, "hooks": [entry]})
 
-    # popup 模式：AskUserQuestion 代答走 PreToolUse（可交互，超时同审批）
+    # popup 模式：所有工具先经 PreToolUse 记录 tool_use_id；
+    # 普通工具立即退出，AskUserQuestion 才会等待桌面回答。
     if mode == "popup" and question_entry is not None:
         q_entry = dict(question_entry)
         q_entry["timeout"] = hook_timeout
         pre_section = hooks.setdefault("PreToolUse", [])
         pre_section.append(
-            {"matcher": "AskUserQuestion", "hooks": [q_entry]}
+            {"matcher": "", "hooks": [q_entry]}
         )
 
     return json.dumps(settings, ensure_ascii=False, indent=2) + "\n"
@@ -936,6 +940,7 @@ class ApprovalRequest:
         # 结构化回传的附加字段：suggestion → {"index": N}；
         # answer → {"answers": [...]}；其余决策为空
         self.extra: dict[str, Any] = {}
+        self._finish_lock = threading.Lock()
 
     # ---- 便捷访问 ----
 
@@ -1035,11 +1040,20 @@ class ApprovalRequest:
         self,
         decision: str,
         extra: Optional[dict[str, Any]] = None,
-    ) -> None:
-        self.decision = decision
-        if extra:
-            self.extra = extra
-        self.event.set()
+    ) -> bool:
+        """只接受第一个完成结果，避免桌面点击与终端处理互相覆盖。"""
+        with self._finish_lock:
+            if self.event.is_set():
+                return False
+            self.decision = decision
+            if extra:
+                self.extra = extra
+            self.event.set()
+            return True
+
+    @property
+    def request_id(self) -> str:
+        return safe_string(self.payload.get("request_id"))
 
 
 # suggestion destination / mode 的人类可读标签（best-effort；
@@ -1196,9 +1210,40 @@ class ClaudeNotifyServer(ThreadingHTTPServer):
 
         self.last_notifications: dict[str, float] = {}
         self.notification_lock = threading.Lock()
+        self.approval_lock = threading.Lock()
+        self.active_approvals: dict[str, ApprovalRequest] = {}
 
     def update_token(self, token: str) -> None:
         self.token = token
+
+    def register_approval(self, request: ApprovalRequest) -> None:
+        if not request.request_id:
+            return
+        with self.approval_lock:
+            self.active_approvals[request.request_id] = request
+
+    def unregister_approval(self, request: ApprovalRequest) -> None:
+        if not request.request_id:
+            return
+        with self.approval_lock:
+            current = self.active_approvals.get(request.request_id)
+            if current is request:
+                self.active_approvals.pop(request.request_id, None)
+
+    def resolve_from_terminal(self, request_id: str) -> str:
+        with self.approval_lock:
+            request = self.active_approvals.get(request_id)
+        if request is None:
+            return "not_found"
+        if not request.finish("cancelled"):
+            return "already_finished"
+        self.bridge.approval_cancelled.emit(request)
+        self.bridge.log_received.emit(
+            "info",
+            "终端侧已处理，弹窗同步关闭："
+            f"request={request_id[:12]}, tool={request.tool_name}",
+        )
+        return "resolved"
 
     def should_notify(self, data: dict[str, Any]) -> bool:
         session_id = (
@@ -1294,8 +1339,8 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
 
     def client_gone(self) -> bool:
         """
-        非阻塞探测客户端连接是否已断开。
-        用于长轮询期间发现“终端先作答、钩子进程被杀”的场景。
+        非阻塞探测客户端连接是否已断开，作为 transcript 同步之外的
+        异常退出补充路径。
         """
         try:
             readable, _, _ = select.select([self.connection], [], [], 0)
@@ -1388,6 +1433,14 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
                 self.handle_approval(data)
             return
 
+        if self.path == APPROVAL_RESOLVED_PATH:
+            if not self.authenticate():
+                return
+            data = self.read_json_body()
+            if data is not None:
+                self.handle_approval_resolved(data)
+            return
+
         self.send_json(404, {"error": "not_found"})
 
     # ------------------------------------------------------------------
@@ -1477,6 +1530,17 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
     # 双向审批（长轮询：挂起请求直到用户点击或超时）
     # ------------------------------------------------------------------
 
+    def handle_approval_resolved(self, data: dict[str, Any]) -> None:
+        request_id = safe_string(data.get("request_id"))
+        if not request_id:
+            self.send_json(400, {"error": "request_id_required"})
+            return
+        status = self.notify_server.resolve_from_terminal(request_id)
+        if status == "not_found":
+            self.send_json(404, {"status": status})
+            return
+        self.send_json(200, {"status": status})
+
     def handle_approval(self, data: dict[str, Any]) -> None:
         remote = self.client_address[0]
 
@@ -1511,31 +1575,34 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
                 f"未知 suggestion 类型 {unknown}，将用通用标签显示并原样回传",
             )
 
-        # 交给 GUI 线程弹窗，本线程挂起等待。
-        # Claude Code 的权限对话框与钩子是并发的（先作答者生效）：
-        # 若用户在终端先作答，Claude 会杀掉钩子进程、HTTP 连接断开，
-        # 这里检测到断连就立刻收尾，避免弹窗滞留到超时。
+        # 交给 GUI 线程弹窗，本线程挂起等待。终端先作答时，hook 会从
+        # transcript 观察到对应 tool_result 并调用 resolved 端点；
+        # 连接断开检测仅作为进程异常退出时的补充快速路径。
+        self.notify_server.register_approval(request)
         self.notify_server.bridge.approval_received.emit(request)
 
-        finished = False
-        cancelled = False
         deadline = time.monotonic() + timeout_seconds + 5
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            finished = request.event.wait(min(0.5, remaining))
-            if finished:
-                break
-            if self.client_gone():
-                request.finish("cancelled")
-                cancelled = True
-                self.notify_server.bridge.approval_cancelled.emit(request)
-                self.notify_server.bridge.log_received.emit(
-                    "info",
-                    f"终端侧已处理，弹窗同步关闭：tool={request.tool_name}",
-                )
-                break
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if request.event.wait(min(0.5, remaining)):
+                    break
+                if self.client_gone():
+                    if request.finish("cancelled"):
+                        self.notify_server.bridge.approval_cancelled.emit(
+                            request
+                        )
+                        self.notify_server.bridge.log_received.emit(
+                            "info",
+                            "审批客户端已断开，弹窗同步关闭："
+                            f"request={request.request_id[:12]}, "
+                            f"tool={request.tool_name}",
+                        )
+                    break
+        finally:
+            self.notify_server.unregister_approval(request)
 
         # finish() 总是先写 decision 再置 event，直接读 decision 即可
         decision = request.decision or "timeout"
@@ -2614,8 +2681,7 @@ class DeployWorker(QObject):
                 "CLAUDE_NOTIFY_TOKEN": cfg["token"],
                 "CLAUDE_APPROVAL_URL": f"{base_url}{APPROVAL_PATH}",
                 "CLAUDE_APPROVAL_TIMEOUT": cfg["approval_timeout"],
-                # 标记 AskUserQuestion 走 PreToolUse 代答通道，
-                # 钩子在 PermissionRequest 事件下会对该工具让位
+                # PreToolUse 记录 tool_use_id；AskUserQuestion 同时走代答
                 "CLAUDE_ASKUSER_CHANNEL": "pretooluse",
             }
             if cfg["tool_matcher"]:
@@ -4588,7 +4654,7 @@ class MainWindow(QMainWindow):
             mode=mode,
             hook_entry=hook_entry,
             hook_timeout=300,
-            # 同一脚本按 hook_event_name 区分事件，代答钩子复用同一 entry
+            # 同一脚本按事件区分关联 observer 与审批/代答
             question_entry=hook_entry,
         )
         settings_path.write_text(merged, encoding="utf-8")
