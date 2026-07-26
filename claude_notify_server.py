@@ -55,6 +55,7 @@ from PySide6.QtGui import (
     QIcon,
     QMouseEvent,
     QPixmap,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -1749,9 +1750,9 @@ class PlatformServices:
     def foreground_window_screen(self) -> Any:
         return None
 
-    def follow_active_space(self, window: Any) -> None:
+    def follow_active_space(self, window: Any) -> bool:
         """让窗口在切换桌面/工作区时保持可见（仅 macOS 需要实现）。"""
-        return None
+        return False
 
 
 class WindowsServices(PlatformServices):
@@ -1769,6 +1770,21 @@ class WindowsServices(PlatformServices):
         return foreground_window_screen()
 
 
+MAC_COLLECTION_CAN_JOIN_ALL_SPACES = 1 << 0
+MAC_COLLECTION_MOVE_TO_ACTIVE_SPACE = 1 << 1
+MAC_COLLECTION_FULL_SCREEN_AUXILIARY = 1 << 8
+
+
+def mac_popup_collection_behavior(current: int) -> int:
+    """保留 Qt 行为，同时让弹窗跟随 Spaces 并支持全屏 Space。"""
+    return (
+        current & ~MAC_COLLECTION_MOVE_TO_ACTIVE_SPACE
+    ) | (
+        MAC_COLLECTION_CAN_JOIN_ALL_SPACES
+        | MAC_COLLECTION_FULL_SCREEN_AUXILIARY
+    )
+
+
 class MacServices(PlatformServices):
     name = "macos"
 
@@ -1783,17 +1799,17 @@ class MacServices(PlatformServices):
         )
         return result.returncode == 0
 
-    def follow_active_space(self, window: Any) -> None:
+    def follow_active_space(self, window: Any) -> bool:
         """
-        macOS：给 NSWindow 设置 NSWindowCollectionBehaviorCanJoinAllSpaces，
-        审批弹窗在所有桌面（Space）可见，切换桌面不会遗漏。
+        macOS：让审批弹窗在所有 Spaces 及全屏应用所在 Space 保持可见。
+        必须在 QWidget 真正 show 后调用，确保 NSView 已挂载到 NSWindow。
         通过 ctypes 调 Objective-C runtime，失败静默（不影响弹窗本身）。
         """
         app = QGuiApplication.instance()
         if app is None or app.platformName().lower() != "cocoa":
             # offscreen 等 Qt 后端的 winId() 可能只是占位值（例如 1），
             # 不能把它作为 Objective-C 对象指针传给 objc_msgSend。
-            return
+            return False
 
         try:
             import ctypes
@@ -1801,18 +1817,32 @@ class MacServices(PlatformServices):
             objc = ctypes.CDLL("/usr/lib/libobjc.dylib")
             objc.sel_registerName.restype = ctypes.c_void_p
             objc.sel_registerName.argtypes = [ctypes.c_char_p]
-            objc.objc_msgSend.restype = ctypes.c_void_p
-
             # winId() 返回 NSView*，取其 window 得 NSWindow*
             view = ctypes.c_void_p(int(window.winId()))
+            objc.objc_msgSend.restype = ctypes.c_void_p
             objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             ns_window = objc.objc_msgSend(
                 view, objc.sel_registerName(b"window")
             )
             if not ns_window:
-                return
+                return False
 
-            # NSWindowCollectionBehaviorCanJoinAllSpaces = 1 << 0
+            # 保留 Qt 已设置的行为，仅移除与 CanJoinAllSpaces 冲突的
+            # MoveToActiveSpace，再加入全屏辅助行为。
+            objc.objc_msgSend.restype = ctypes.c_ulonglong
+            objc.objc_msgSend.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            current = int(
+                objc.objc_msgSend(
+                    ns_window,
+                    objc.sel_registerName(b"collectionBehavior"),
+                )
+            )
+            behavior = mac_popup_collection_behavior(current)
+
+            objc.objc_msgSend.restype = None
             objc.objc_msgSend.argtypes = [
                 ctypes.c_void_p,
                 ctypes.c_void_p,
@@ -1821,10 +1851,33 @@ class MacServices(PlatformServices):
             objc.objc_msgSend(
                 ns_window,
                 objc.sel_registerName(b"setCollectionBehavior:"),
-                1,
+                behavior,
             )
+
+            # Qt.Tool 在应用失焦时可能隐藏；权限提示必须继续可见。
+            objc.objc_msgSend.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_bool,
+            ]
+            objc.objc_msgSend(
+                ns_window,
+                objc.sel_registerName(b"setHidesOnDeactivate:"),
+                False,
+            )
+
+            # 配置完成后重新置前，确保出现在当前活跃 Space。
+            objc.objc_msgSend.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            objc.objc_msgSend(
+                ns_window,
+                objc.sel_registerName(b"orderFrontRegardless"),
+            )
+            return True
         except Exception:
-            pass
+            return False
 
 
 class LinuxServices(PlatformServices):
@@ -1964,11 +2017,6 @@ class ApprovalPopup(QWidget):
         self.countdown_timer.setInterval(100)
         self.countdown_timer.timeout.connect(self.tick)
         self.countdown_timer.start()
-
-        # macOS：跨桌面可见，切换 Space 不遗漏（其他平台为 no-op）
-        QTimer.singleShot(
-            0, lambda: PLATFORM.follow_active_space(self)
-        )
 
         # 提示音 + 闪烁提醒
         QApplication.beep()
@@ -2112,29 +2160,25 @@ class ApprovalPopup(QWidget):
         has_suggestions = bool(request.suggestions)
 
         if not has_suggestions:
-            # 无建议时：允许/拒绝等宽并排，交给终端靠右
-            button_row = QHBoxLayout()
-            button_row.setSpacing(8)
-            for option in options:
-                button = QPushButton(option["label"])
-                button.setAccessibleName(f"审批选项：{option['label']}")
-                if option["id"] == "allow":
-                    button.setObjectName("approveAllow")
-                    button.setDefault(True)
-                    button.setAutoDefault(True)
-                    self.allow_button = button
-                elif option["id"] == "deny":
-                    button.setObjectName("approveDeny")
+            buttons = [
+                self.make_permission_button(option)
+                for option in options
+            ]
 
-                decision_id = option["id"]
-                button.clicked.connect(
-                    lambda checked=False, d=decision_id: self.decide(d)
-                )
-                button_row.addWidget(button, stretch=1)
+            if len(buttons) <= 2:
+                # 1–2 项：等宽横排，保留常见允许/拒绝的快速扫视。
+                button_row = QHBoxLayout()
+                button_row.setSpacing(8)
+                for button in buttons:
+                    button_row.addWidget(button, stretch=1)
+                layout.addLayout(button_row)
+            else:
+                # 3–6 项：全宽纵排。macOS 原生按钮有额外阴影和最小
+                # 宽度，继续横排会与相邻按钮发生视觉重叠。
+                for button in buttons:
+                    layout.addWidget(button)
 
-            button_row.addStretch(1)
-            button_row.addWidget(self.make_terminal_button())
-            layout.addLayout(button_row)
+            self.add_terminal_footer(layout)
             return
 
         # 有建议时，顺序与终端权限对话框一致且全部整行等宽：
@@ -2197,6 +2241,29 @@ class ApprovalPopup(QWidget):
             layout.addWidget(button)
 
         # ---- 交给终端：底部右对齐小链接，不与决策按钮抢视觉 ----
+        self.add_terminal_footer(layout)
+
+    def make_permission_button(
+        self,
+        option: dict[str, str],
+    ) -> QPushButton:
+        button = QPushButton(option["label"])
+        button.setAccessibleName(f"审批选项：{option['label']}")
+        if option["id"] == "allow":
+            button.setObjectName("approveAllow")
+            button.setDefault(True)
+            button.setAutoDefault(True)
+            self.allow_button = button
+        elif option["id"] == "deny":
+            button.setObjectName("approveDeny")
+
+        decision_id = option["id"]
+        button.clicked.connect(
+            lambda checked=False, d=decision_id: self.decide(d)
+        )
+        return button
+
+    def add_terminal_footer(self, layout: QVBoxLayout) -> None:
         footer_row = QHBoxLayout()
         footer_row.addStretch()
         footer_row.addWidget(self.make_terminal_button())
@@ -2391,6 +2458,15 @@ class ApprovalPopup(QWidget):
         x = geometry.right() - self.width() - 16
         y = geometry.bottom() - self.height() - 16
         self.move(x, y)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # winId()/NSWindow 在 showEvent 后才稳定可用。每次重新显示都
+        # 幂等配置，以便弹窗出现在用户当前使用的 Space。
+        QTimer.singleShot(
+            0,
+            lambda: PLATFORM.follow_active_space(self),
+        )
 
     # ------------------------------------------------------------------
     # 倒计时
