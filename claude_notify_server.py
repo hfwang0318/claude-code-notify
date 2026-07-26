@@ -1789,6 +1789,12 @@ class MacServices(PlatformServices):
         审批弹窗在所有桌面（Space）可见，切换桌面不会遗漏。
         通过 ctypes 调 Objective-C runtime，失败静默（不影响弹窗本身）。
         """
+        app = QGuiApplication.instance()
+        if app is None or app.platformName().lower() != "cocoa":
+            # offscreen 等 Qt 后端的 winId() 可能只是占位值（例如 1），
+            # 不能把它作为 Objective-C 对象指针传给 objc_msgSend。
+            return
+
         try:
             import ctypes
 
