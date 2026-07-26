@@ -1,9 +1,12 @@
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import claude_approval_hook as hook
 from claude_notify_server import (
