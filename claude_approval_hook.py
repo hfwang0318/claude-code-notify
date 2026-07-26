@@ -40,9 +40,10 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
 
 本脚本同时服务两个钩子事件（按 stdin 的 hook_event_name 区分）：
     - PermissionRequest：权限审批（含 suggestion 动态选项）
-    - PreToolUse（matcher=AskUserQuestion）：Claude 提问代答，
-      回答经 allow + updatedInput(answers) 返回，工具不再弹交互 UI；
-      此场景下 PermissionRequest 不会再触发（无对话框）
+    - PreToolUse：普通工具只记录官方 tool_use_id 后立即退出，用于把
+      PermissionRequest 与 transcript 中的终端处理结果关联；
+      AskUserQuestion 仍走桌面代答，回答经 allow + updatedInput(answers)
+      返回，工具不再弹交互 UI
 配置来源（优先级从高到低）：
     1. 环境变量（远程部署的 settings.json 会把 Token 内联进 hook 命令）
     2. 脚本同目录的 claude_notify_config.json（本机接入时由部署功能写入，
@@ -52,6 +53,9 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
     CLAUDE_NOTIFY_TOKEN      必填，Windows 端显示的 Token
     CLAUDE_APPROVAL_URL      可选，默认 http://localhost:18765/claude-approval
                              （与 Claude Code 同机时；远程时填 Windows 的 IP）
+    CLAUDE_APPROVAL_RESOLUTION_URL
+                             可选，默认与审批 URL 同主机的
+                             /claude-approval-resolved
     CLAUDE_APPROVAL_TIMEOUT  可选，秒，默认 240（须小于钩子的 timeout）
     CLAUDE_APPROVAL_MATCHER  可选，逗号分隔的工具名，只对匹配的工具转发；
                              默认全部转发。例：Bash,Edit,Write
@@ -63,11 +67,16 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
     PermissionRequest 等。平时保持关闭。
 """
 
+import hashlib
 import json
 import os
+import sqlite3
 import sys
+import threading
 import time
+import urllib.error
 import urllib.request
+import uuid
 from typing import Optional
 
 CONFIG_PATH = os.path.join(
@@ -101,6 +110,10 @@ WINDOWS_URL = cfg(
     "CLAUDE_APPROVAL_URL",
     "http://localhost:18765/claude-approval",
 )
+RESOLUTION_URL = cfg(
+    "CLAUDE_APPROVAL_RESOLUTION_URL",
+    WINDOWS_URL.rsplit("/", 1)[0] + "/claude-approval-resolved",
+)
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 
@@ -113,6 +126,283 @@ MATCHED_TOOLS = {
 def note(message: str) -> None:
     """诊断信息写 stderr：不污染 stdout 协议输出，claude --debug 可见。"""
     print(f"[claude-approval-hook] {message}", file=sys.stderr)
+
+
+def data_dir() -> str:
+    """返回稳定的本机状态目录；Windows 不受 Git Bash HOME 影响。"""
+    if os.name == "nt":
+        home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    else:
+        home = os.path.expanduser("~")
+    path = os.path.join(home, ".claude-notify")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+SYNC_DB_PATH = os.path.join(data_dir(), "approval-sync.sqlite3")
+
+
+def tool_input_hash(tool_input: dict) -> str:
+    canonical = json.dumps(
+        tool_input,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def open_sync_db() -> sqlite3.Connection:
+    connection = sqlite3.connect(SYNC_DB_PATH, timeout=5)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pending_tool_uses (
+            request_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            prompt_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            tool_use_id TEXT NOT NULL,
+            transcript_path TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            claimed INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS pending_tool_uses_lookup
+        ON pending_tool_uses(
+            session_id, prompt_id, tool_name, input_hash, claimed, created_at
+        )
+        """
+    )
+    return connection
+
+
+def record_pretooluse(hook_input: dict, tool_input: dict) -> Optional[str]:
+    """记录官方 tool_use_id；字段缺失时不伪造，直接禁用自动同步。"""
+    tool_use_id = str(hook_input.get("tool_use_id") or "").strip()
+    if not tool_use_id:
+        note(
+            "PreToolUse 输入缺少 tool_use_id；需要 Claude Code 2.0.43+，"
+            "本次审批无法自动同步关闭"
+        )
+        return None
+
+    request_id = uuid.uuid4().hex
+    now = time.time()
+    try:
+        with open_sync_db() as connection:
+            connection.execute(
+                "DELETE FROM pending_tool_uses WHERE created_at < ?",
+                (now - 3600,),
+            )
+            connection.execute(
+                """
+                INSERT INTO pending_tool_uses(
+                    request_id, session_id, prompt_id, tool_name, input_hash,
+                    tool_use_id, transcript_path, created_at, claimed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (
+                    request_id,
+                    str(hook_input.get("session_id") or ""),
+                    str(hook_input.get("prompt_id") or ""),
+                    str(hook_input.get("tool_name") or ""),
+                    tool_input_hash(tool_input),
+                    tool_use_id,
+                    str(hook_input.get("transcript_path") or ""),
+                    now,
+                ),
+            )
+    except sqlite3.Error as exc:
+        note(f"保存 tool_use_id 关联失败：{exc}")
+        return None
+    return request_id
+
+
+def claim_pretooluse(
+    hook_input: dict,
+    tool_input: dict,
+) -> Optional[dict]:
+    """
+    原子认领最近一次匹配的 PreToolUse。
+
+    PermissionRequest 官方不含 tool_use_id，因此使用 session/prompt/tool/input
+    定位候选；claimed 保证连续相同调用不会复用同一条记录。
+    """
+    session_id = str(hook_input.get("session_id") or "")
+    prompt_id = str(hook_input.get("prompt_id") or "")
+    tool_name = str(hook_input.get("tool_name") or "")
+    input_hash = tool_input_hash(tool_input)
+    cutoff = time.time() - 120
+
+    try:
+        connection = open_sync_db()
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT request_id, tool_use_id, transcript_path
+                FROM pending_tool_uses
+                WHERE session_id = ?
+                  AND tool_name = ?
+                  AND input_hash = ?
+                  AND claimed = 0
+                  AND created_at >= ?
+                  AND (prompt_id = ? OR prompt_id = '')
+                ORDER BY (prompt_id = ?) DESC, created_at DESC
+                LIMIT 1
+                """,
+                (
+                    session_id,
+                    tool_name,
+                    input_hash,
+                    cutoff,
+                    prompt_id,
+                    prompt_id,
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE pending_tool_uses
+                SET claimed = 1
+                WHERE request_id = ? AND claimed = 0
+                """,
+                (row[0],),
+            )
+        return {
+            "request_id": row[0],
+            "tool_use_id": row[1],
+            "transcript_path": row[2],
+        }
+    except sqlite3.Error as exc:
+        note(f"读取 tool_use_id 关联失败：{exc}")
+        return None
+    finally:
+        try:
+            connection.close()
+        except (NameError, sqlite3.Error):
+            pass
+
+
+def delete_correlation(request_id: str) -> None:
+    if not request_id:
+        return
+    try:
+        with open_sync_db() as connection:
+            connection.execute(
+                "DELETE FROM pending_tool_uses WHERE request_id = ?",
+                (request_id,),
+            )
+    except sqlite3.Error:
+        pass
+
+
+def contains_tool_result(value, tool_use_id: str) -> bool:
+    """递归识别 transcript 消息中的目标 tool_result block。"""
+    if isinstance(value, dict):
+        if (
+            value.get("type") == "tool_result"
+            and value.get("tool_use_id") == tool_use_id
+        ):
+            return True
+        return any(
+            contains_tool_result(child, tool_use_id)
+            for child in value.values()
+        )
+    if isinstance(value, list):
+        return any(
+            contains_tool_result(child, tool_use_id)
+            for child in value
+        )
+    return False
+
+
+def notify_terminal_resolved(
+    request_id: str,
+    tool_use_id: str,
+    stop_event: threading.Event,
+) -> None:
+    """通知桌面端关闭对应弹窗；注册竞态时短暂重试。"""
+    payload = json.dumps(
+        {
+            "request_id": request_id,
+            "tool_use_id": tool_use_id,
+            "source": "terminal",
+        }
+    ).encode("utf-8")
+    for _ in range(20):
+        if stop_event.is_set():
+            return
+        request = urllib.request.Request(
+            RESOLUTION_URL,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {TOKEN}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                if 200 <= response.status < 300:
+                    return
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                return
+        except Exception:
+            pass
+        stop_event.wait(0.25)
+
+
+def watch_transcript(
+    transcript_path: str,
+    request_id: str,
+    tool_use_id: str,
+    stop_event: threading.Event,
+) -> None:
+    """监听当前调用的 tool_result；终端允许和拒绝都会产生该 block。"""
+    if not transcript_path or not tool_use_id:
+        return
+    position = 0
+    try:
+        position = os.path.getsize(transcript_path)
+    except OSError:
+        pass
+    buffered = b""
+
+    while not stop_event.wait(0.2):
+        try:
+            size = os.path.getsize(transcript_path)
+            if size < position:
+                position = 0
+                buffered = b""
+            if size == position:
+                continue
+            with open(transcript_path, "rb") as file:
+                file.seek(position)
+                chunk = file.read()
+                position = file.tell()
+        except OSError:
+            continue
+
+        lines = (buffered + chunk).split(b"\n")
+        buffered = lines.pop()
+        for raw_line in lines:
+            try:
+                record = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if contains_tool_result(record, tool_use_id):
+                notify_terminal_resolved(
+                    request_id,
+                    tool_use_id,
+                    stop_event,
+                )
+                return
 
 
 def maybe_dump(hook_input: dict) -> None:
@@ -131,12 +421,7 @@ def maybe_dump(hook_input: dict) -> None:
         # Windows 上 expanduser("~") 优先读 HOME；Claude Code 若从
         # Git Bash 等启动会继承不同的 HOME，导致文件落到意外位置。
         # 固定用 USERPROFILE 保证路径确定。
-        if os.name == "nt":
-            home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-        else:
-            home = os.path.expanduser("~")
-        dump_dir = os.path.join(home, ".claude-notify")
-        os.makedirs(dump_dir, exist_ok=True)
+        dump_dir = data_dir()
         record = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "event": hook_input.get("hook_event_name"),
@@ -310,7 +595,7 @@ def main() -> None:
     tool_name = hook_input.get("tool_name") or ""
 
     # PermissionRequest 通道下 AskUserQuestion 让位给 PreToolUse 代答
-    # （部署时两条通道一起配置并以 CLAUDE_ASKUSER_CHANNEL 标记）——
+    # （部署时 PreToolUse observer 以 CLAUDE_ASKUSER_CHANNEL 标记）——
     # 否则用户在 PreToolUse 弹窗点「交给终端」后会再弹出第二个弹窗
     if (
         event == "PermissionRequest"
@@ -335,6 +620,12 @@ def main() -> None:
     if not isinstance(tool_input, dict):
         tool_input = {}
 
+    # 普通 PreToolUse 只记录官方 tool_use_id，绝不做审批决定。
+    # AskUserQuestion 保留原有桌面代答流程。
+    if event == "PreToolUse" and tool_name != "AskUserQuestion":
+        record_pretooluse(hook_input, tool_input)
+        sys.exit(0)
+
     # ---- 场景识别：AskUserQuestion 提问 vs 普通权限审批 ----
     suggestions = hook_input.get("permission_suggestions")
     if not isinstance(suggestions, list):
@@ -356,8 +647,33 @@ def main() -> None:
         if command:
             message = f"Claude Code 想要执行：{command[:120]}"
 
+    if event == "PreToolUse":
+        correlation = {
+            "request_id": uuid.uuid4().hex,
+            "tool_use_id": str(hook_input.get("tool_use_id") or ""),
+            "transcript_path": str(
+                hook_input.get("transcript_path") or ""
+            ),
+        }
+    else:
+        correlation = claim_pretooluse(hook_input, tool_input) or {
+            "request_id": uuid.uuid4().hex,
+            "tool_use_id": "",
+            "transcript_path": str(
+                hook_input.get("transcript_path") or ""
+            ),
+        }
+        if not correlation["tool_use_id"]:
+            note(
+                "未找到匹配的 PreToolUse/tool_use_id，"
+                "本次审批保留原超时回退行为"
+            )
+
     payload = {
+        "request_id": correlation["request_id"],
         "session_id": hook_input.get("session_id"),
+        "prompt_id": hook_input.get("prompt_id"),
+        "tool_use_id": correlation["tool_use_id"],
         "cwd": hook_input.get("cwd"),
         "tool_name": tool_name,
         "tool_input": tool_input,
@@ -379,6 +695,19 @@ def main() -> None:
         },
     )
 
+    stop_watcher = threading.Event()
+    watcher = threading.Thread(
+        target=watch_transcript,
+        args=(
+            correlation["transcript_path"],
+            correlation["request_id"],
+            correlation["tool_use_id"],
+            stop_watcher,
+        ),
+        daemon=True,
+    )
+    watcher.start()
+
     # ---- 等待 Windows 端的用户决定 ----
     try:
         with urllib.request.urlopen(
@@ -389,6 +718,10 @@ def main() -> None:
     except Exception as exc:
         note(f"请求 {WINDOWS_URL} 失败：{exc}，交给终端处理")
         sys.exit(0)  # 网络失败/超时 → 交给终端
+    finally:
+        stop_watcher.set()
+        watcher.join(timeout=1)
+        delete_correlation(correlation["request_id"])
 
     # ---- 按事件通道映射输出 ----
     if not isinstance(result, dict):
