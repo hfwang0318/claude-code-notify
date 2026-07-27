@@ -45,3 +45,4 @@ echo Executable:  %cd%\dist\ClaudeCodeNotify.exe
 echo Double-click to run. Closing the window minimizes it to the system tray.
 echo.
 pause
+
