@@ -31,7 +31,7 @@ echo [2/3] Building...
 set ICON_ARG=
 if exist app.ico set ICON_ARG=--icon app.ico
 
-pyinstaller --noconfirm --clean --onefile --windowed --name ClaudeCodeNotify %ICON_ARG% --add-data "app.ico;." --add-data "claude_approval_hook.py;." --add-data "claude_notify_hook.py;." --collect-all PySide6 claude_notify_server.py
+pyinstaller --noconfirm --clean --onefile --windowed --name ClaudeCodeNotify %ICON_ARG% --add-data "app.ico;." --add-data "claude_approval_hook.py;." --add-data "claude_notify_hook.py;." claude_notify_server.py
 
 if errorlevel 1 (
     echo [ERROR] Build failed.
