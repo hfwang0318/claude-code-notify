@@ -160,6 +160,7 @@ QLabel#kbd {
 
 QLabel#statValue { color: #F5F7FA; font-size: 20px; font-weight: 800; font-family: __FONT_MONO__; }
 QLabel#statLabel { color: #6B7280; font-size: 12px; }
+QLabel#statDetail { color: #A7AEB8; font-size: 11px; font-family: __FONT_MONO__; }
 QLabel#statusK { color: #6B7280; font-size: 12px; }
 QLabel#statusV { color: #F5F7FA; font-size: 15px; font-weight: 750; font-family: __FONT_MONO__; }
 QLabel#statusOk { color: #43B581; }
@@ -437,6 +438,26 @@ def safe_string(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, indent=2)
     except Exception:
         return str(value)
+
+
+NON_COMPLETED_APPROVAL_DECISIONS = frozenset(
+    {"ask", "dismissed", "timeout", "cancelled"}
+)
+
+
+def is_completed_approval_decision(decision: str) -> bool:
+    """是否为 GUI 中已实际提交的审批/问答结果。"""
+    return bool(decision) and decision not in NON_COMPLETED_APPROVAL_DECISIONS
+
+
+def format_approval_type_counts(counts: dict[str, int]) -> str:
+    """按首次出现顺序格式化权限类型明细。"""
+    parts = [
+        f"{tool_name} x{count}"
+        for tool_name, count in counts.items()
+        if count > 0
+    ]
+    return "，".join(parts) if parts else "暂无审批记录"
 
 
 def escape_html(text: str) -> str:
@@ -3846,6 +3867,8 @@ class MainWindow(QMainWindow):
         self.force_exit = False
         self.server_running = False
         self.notification_count = 0
+        self.approval_count = 0
+        self.approval_type_counts: dict[str, int] = {}
         self.token_visible = False
         self.popup_screen_mode = self.load_ui_config()
 
@@ -4066,6 +4089,30 @@ class MainWindow(QMainWindow):
         stat_box.addWidget(self.stat_value)
         stat_box.addWidget(stat_label)
         header.addLayout(stat_box)
+        header.addSpacing(16)
+
+        # 已完成审批计数 + 权限类型明细（仅统计本次运行期间）
+        approval_stat_box = QVBoxLayout()
+        approval_stat_box.setSpacing(0)
+
+        self.approval_stat_value = QLabel("0")
+        self.approval_stat_value.setObjectName("statValue")
+        self.approval_stat_value.setAlignment(Qt.AlignCenter)
+
+        approval_stat_label = QLabel("已审批权限")
+        approval_stat_label.setObjectName("statLabel")
+        approval_stat_label.setAlignment(Qt.AlignCenter)
+
+        self.approval_stat_detail = QLabel("暂无审批记录")
+        self.approval_stat_detail.setObjectName("statDetail")
+        self.approval_stat_detail.setAlignment(Qt.AlignCenter)
+        self.approval_stat_detail.setWordWrap(True)
+        self.approval_stat_detail.setMaximumWidth(280)
+
+        approval_stat_box.addWidget(self.approval_stat_value)
+        approval_stat_box.addWidget(approval_stat_label)
+        approval_stat_box.addWidget(self.approval_stat_detail)
+        header.addLayout(approval_stat_box)
         header.addSpacing(10)
 
         # 状态胶囊
@@ -4407,6 +4454,7 @@ class MainWindow(QMainWindow):
         self.refresh_deploy_status()
         self.refresh_deploy_summary()
         self.update_pending_count()
+        self.update_approval_count()
 
     def update_status_pill(self) -> None:
         if self.server_running:
@@ -4428,6 +4476,17 @@ class MainWindow(QMainWindow):
     def update_notification_count(self) -> None:
         self.stat_value.setText(
             str(self.notification_count)
+        )
+
+    def update_approval_count(self) -> None:
+        self.approval_stat_value.setText(str(self.approval_count))
+        detail = format_approval_type_counts(
+            self.approval_type_counts
+        )
+        self.approval_stat_detail.setText(detail)
+        self.approval_stat_detail.setToolTip(detail)
+        self.approval_stat_detail.setAccessibleName(
+            f"{self.approval_count} 已审批权限，{detail}"
         )
 
     # ------------------------------------------------------------------
@@ -4600,8 +4659,20 @@ class MainWindow(QMainWindow):
         decision: str,
     ) -> None:
         # 终端可能已先作答（broker 已 finish cancelled），避免覆盖
-        if not request.event.is_set():
-            request.finish(decision)
+        completed_here = (
+            not request.event.is_set()
+            and request.finish(decision)
+        )
+        if (
+            completed_here
+            and is_completed_approval_decision(decision)
+        ):
+            self.approval_count += 1
+            tool_name = request.tool_name
+            self.approval_type_counts[tool_name] = (
+                self.approval_type_counts.get(tool_name, 0) + 1
+            )
+            self.update_approval_count()
         self.active_popup = None
         self.update_pending_count()
 
