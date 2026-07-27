@@ -228,6 +228,54 @@ class StageCompletionPopupTests(unittest.TestCase):
         ):
             return MainWindow()
 
+    def test_popup_uses_active_space_following(self) -> None:
+        class RecordingPlatform(
+            claude_notify_server.PlatformServices
+        ):
+            def __init__(self) -> None:
+                super().__init__(claude_notify_server.SECRET_STORE)
+                self.follow_visibility = []
+                self.watch_visibility = []
+
+            def follow_active_space(self, window) -> bool:
+                self.follow_visibility.append(window.isVisible())
+                return True
+
+            def watch_active_space(self, window) -> bool:
+                self.watch_visibility.append(window.isVisible())
+                return True
+
+        platform = RecordingPlatform()
+        popup = None
+        with patch.object(
+            claude_notify_server,
+            "PLATFORM",
+            platform,
+        ):
+            try:
+                popup = StageCompletionPopup(
+                    "session-1",
+                    "/work/project",
+                )
+                self.assertEqual(
+                    platform.follow_visibility,
+                    [False],
+                )
+                self.assertEqual(
+                    platform.watch_visibility,
+                    [False],
+                )
+
+                popup.show()
+                self.app.processEvents()
+                self.assertIn(
+                    True,
+                    platform.follow_visibility,
+                )
+            finally:
+                if popup is not None:
+                    popup.close()
+
     def test_popup_is_topmost_and_closes_when_session_resumes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             window = self.make_window(
