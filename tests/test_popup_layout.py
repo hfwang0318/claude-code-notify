@@ -115,24 +115,69 @@ class PopupLayoutTests(unittest.TestCase):
 
 
 class MacSpaceBehaviorTests(unittest.TestCase):
-    def test_popup_joins_all_spaces_and_fullscreen_space(self) -> None:
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_popup_configures_space_behavior_before_first_show(self) -> None:
+        class RecordingPlatform(server.PlatformServices):
+            def __init__(self) -> None:
+                super().__init__(server.SECRET_STORE)
+                self.visibility: list[bool] = []
+                self.watch_visibility: list[bool] = []
+
+            def follow_active_space(self, window) -> bool:
+                self.visibility.append(window.isVisible())
+                return True
+
+            def watch_active_space(self, window) -> bool:
+                self.watch_visibility.append(window.isVisible())
+                return True
+
+        original_platform = server.PLATFORM
+        platform = RecordingPlatform()
+        server.PLATFORM = platform
+        popup = None
+        try:
+            request = server.ApprovalRequest(
+                {
+                    "tool_name": "Bash",
+                    "cwd": "/tmp/project",
+                    "message": "执行命令",
+                },
+                30,
+            )
+            popup = server.ApprovalPopup(request)
+
+            self.assertEqual(platform.visibility, [False])
+            self.assertEqual(platform.watch_visibility, [False])
+
+            popup.show()
+            self.app.processEvents()
+            self.assertIn(True, platform.visibility)
+        finally:
+            if popup is not None:
+                popup.close()
+            server.PLATFORM = original_platform
+
+    def test_popup_moves_to_active_and_fullscreen_space(self) -> None:
         unrelated_behavior = 1 << 4
         current = (
             unrelated_behavior
-            | server.MAC_COLLECTION_MOVE_TO_ACTIVE_SPACE
+            | server.MAC_COLLECTION_CAN_JOIN_ALL_SPACES
         )
 
         result = server.mac_popup_collection_behavior(current)
 
         self.assertTrue(
-            result & server.MAC_COLLECTION_CAN_JOIN_ALL_SPACES
+            result & server.MAC_COLLECTION_MOVE_TO_ACTIVE_SPACE
         )
         self.assertTrue(
             result & server.MAC_COLLECTION_FULL_SCREEN_AUXILIARY
         )
         self.assertTrue(result & unrelated_behavior)
         self.assertFalse(
-            result & server.MAC_COLLECTION_MOVE_TO_ACTIVE_SPACE
+            result & server.MAC_COLLECTION_CAN_JOIN_ALL_SPACES
         )
 
 
