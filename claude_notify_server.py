@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import (
+    QEvent,
     QObject,
     QPoint,
     Qt,
@@ -160,7 +161,25 @@ QLabel#kbd {
 
 QLabel#statValue { color: #F5F7FA; font-size: 20px; font-weight: 800; font-family: __FONT_MONO__; }
 QLabel#statLabel { color: #6B7280; font-size: 12px; }
-QLabel#statDetail { color: #A7AEB8; font-size: 11px; font-family: __FONT_MONO__; }
+QPushButton#approvalStatValue {
+    min-height: 26px;
+    color: #F5F7FA;
+    font-size: 20px;
+    font-weight: 800;
+    font-family: __FONT_MONO__;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0 8px;
+}
+QPushButton#approvalStatValue:hover {
+    color: #E98A6B;
+    background-color: rgba(217, 119, 87, 0.08);
+    border-color: rgba(217, 119, 87, 0.40);
+}
+QPushButton#approvalStatValue:pressed {
+    background-color: rgba(217, 119, 87, 0.14);
+}
 QLabel#statusK { color: #6B7280; font-size: 12px; }
 QLabel#statusV { color: #F5F7FA; font-size: 15px; font-weight: 750; font-family: __FONT_MONO__; }
 QLabel#statusOk { color: #43B581; }
@@ -326,6 +345,48 @@ QPushButton#approveTerminal { border-color: transparent; color: #6B7280; text-de
 QPushButton#approveTerminal:hover { color: #A7AEB8; background: transparent; }
 QPushButton#popupClose { background-color: transparent; border: none; color: #6B7280; font-size: 15px; padding: 2px 8px; }
 QPushButton#popupClose:hover { color: #F0A096; background: transparent; }
+
+/* ---------------- 审批统计浮层 ---------------- */
+QFrame#approvalStatsPopup {
+    background-color: #1B1F26;
+    border: 1px solid #3A414D;
+    border-radius: 10px;
+}
+QLabel#approvalStatsTitle {
+    color: #F5F7FA;
+    font-size: 14px;
+    font-weight: 750;
+}
+QLabel#approvalStatsTotal {
+    color: #E98A6B;
+    font-size: 12px;
+    font-family: __FONT_MONO__;
+}
+QScrollArea#approvalStatsScroll,
+QWidget#approvalStatsContainer {
+    background: transparent;
+    border: none;
+}
+QFrame#approvalStatsRow {
+    background-color: #14171D;
+    border: 1px solid #2A2F38;
+    border-radius: 7px;
+}
+QLabel#approvalStatsTool {
+    color: #C7CDD6;
+    font-size: 12px;
+    font-family: __FONT_MONO__;
+}
+QLabel#approvalStatsCount {
+    color: #F5F7FA;
+    font-size: 12px;
+    font-weight: 750;
+    font-family: __FONT_MONO__;
+}
+QLabel#approvalStatsEmpty {
+    color: #6B7280;
+    font-size: 12px;
+}
 
 /* ---------------- 通用 ---------------- */
 QMenu { background-color: #16191F; border: 1px solid #2A2F38; border-radius: 9px; padding: 4px; }
@@ -3858,6 +3919,115 @@ class ServerTestWorker(QObject):
 
 # ============================================================================
 
+
+class ApprovalStatsPopup(QFrame):
+    """点击审批总数后显示的明细浮层；失焦或点击外部时自动关闭。"""
+
+    MAX_HEIGHT = 360
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(
+            parent,
+            Qt.Popup | Qt.FramelessWindowHint,
+        )
+        self.setObjectName("approvalStatsPopup")
+        self.setFixedWidth(320)
+        self.setMaximumHeight(self.MAX_HEIGHT)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("已审批权限详细统计")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+
+        title = QLabel("已审批权限")
+        title.setObjectName("approvalStatsTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+
+        self.total_label = QLabel("共 0 次")
+        self.total_label.setObjectName("approvalStatsTotal")
+        header.addWidget(self.total_label)
+        layout.addLayout(header)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("approvalStatsScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff
+        )
+
+        self.container = QWidget()
+        self.container.setObjectName("approvalStatsContainer")
+        self.detail_layout = QVBoxLayout(self.container)
+        self.detail_layout.setContentsMargins(0, 0, 0, 0)
+        self.detail_layout.setSpacing(6)
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll)
+
+        self.update_stats(0, {})
+
+    def update_stats(
+        self,
+        total: int,
+        counts: dict[str, int],
+    ) -> None:
+        self.total_label.setText(f"共 {total} 次")
+
+        while self.detail_layout.count():
+            item = self.detail_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        visible_counts = [
+            (tool_name, count)
+            for tool_name, count in counts.items()
+            if count > 0
+        ]
+
+        if not visible_counts:
+            empty = QLabel("暂无审批记录")
+            empty.setObjectName("approvalStatsEmpty")
+            empty.setAlignment(Qt.AlignCenter)
+            self.detail_layout.addWidget(empty)
+        else:
+            for tool_name, count in visible_counts:
+                row = QFrame()
+                row.setObjectName("approvalStatsRow")
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(10, 7, 10, 7)
+                row_layout.setSpacing(10)
+
+                tool_label = QLabel(tool_name)
+                tool_label.setObjectName("approvalStatsTool")
+                tool_label.setToolTip(tool_name)
+                row_layout.addWidget(tool_label, stretch=1)
+
+                count_label = QLabel(f"x{count}")
+                count_label.setObjectName("approvalStatsCount")
+                row_layout.addWidget(count_label)
+                self.detail_layout.addWidget(row)
+
+        self.detail_layout.addStretch(1)
+        row_count = max(1, len(visible_counts))
+        self.setFixedHeight(
+            min(self.MAX_HEIGHT, 82 + row_count * 36)
+        )
+
+    def event(self, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.WindowDeactivate
+            and self.isVisible()
+        ):
+            self.close()
+        return super().event(event)
+
+
 class MainWindow(QMainWindow):
     request_server_stop = Signal()
 
@@ -4091,29 +4261,28 @@ class MainWindow(QMainWindow):
         header.addLayout(stat_box)
         header.addSpacing(16)
 
-        # 已完成审批计数 + 权限类型明细（仅统计本次运行期间）
+        # 已完成审批计数；点击数字后在浮层中查看权限类型明细。
         approval_stat_box = QVBoxLayout()
         approval_stat_box.setSpacing(0)
 
-        self.approval_stat_value = QLabel("0")
-        self.approval_stat_value.setObjectName("statValue")
-        self.approval_stat_value.setAlignment(Qt.AlignCenter)
+        self.approval_stat_value = QPushButton("0")
+        self.approval_stat_value.setObjectName("approvalStatValue")
+        self.approval_stat_value.setCursor(Qt.PointingHandCursor)
+        self.approval_stat_value.setToolTip("点击查看详细统计")
 
         approval_stat_label = QLabel("已审批权限")
         approval_stat_label.setObjectName("statLabel")
         approval_stat_label.setAlignment(Qt.AlignCenter)
 
-        self.approval_stat_detail = QLabel("暂无审批记录")
-        self.approval_stat_detail.setObjectName("statDetail")
-        self.approval_stat_detail.setAlignment(Qt.AlignCenter)
-        self.approval_stat_detail.setWordWrap(True)
-        self.approval_stat_detail.setMaximumWidth(280)
-
         approval_stat_box.addWidget(self.approval_stat_value)
         approval_stat_box.addWidget(approval_stat_label)
-        approval_stat_box.addWidget(self.approval_stat_detail)
         header.addLayout(approval_stat_box)
         header.addSpacing(10)
+
+        self.approval_stats_popup = ApprovalStatsPopup(self)
+        self.approval_stat_value.clicked.connect(
+            self.toggle_approval_stats_popup
+        )
 
         # 状态胶囊
         self.status_pill = QLabel("● 正在启动")
@@ -4483,11 +4652,59 @@ class MainWindow(QMainWindow):
         detail = format_approval_type_counts(
             self.approval_type_counts
         )
-        self.approval_stat_detail.setText(detail)
-        self.approval_stat_detail.setToolTip(detail)
-        self.approval_stat_detail.setAccessibleName(
-            f"{self.approval_count} 已审批权限，{detail}"
+        self.approval_stat_value.setAccessibleName(
+            f"{self.approval_count} 已审批权限，点击查看详细统计"
         )
+        self.approval_stat_value.setToolTip(
+            f"点击查看详细统计：{detail}"
+        )
+        self.approval_stats_popup.update_stats(
+            self.approval_count,
+            self.approval_type_counts,
+        )
+
+    @Slot()
+    def toggle_approval_stats_popup(self) -> None:
+        popup = self.approval_stats_popup
+        if popup.isVisible():
+            popup.close()
+            return
+
+        popup.update_stats(
+            self.approval_count,
+            self.approval_type_counts,
+        )
+
+        anchor = self.approval_stat_value.mapToGlobal(
+            QPoint(
+                self.approval_stat_value.width(),
+                self.approval_stat_value.height() + 6,
+            )
+        )
+        screen = QGuiApplication.screenAt(anchor) or self.screen()
+        available = screen.availableGeometry()
+
+        x = anchor.x() - popup.width()
+        y = anchor.y()
+        x = max(
+            available.left(),
+            min(x, available.right() - popup.width() + 1),
+        )
+        if y + popup.height() > available.bottom() + 1:
+            above = self.approval_stat_value.mapToGlobal(
+                QPoint(0, -popup.height() - 6)
+            )
+            y = above.y()
+        y = max(
+            available.top(),
+            min(y, available.bottom() - popup.height() + 1),
+        )
+
+        popup.move(x, y)
+        popup.show()
+        popup.raise_()
+        popup.activateWindow()
+        popup.setFocus(Qt.PopupFocusReason)
 
     # ------------------------------------------------------------------
     # 服务控制
