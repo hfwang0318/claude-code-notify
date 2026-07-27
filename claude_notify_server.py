@@ -9,6 +9,9 @@ Claude Code Notify - 跨平台托盘通知服务（审批弹窗版）
                          供服务器端 PreToolUse 钩子回传 permissionDecision
 - POST /claude-approval-resolved
                          hook 观察到终端已处理后，关闭对应桌面弹窗
+- POST /claude-stage-status
+                         Stop 时显示阶段完成置顶提醒，
+                         UserPromptSubmit 时关闭同会话提醒
 - GET  /health           健康检查
 
 数据目录 ~/.claude-notify/ 沿用（Token 不变，服务器端配置无需改动）。
@@ -93,6 +96,7 @@ PORT = 18765
 NOTIFY_PATH = "/claude-notify"
 APPROVAL_PATH = "/claude-approval"
 APPROVAL_RESOLVED_PATH = "/claude-approval-resolved"
+STAGE_STATUS_PATH = "/claude-stage-status"
 HEALTH_PATH = "/health"
 
 MAX_REQUEST_SIZE = 1024 * 1024
@@ -388,6 +392,36 @@ QLabel#approvalStatsEmpty {
     font-size: 12px;
 }
 
+/* ---------------- 阶段完成提醒 ---------------- */
+QWidget#stageCompletionPopupRoot { background: transparent; }
+QFrame#stageCompletionCard {
+    background-color: rgba(28, 25, 23, 0.98);
+    border: 1px solid #3A414D;
+    border-left: 3px solid #43B581;
+    border-radius: 14px;
+}
+QLabel#stageCompletionKicker {
+    color: #8FE0B6;
+    font-family: __FONT_MONO__;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+}
+QLabel#stageCompletionTitle {
+    color: #F5F7FA;
+    font-size: 20px;
+    font-weight: 850;
+}
+QLabel#stageCompletionDesc {
+    color: #A7AEB8;
+    font-size: 13px;
+}
+QLabel#stageCompletionProject {
+    color: #6B7280;
+    font-size: 12px;
+    font-family: __FONT_MONO__;
+}
+
 /* ---------------- 通用 ---------------- */
 QMenu { background-color: #16191F; border: 1px solid #2A2F38; border-radius: 9px; padding: 4px; }
 QMenu::item { padding: 6px 24px; border-radius: 5px; color: #A7AEB8; }
@@ -592,17 +626,20 @@ def merge_settings_json(
     hook_timeout: int = 300,
     matcher: str = "",
     question_entry: Optional[dict[str, Any]] = None,
+    stage_entry: Optional[dict[str, Any]] = None,
 ) -> str:
     """
     把所选模式的钩子合并进现有 settings.json（幂等）：
-    - PreToolUse、PermissionRequest、Notification
-      三个分区里，凡引用我们两种钩子脚本的条目全部移除
+    - PreToolUse、PermissionRequest、Notification、Stop、UserPromptSubmit
+      分区里，凡引用我们两种钩子脚本的条目全部移除
     - 再按所选模式追加最新配置：
       popup  → PermissionRequest（只在真正弹权限框时触发，误判少）
       notify → Notification（单向提醒）
     - popup 模式且提供 question_entry 时，额外向 PreToolUse 写入
       matcher="" 的关联/代答钩子：普通工具只记录官方 tool_use_id 后退出，
       AskUserQuestion 则继续走桌面代答
+    - 提供 stage_entry 时，无论通知方式如何，都向 Stop 与
+      UserPromptSubmit 写入阶段状态钩子
     - 其他钩子与设置原样保留
 
     hook_entry / question_entry 是不含 timeout 的 handler 字典，支持两种形态：
@@ -633,6 +670,8 @@ def merge_settings_json(
         "PreToolUse",
         "PermissionRequest",
         "Notification",
+        "Stop",
+        "UserPromptSubmit",
     ):
         entries = hooks.get(section_name)
         if isinstance(entries, list):
@@ -659,6 +698,15 @@ def merge_settings_json(
         pre_section.append(
             {"matcher": "", "hooks": [q_entry]}
         )
+
+    if stage_entry is not None:
+        for stage_section_name in ("Stop", "UserPromptSubmit"):
+            status_entry = dict(stage_entry)
+            status_entry["timeout"] = 15
+            stage_section = hooks.setdefault(stage_section_name, [])
+            stage_section.append(
+                {"matcher": "", "hooks": [status_entry]}
+            )
 
     return json.dumps(settings, ensure_ascii=False, indent=2) + "\n"
 
@@ -1272,6 +1320,7 @@ class HttpEventBridge(QObject):
     log_received = Signal(str, str)  # level, message
     approval_received = Signal(object)  # ApprovalRequest
     approval_cancelled = Signal(object)  # ApprovalRequest（终端先作答/断连）
+    stage_status_received = Signal(object)  # completed / resumed
     service_state_changed = Signal(bool, str)
 
 
@@ -1524,6 +1573,14 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
                 self.handle_approval_resolved(data)
             return
 
+        if self.path == STAGE_STATUS_PATH:
+            if not self.authenticate():
+                return
+            data = self.read_json_body()
+            if data is not None:
+                self.handle_stage_status(data)
+            return
+
         self.send_json(404, {"error": "not_found"})
 
     # ------------------------------------------------------------------
@@ -1608,6 +1665,32 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
             )
 
         return title, "\n".join(body_parts)
+
+    # ------------------------------------------------------------------
+    # 阶段完成提醒（始终由独立置顶弹窗展示）
+    # ------------------------------------------------------------------
+
+    def handle_stage_status(self, data: dict[str, Any]) -> None:
+        status = safe_string(data.get("status"))
+        session_id = safe_string(data.get("session_id"))
+        if status not in {"completed", "resumed"}:
+            self.send_json(400, {"error": "invalid_stage_status"})
+            return
+        if not session_id:
+            self.send_json(400, {"error": "session_id_required"})
+            return
+
+        payload = dict(data)
+        payload["status"] = status
+        payload["session_id"] = session_id
+        self.notify_server.bridge.stage_status_received.emit(payload)
+        self.notify_server.bridge.log_received.emit(
+            "notify" if status == "completed" else "info",
+            "阶段状态："
+            f"status={status}, session={session_id[:16]}, "
+            f"remote={self.client_address[0]}",
+        )
+        self.send_json(200, {"status": "ok"})
 
     # ------------------------------------------------------------------
     # 双向审批（长轮询：挂起请求直到用户点击或超时）
@@ -3087,6 +3170,7 @@ class DeployWorker(QObject):
             env_pairs: dict[str, Any] = {
                 "CLAUDE_NOTIFY_TOKEN": cfg["token"],
                 "CLAUDE_APPROVAL_URL": f"{base_url}{APPROVAL_PATH}",
+                "CLAUDE_STAGE_URL": f"{base_url}{STAGE_STATUS_PATH}",
                 "CLAUDE_APPROVAL_TIMEOUT": cfg["approval_timeout"],
                 # PreToolUse 记录 tool_use_id；AskUserQuestion 同时走代答
                 "CLAUDE_ASKUSER_CHANNEL": "pretooluse",
@@ -3099,6 +3183,7 @@ class DeployWorker(QObject):
             env_pairs = {
                 "CLAUDE_NOTIFY_TOKEN": cfg["token"],
                 "CLAUDE_NOTIFY_URL": f"{base_url}{NOTIFY_PATH}",
+                "CLAUDE_STAGE_URL": f"{base_url}{STAGE_STATUS_PATH}",
             }
 
         hook_command = build_hook_command(env_pairs, script_name)
@@ -3111,6 +3196,7 @@ class DeployWorker(QObject):
             hook_timeout=cfg["hook_timeout"],
             # 同一脚本按 hook_event_name 区分事件，代答钩子复用同一命令
             question_entry={"type": "command", "command": hook_command},
+            stage_entry={"type": "command", "command": hook_command},
         )
 
         sftp = client.open_sftp()
@@ -4271,6 +4357,111 @@ class ApprovalStatsPopup(QFrame):
         return super().event(event)
 
 
+class StageCompletionPopup(QWidget):
+    dismissed = Signal(str)
+
+    def __init__(
+        self,
+        session_id: str,
+        cwd: str = "",
+        screen_mode: str = "primary",
+    ) -> None:
+        super().__init__(
+            None,
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.Tool,
+        )
+        self.session_id = session_id
+        self.cwd = cwd
+        self.screen_mode = screen_mode
+
+        self.setObjectName("stageCompletionPopupRoot")
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedWidth(460)
+        self.setAccessibleName("Claude 阶段完成提醒")
+        self.build_ui()
+
+        # 与审批弹窗保持一致：在 macOS 首次显示前预配置原生窗口，
+        # 并在切换 Space 后主动迁入当前桌面。
+        PLATFORM.follow_active_space(self)
+        PLATFORM.watch_active_space(self)
+        QApplication.beep()
+
+    @property
+    def project_name(self) -> str:
+        if not self.cwd:
+            return "未知项目"
+        normalized = self.cwd.rstrip("/\\")
+        return os.path.basename(normalized) or normalized
+
+    def build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setObjectName("stageCompletionCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 14, 16, 16)
+        layout.setSpacing(9)
+
+        top_row = QHBoxLayout()
+        kicker = QLabel("STAGE COMPLETED")
+        kicker.setObjectName("stageCompletionKicker")
+        top_row.addWidget(kicker)
+        top_row.addStretch()
+
+        close_button = QPushButton("✕")
+        close_button.setObjectName("popupClose")
+        close_button.setToolTip("关闭提醒")
+        close_button.setAccessibleName("关闭阶段完成提醒")
+        close_button.clicked.connect(self.close)
+        top_row.addWidget(close_button)
+        layout.addLayout(top_row)
+
+        title = QLabel("Claude 已完成当前阶段的工作")
+        title.setObjectName("stageCompletionTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        desc = QLabel("请回到终端查看结果并继续处理。开始下一轮对话后，本提醒会自动关闭。")
+        desc.setObjectName("stageCompletionDesc")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        project = QLabel(
+            f"{self.project_name} · 会话 {self.session_id[:16]}"
+        )
+        project.setObjectName("stageCompletionProject")
+        project.setToolTip(self.cwd or self.session_id)
+        layout.addWidget(project)
+
+        outer.addWidget(card)
+
+    def move_to_corner(self, stack_index: int = 0) -> None:
+        self.adjustSize()
+        screen = pick_popup_screen(self.screen_mode)
+        if screen is None:
+            return
+        geometry = screen.availableGeometry()
+        x = geometry.right() - self.width() - 16
+        y = geometry.bottom() - self.height() - 16
+        y -= stack_index * (self.height() + 12)
+        self.move(x, max(geometry.top() + 16, y))
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(
+            0,
+            lambda: PLATFORM.follow_active_space(self),
+        )
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.dismissed.emit(self.session_id)
+        super().closeEvent(event)
+
+
 class MainWindow(QMainWindow):
     request_server_stop = Signal()
 
@@ -4283,7 +4474,13 @@ class MainWindow(QMainWindow):
         self.approval_count = 0
         self.approval_type_counts: dict[str, int] = {}
         self.token_visible = False
-        self.popup_screen_mode = self.load_ui_config()
+        ui_config = self.load_ui_config()
+        self.popup_screen_mode = str(
+            ui_config.get("popup_screen", "primary")
+        )
+        self.stage_completion_enabled = bool(
+            ui_config.get("stage_completion_enabled", False)
+        )
 
         self.token = load_or_create_token()
         self.local_ip = get_local_ip()
@@ -4297,6 +4494,7 @@ class MainWindow(QMainWindow):
         self.pending_approvals: deque[ApprovalRequest] = deque()
         self.active_popup: Optional[ApprovalPopup] = None
         self.missed_approvals = 0
+        self.stage_completion_popups: dict[str, StageCompletionPopup] = {}
 
         self.setWindowTitle(APP_NAME)
         self.resize(1200, 800)
@@ -4323,24 +4521,34 @@ class MainWindow(QMainWindow):
     # 本地界面配置（弹窗位置等）
     # ------------------------------------------------------------------
 
-    def load_ui_config(self) -> str:
+    def load_ui_config(self) -> dict[str, Any]:
         try:
             if UI_CONFIG_FILE.exists():
                 config = json.loads(
                     UI_CONFIG_FILE.read_text(encoding="utf-8")
                 )
-                mode = config.get("popup_screen")
-                if mode in POPUP_SCREEN_MODES:
-                    return str(mode)
+                if isinstance(config, dict):
+                    mode = config.get("popup_screen")
+                    if mode not in POPUP_SCREEN_MODES:
+                        config["popup_screen"] = "primary"
+                    return config
         except (OSError, json.JSONDecodeError):
             pass
-        return "primary"
+        return {
+            "popup_screen": "primary",
+            "stage_completion_enabled": False,
+        }
 
     def save_ui_config(self) -> None:
         try:
             UI_CONFIG_FILE.write_text(
                 json.dumps(
-                    {"popup_screen": self.popup_screen_mode},
+                    {
+                        "popup_screen": self.popup_screen_mode,
+                        "stage_completion_enabled": (
+                            self.stage_completion_enabled
+                        ),
+                    },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -4358,6 +4566,19 @@ class MainWindow(QMainWindow):
         self.save_ui_config()
         self.show_toast(
             f"审批弹窗将出现在：{POPUP_SCREEN_MODES[mode]}"
+        )
+        self.reposition_stage_completion_popups()
+
+    @Slot(bool)
+    def on_stage_completion_toggled(self, enabled: bool) -> None:
+        self.stage_completion_enabled = enabled
+        self.save_ui_config()
+        if not enabled:
+            self.dismiss_all_stage_completion_popups()
+        self.show_toast(
+            "已开启阶段完成置顶提醒"
+            if enabled
+            else "已关闭阶段完成置顶提醒"
         )
 
     # ------------------------------------------------------------------
@@ -4633,6 +4854,18 @@ class MainWindow(QMainWindow):
         screen_row.addWidget(self.popup_screen_combo, stretch=1)
         layout.addLayout(screen_row)
 
+        self.stage_completion_check = QCheckBox(
+            "Claude 完成当前阶段时显示置顶提醒"
+        )
+        self.stage_completion_check.setChecked(
+            self.stage_completion_enabled
+        )
+        self.stage_completion_check.setToolTip(
+            "该提醒独立于“系统通知中心/权限审批弹窗”的通知方式，"
+            "会一直置顶显示，直到手动关闭或在终端开始下一轮对话。"
+        )
+        layout.addWidget(self.stage_completion_check)
+
         test_row = QHBoxLayout()
         self.test_notification_button = QPushButton("测试通知")
         self.test_approval_button = QPushButton("测试审批弹窗")
@@ -4714,6 +4947,9 @@ class MainWindow(QMainWindow):
         self.endpoint_edit.setAccessibleName("通知接口地址")
         self.token_edit.setAccessibleName("访问 Token")
         self.popup_screen_combo.setAccessibleName("审批弹窗屏幕策略")
+        self.stage_completion_check.setAccessibleName(
+            "Claude 阶段完成置顶提醒"
+        )
         self.deploy_button.setAccessibleName("部署到服务器")
         self.local_deploy_button.setAccessibleName("接入本机 Claude Code")
         self.test_approval_button.setAccessibleName("测试审批弹窗")
@@ -4724,6 +4960,7 @@ class MainWindow(QMainWindow):
             self.copy_token_button,
             self.regenerate_token_button,
             self.popup_screen_combo,
+            self.stage_completion_check,
             self.deploy_button,
             self.local_deploy_button,
             self.test_notification_button,
@@ -4738,7 +4975,14 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.show_token_button, self.copy_token_button)
         self.setTabOrder(self.copy_token_button, self.regenerate_token_button)
         self.setTabOrder(self.regenerate_token_button, self.popup_screen_combo)
-        self.setTabOrder(self.popup_screen_combo, self.deploy_button)
+        self.setTabOrder(
+            self.popup_screen_combo,
+            self.stage_completion_check,
+        )
+        self.setTabOrder(
+            self.stage_completion_check,
+            self.deploy_button,
+        )
         self.setTabOrder(self.deploy_button, self.local_deploy_button)
         self.setTabOrder(self.local_deploy_button, self.test_notification_button)
         self.setTabOrder(self.test_notification_button, self.test_approval_button)
@@ -4818,6 +5062,9 @@ class MainWindow(QMainWindow):
         self.popup_screen_combo.currentIndexChanged.connect(
             self.on_popup_screen_changed
         )
+        self.stage_completion_check.toggled.connect(
+            self.on_stage_completion_toggled
+        )
 
         self.test_notification_button.clicked.connect(
             self.show_test_notification
@@ -4848,6 +5095,9 @@ class MainWindow(QMainWindow):
         )
         self.bridge.approval_cancelled.connect(
             self.on_approval_cancelled
+        )
+        self.bridge.stage_status_received.connect(
+            self.on_stage_status_received
         )
 
     # ------------------------------------------------------------------
@@ -5052,6 +5302,89 @@ class MainWindow(QMainWindow):
         self.append_log("info", "HTTP 服务已停止")
 
     # ------------------------------------------------------------------
+    # 阶段完成置顶提醒
+    # ------------------------------------------------------------------
+
+    @Slot(object)
+    def on_stage_status_received(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        status = safe_string(payload.get("status"))
+        session_id = safe_string(payload.get("session_id"))
+        if not session_id:
+            return
+
+        if status == "resumed":
+            popup = self.stage_completion_popups.pop(
+                session_id,
+                None,
+            )
+            if popup is not None:
+                popup.close()
+                self.reposition_stage_completion_popups()
+                self.append_log(
+                    "info",
+                    "用户已回到终端继续对话，阶段完成提醒自动关闭："
+                    f"session={session_id[:16]}",
+                )
+            return
+
+        if status != "completed":
+            return
+        if not self.stage_completion_enabled:
+            self.append_log(
+                "info",
+                "阶段完成提醒未开启，本次不弹窗："
+                f"session={session_id[:16]}",
+            )
+            return
+
+        existing = self.stage_completion_popups.get(session_id)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+
+        popup = StageCompletionPopup(
+            session_id=session_id,
+            cwd=safe_string(payload.get("cwd")),
+            screen_mode=self.popup_screen_mode,
+        )
+        popup.dismissed.connect(self.on_stage_popup_dismissed)
+        self.stage_completion_popups[session_id] = popup
+        self.reposition_stage_completion_popups()
+        popup.show()
+        popup.raise_()
+        popup.activateWindow()
+        self.append_log(
+            "notify",
+            "Claude 已完成当前阶段，已显示置顶提醒："
+            f"session={session_id[:16]}, project={popup.project_name}",
+        )
+
+    @Slot(str)
+    def on_stage_popup_dismissed(self, session_id: str) -> None:
+        popup = self.sender()
+        current = self.stage_completion_popups.get(session_id)
+        if current is popup:
+            self.stage_completion_popups.pop(session_id, None)
+            self.reposition_stage_completion_popups()
+
+    def reposition_stage_completion_popups(self) -> None:
+        for index, popup in enumerate(
+            self.stage_completion_popups.values()
+        ):
+            popup.screen_mode = self.popup_screen_mode
+            popup.move_to_corner(index)
+
+    def dismiss_all_stage_completion_popups(self) -> None:
+        popups = list(self.stage_completion_popups.values())
+        self.stage_completion_popups.clear()
+        for popup in popups:
+            popup.close()
+
+    # ------------------------------------------------------------------
     # 审批弹窗队列
     # ------------------------------------------------------------------
 
@@ -5248,6 +5581,7 @@ class MainWindow(QMainWindow):
             env_pairs: dict[str, Any] = {
                 "CLAUDE_NOTIFY_TOKEN": self.token,
                 "CLAUDE_APPROVAL_URL": f"{base_url}{APPROVAL_PATH}",
+                "CLAUDE_STAGE_URL": f"{base_url}{STAGE_STATUS_PATH}",
                 "CLAUDE_APPROVAL_TIMEOUT": 240,
                 # 标记 AskUserQuestion 走 PreToolUse 代答通道，
                 # 钩子在 PermissionRequest 事件下会对该工具让位
@@ -5257,6 +5591,7 @@ class MainWindow(QMainWindow):
             env_pairs = {
                 "CLAUDE_NOTIFY_TOKEN": self.token,
                 "CLAUDE_NOTIFY_URL": f"{base_url}{NOTIFY_PATH}",
+                "CLAUDE_STAGE_URL": f"{base_url}{STAGE_STATUS_PATH}",
             }
 
         # Windows 用 exec form（解释器绝对路径 + args），不经过 shell、
@@ -5269,6 +5604,7 @@ class MainWindow(QMainWindow):
             hook_timeout=300,
             # 同一脚本按事件区分关联 observer 与审批/代答
             question_entry=hook_entry,
+            stage_entry=hook_entry,
         )
         settings_path.write_text(merged, encoding="utf-8")
         self.append_log("notify", f"本机 settings.json 已合并（{DEPLOY_MODES[mode]}）")
@@ -5624,6 +5960,7 @@ class MainWindow(QMainWindow):
 
         # 唤醒所有挂起的审批请求，避免服务器钩子长时间等待
         self.dismiss_all_approvals()
+        self.dismiss_all_stage_completion_popups()
 
         app = QApplication.instance()
         stopped = self.stop_local_server(timeout_ms=6000)
