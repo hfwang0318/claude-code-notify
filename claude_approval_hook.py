@@ -56,6 +56,8 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
     CLAUDE_APPROVAL_RESOLUTION_URL
                              可选，默认与审批 URL 同主机的
                              /claude-approval-resolved
+    CLAUDE_STAGE_URL         可选，默认与审批 URL 同主机的
+                             /claude-stage-status
     CLAUDE_APPROVAL_TIMEOUT  可选，秒，默认 240（须小于钩子的 timeout）
     CLAUDE_APPROVAL_MATCHER  可选，逗号分隔的工具名，只对匹配的工具转发；
                              默认全部转发。例：Bash,Edit,Write
@@ -114,6 +116,10 @@ RESOLUTION_URL = cfg(
     "CLAUDE_APPROVAL_RESOLUTION_URL",
     WINDOWS_URL.rsplit("/", 1)[0] + "/claude-approval-resolved",
 )
+STAGE_URL = cfg(
+    "CLAUDE_STAGE_URL",
+    WINDOWS_URL.rsplit("/", 1)[0] + "/claude-stage-status",
+)
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 
@@ -126,6 +132,29 @@ MATCHED_TOOLS = {
 def note(message: str) -> None:
     """诊断信息写 stderr：不污染 stdout 协议输出，claude --debug 可见。"""
     print(f"[claude-approval-hook] {message}", file=sys.stderr)
+
+
+def notify_stage_status(hook_input: dict, status: str) -> None:
+    """单向上报阶段完成/继续状态；失败不影响 Claude Code。"""
+    payload = {
+        "status": status,
+        "session_id": hook_input.get("session_id"),
+        "cwd": hook_input.get("cwd"),
+        "transcript_path": hook_input.get("transcript_path"),
+    }
+    request = urllib.request.Request(
+        STAGE_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except Exception as exc:
+        note(f"请求 {STAGE_URL} 失败：{exc}")
 
 
 def data_dir() -> str:
@@ -593,6 +622,19 @@ def main() -> None:
 
     event = hook_input.get("hook_event_name") or ""
     tool_name = hook_input.get("tool_name") or ""
+
+    if event in {"Stop", "UserPromptSubmit"}:
+        if not TOKEN:
+            note(
+                "缺少 CLAUDE_NOTIFY_TOKEN（环境变量与 "
+                f"{CONFIG_PATH} 均未配置），跳过阶段状态上报"
+            )
+            sys.exit(0)
+        notify_stage_status(
+            hook_input,
+            "completed" if event == "Stop" else "resumed",
+        )
+        sys.exit(0)
 
     # PermissionRequest 通道下 AskUserQuestion 让位给 PreToolUse 代答
     # （部署时 PreToolUse observer 以 CLAUDE_ASKUSER_CHANNEL 标记）——
