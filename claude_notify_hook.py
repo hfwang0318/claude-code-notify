@@ -16,6 +16,8 @@ Claude Code Notification 钩子：把通知单向 POST 到 Windows 托盘应用�
 环境变量 / 配置文件键：
     CLAUDE_NOTIFY_TOKEN   必填，Windows 端显示的 Token
     CLAUDE_NOTIFY_URL     可选，默认 http://localhost:18765/claude-notify
+    CLAUDE_STAGE_URL      可选，默认与通知 URL 同主机的
+                          /claude-stage-status
 """
 
 import json
@@ -55,12 +57,39 @@ WINDOWS_URL = cfg(
     "http://localhost:18765/claude-notify",
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
+STAGE_URL = cfg(
+    "CLAUDE_STAGE_URL",
+    WINDOWS_URL.rsplit("/", 1)[0] + "/claude-stage-status",
+)
 TIMEOUT = 10
 
 
 def note(message: str) -> None:
     """诊断信息写 stderr：不污染 stdout 协议输出，claude --debug 可见。"""
     print(f"[claude-notify-hook] {message}", file=sys.stderr)
+
+
+def notify_stage_status(hook_input: dict, status: str) -> None:
+    """单向上报阶段完成/继续状态；失败不影响 Claude Code。"""
+    payload = {
+        "status": status,
+        "session_id": hook_input.get("session_id"),
+        "cwd": hook_input.get("cwd"),
+        "transcript_path": hook_input.get("transcript_path"),
+    }
+    request = urllib.request.Request(
+        STAGE_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT):
+            pass
+    except Exception as exc:
+        note(f"请求 {STAGE_URL} 失败：{exc}")
 
 
 def main() -> None:
@@ -74,6 +103,14 @@ def main() -> None:
         note(
             "缺少 CLAUDE_NOTIFY_TOKEN（环境变量与 "
             f"{CONFIG_PATH} 均未配置），跳过本次通知"
+        )
+        sys.exit(0)
+
+    event = hook_input.get("hook_event_name") or ""
+    if event in {"Stop", "UserPromptSubmit"}:
+        notify_stage_status(
+            hook_input,
+            "completed" if event == "Stop" else "resumed",
         )
         sys.exit(0)
 
