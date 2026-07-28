@@ -1,4 +1,5 @@
 """Stage-completion popup view."""
+from typing import Any, Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -12,6 +13,7 @@ class StageCompletionPopup(QWidget):
         session_id: str,
         cwd: str = "",
         screen_mode: str = "primary",
+        denial_risk: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             None,
@@ -22,6 +24,7 @@ class StageCompletionPopup(QWidget):
         self.session_id = session_id
         self.cwd = cwd
         self.screen_mode = screen_mode
+        self.denial_risk = denial_risk or {}
 
         self.setObjectName("stageCompletionPopupRoot")
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -54,7 +57,10 @@ class StageCompletionPopup(QWidget):
         layout.setSpacing(9)
 
         top_row = QHBoxLayout()
-        kicker = QLabel("STAGE COMPLETED")
+        has_risk = bool(self.denial_risk)
+        kicker = QLabel(
+            "AUTO MODE RISK" if has_risk else "STAGE COMPLETED"
+        )
         kicker.setObjectName("stageCompletionKicker")
         top_row.addWidget(kicker)
         top_row.addStretch()
@@ -67,12 +73,35 @@ class StageCompletionPopup(QWidget):
         top_row.addWidget(close_button)
         layout.addLayout(top_row)
 
-        title = QLabel("Claude 已完成当前阶段的工作")
+        title = QLabel(
+            "Claude 可能因权限拒绝而未完成任务"
+            if has_risk
+            else "Claude 已完成当前阶段的工作"
+        )
         title.setObjectName("stageCompletionTitle")
         title.setWordWrap(True)
         layout.addWidget(title)
 
-        desc = QLabel("请回到终端查看结果并继续处理。开始下一轮对话后，本提醒会自动关闭。")
+        if has_risk:
+            tool_name = str(
+                self.denial_risk.get("last_tool_name") or "未知工具"
+            )
+            reason = str(
+                self.denial_risk.get("last_reason") or "未提供拒绝原因"
+            )
+            count = int(self.denial_risk.get("count") or 0)
+            desc_text = (
+                f"本轮仍有 {count} 次 Auto mode 拒绝未确认恢复。"
+                f"\n最后被阻止：{tool_name}"
+                f"\n原因：{reason[:220]}"
+                "\n请回到终端检查任务是否完整。"
+            )
+        else:
+            desc_text = (
+                "请回到终端查看结果并继续处理。开始下一轮对话后，"
+                "本提醒会自动关闭。"
+            )
+        desc = QLabel(desc_text)
         desc.setObjectName("stageCompletionDesc")
         desc.setWordWrap(True)
         layout.addWidget(desc)
