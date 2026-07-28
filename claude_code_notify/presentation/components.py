@@ -193,3 +193,118 @@ class ApprovalStatsPopup(QFrame):
         ):
             self.close()
         return super().event(event)
+
+
+class DenialStatsPopup(QFrame):
+    """Auto mode 拒绝明细；按拒绝指纹聚合并展示恢复状态。"""
+
+    MAX_HEIGHT = 420
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(
+            parent,
+            Qt.Popup | Qt.FramelessWindowHint,
+        )
+        self.setObjectName("approvalStatsPopup")
+        self.setFixedWidth(420)
+        self.setMaximumHeight(self.MAX_HEIGHT)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("Auto mode 拒绝详细统计")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("Auto mode 拒绝")
+        title.setObjectName("approvalStatsTitle")
+        header.addWidget(title)
+        header.addStretch(1)
+        self.total_label = QLabel("共 0 次")
+        self.total_label.setObjectName("approvalStatsTotal")
+        header.addWidget(self.total_label)
+        layout.addLayout(header)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("approvalStatsScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.container = QWidget()
+        self.container.setObjectName("approvalStatsContainer")
+        self.detail_layout = QVBoxLayout(self.container)
+        self.detail_layout.setContentsMargins(0, 0, 0, 0)
+        self.detail_layout.setSpacing(6)
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll)
+        self.update_stats(0, [])
+
+    def update_stats(
+        self,
+        total: int,
+        records: list[dict],
+    ) -> None:
+        self.total_label.setText(f"共 {total} 次")
+        while self.detail_layout.count():
+            item = self.detail_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+        if not records:
+            empty = QLabel("暂无拒绝记录")
+            empty.setObjectName("approvalStatsEmpty")
+            empty.setAlignment(Qt.AlignCenter)
+            self.detail_layout.addWidget(empty)
+        else:
+            for record in records:
+                row = QFrame()
+                row.setObjectName("approvalStatsRow")
+                row_layout = QVBoxLayout(row)
+                row_layout.setContentsMargins(10, 7, 10, 7)
+                row_layout.setSpacing(3)
+
+                top = QHBoxLayout()
+                tool = QLabel(str(record.get("tool_name") or "未知工具"))
+                tool.setObjectName("approvalStatsTool")
+                top.addWidget(tool, stretch=1)
+                status = (
+                    "已恢复"
+                    if record.get("recovered")
+                    else (
+                        "已询问"
+                        if record.get("escalated")
+                        else "Agent 调整中"
+                    )
+                )
+                count = QLabel(f"x{record.get('count', 1)} · {status}")
+                count.setObjectName("approvalStatsCount")
+                top.addWidget(count)
+                row_layout.addLayout(top)
+
+                detail = str(record.get("detail") or "").strip()
+                reason = str(record.get("reason") or "").strip()
+                summary = detail or reason
+                if summary:
+                    label = QLabel(summary[:240])
+                    label.setObjectName("approvalStatsEmpty")
+                    label.setWordWrap(True)
+                    label.setToolTip(
+                        "\n".join(part for part in (detail, reason) if part)
+                    )
+                    row_layout.addWidget(label)
+                self.detail_layout.addWidget(row)
+
+        self.detail_layout.addStretch(1)
+        row_count = max(1, len(records))
+        self.setFixedHeight(
+            min(self.MAX_HEIGHT, 82 + row_count * 78)
+        )
+
+    def event(self, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.WindowDeactivate
+            and self.isVisible()
+        ):
+            self.close()
+        return super().event(event)
