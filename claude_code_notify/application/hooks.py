@@ -74,14 +74,16 @@ def merge_settings_json(
 ) -> str:
     """
     把所选模式的钩子合并进现有 settings.json（幂等）：
-    - PreToolUse、PermissionRequest、Notification、Stop、UserPromptSubmit
+    - PreToolUse、PostToolUse、PermissionRequest、PermissionDenied、
+      Notification、Stop、UserPromptSubmit
       分区里，凡引用我们两种钩子脚本的条目全部移除
     - 再按所选模式追加最新配置：
       popup  → PermissionRequest（只在真正弹权限框时触发，误判少）
       notify → Notification（单向提醒）
     - popup 模式且提供 question_entry 时，额外向 PreToolUse 写入
       matcher="" 的关联/代答钩子：普通工具只记录官方 tool_use_id 后退出，
-      AskUserQuestion 则继续走桌面代答
+      AskUserQuestion 则继续走桌面代答；同时注册 PermissionDenied 做
+      分级介入、注册 PostToolUse 检测恢复
     - 提供 stage_entry 时，无论通知方式如何，都向 Stop 与
       UserPromptSubmit 写入阶段状态钩子
     - 其他钩子与设置原样保留
@@ -112,7 +114,9 @@ def merge_settings_json(
     # 清除两种脚本在所有相关分区里的旧配置
     for section_name in (
         "PreToolUse",
+        "PostToolUse",
         "PermissionRequest",
+        "PermissionDenied",
         "Notification",
         "Stop",
         "UserPromptSubmit",
@@ -141,6 +145,20 @@ def merge_settings_json(
         pre_section = hooks.setdefault("PreToolUse", [])
         pre_section.append(
             {"matcher": "", "hooks": [q_entry]}
+        )
+
+        # Auto mode 拒绝感知：拒绝事件由同一脚本记录并按重复次数升级；
+        # PostToolUse 用于判断 Agent 是否已通过安全替代方案恢复。
+        denied_entry = dict(question_entry)
+        denied_entry["timeout"] = hook_timeout
+        hooks.setdefault("PermissionDenied", []).append(
+            {"matcher": matcher, "hooks": [denied_entry]}
+        )
+
+        post_entry = dict(question_entry)
+        post_entry["timeout"] = 15
+        hooks.setdefault("PostToolUse", []).append(
+            {"matcher": "", "hooks": [post_entry]}
         )
 
     if stage_entry is not None:
