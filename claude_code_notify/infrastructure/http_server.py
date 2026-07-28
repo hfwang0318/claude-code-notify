@@ -12,8 +12,9 @@ from typing import Any, Optional
 from PySide6.QtCore import QObject, Signal, Slot
 from ..config import (
     APPROVAL_PATH, APPROVAL_RESOLVED_PATH, DEDUP_SECONDS,
-    DEFAULT_APPROVAL_TIMEOUT, HEALTH_PATH, HOST, MAX_APPROVAL_TIMEOUT,
-    MAX_REQUEST_SIZE, NOTIFY_PATH, PORT, STAGE_STATUS_PATH,
+    DEFAULT_APPROVAL_TIMEOUT, DENIAL_PATH, HEALTH_PATH, HOST,
+    MAX_APPROVAL_TIMEOUT, MAX_REQUEST_SIZE, NOTIFY_PATH, PORT,
+    STAGE_STATUS_PATH,
 )
 from ..core import safe_string
 from ..domain.approval import ApprovalRequest, unknown_suggestion_types
@@ -23,6 +24,7 @@ class HttpEventBridge(QObject):
     log_received = Signal(str, str)  # level, message
     approval_received = Signal(object)  # ApprovalRequest
     approval_cancelled = Signal(object)  # ApprovalRequest（终端先作答/断连）
+    denial_received = Signal(object)  # Auto mode denied / recovered
     stage_status_received = Signal(object)  # completed / resumed
     service_state_changed = Signal(bool, str)
 
@@ -276,6 +278,14 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
                 self.handle_approval_resolved(data)
             return
 
+        if self.path == DENIAL_PATH:
+            if not self.authenticate():
+                return
+            data = self.read_json_body()
+            if data is not None:
+                self.handle_denial(data)
+            return
+
         if self.path == STAGE_STATUS_PATH:
             if not self.authenticate():
                 return
@@ -368,6 +378,39 @@ class ClaudeNotifyHandler(BaseHTTPRequestHandler):
             )
 
         return title, "\n".join(body_parts)
+
+    # ------------------------------------------------------------------
+    # Auto mode 拒绝事件（即时通知与会话统计）
+    # ------------------------------------------------------------------
+
+    def handle_denial(self, data: dict[str, Any]) -> None:
+        status = safe_string(data.get("status"))
+        session_id = safe_string(data.get("session_id"))
+        fingerprint = safe_string(data.get("fingerprint"))
+        if status not in {"denied", "recovered"}:
+            self.send_json(400, {"error": "invalid_denial_status"})
+            return
+        if not session_id:
+            self.send_json(400, {"error": "session_id_required"})
+            return
+        if not fingerprint:
+            self.send_json(400, {"error": "fingerprint_required"})
+            return
+
+        payload = dict(data)
+        payload["status"] = status
+        payload["session_id"] = session_id
+        payload["fingerprint"] = fingerprint
+        self.notify_server.bridge.denial_received.emit(payload)
+        self.notify_server.bridge.log_received.emit(
+            "warn" if status == "denied" else "info",
+            "Auto mode 拒绝状态："
+            f"status={status}, "
+            f"tool={safe_string(data.get('tool_name')) or 'unknown'}, "
+            f"count={data.get('count', 0)}, "
+            f"session={session_id[:16]}",
+        )
+        self.send_json(200, {"status": "ok"})
 
     # ------------------------------------------------------------------
     # 阶段完成提醒（始终由独立置顶弹窗展示）
