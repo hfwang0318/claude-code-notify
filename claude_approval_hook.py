@@ -38,12 +38,16 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
       }
     }
 
-本脚本同时服务两个钩子事件（按 stdin 的 hook_event_name 区分）：
+本脚本同时服务多个钩子事件（按 stdin 的 hook_event_name 区分）：
     - PermissionRequest：权限审批（含 suggestion 动态选项）
     - PreToolUse：普通工具只记录官方 tool_use_id 后立即退出，用于把
       PermissionRequest 与 transcript 中的终端处理结果关联；
       AskUserQuestion 仍走桌面代答，回答经 allow + updatedInput(answers)
       返回，工具不再弹交互 UI
+    - PermissionDenied：记录 Auto mode 拒绝；首次即时通知，同类第二次
+      升级为桌面询问，允许时返回 retry: true
+    - PostToolUse：同工具后续成功时，把未恢复拒绝标记为已恢复
+    - Stop / UserPromptSubmit：上报阶段状态；Stop 附带未恢复拒绝摘要
 配置来源（优先级从高到低）：
     1. 环境变量（远程部署的 settings.json 会把 Token 内联进 hook 命令）
     2. 脚本同目录的 claude_notify_config.json（本机接入时由部署功能写入，
@@ -58,6 +62,8 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
                              /claude-approval-resolved
     CLAUDE_STAGE_URL         可选，默认与审批 URL 同主机的
                              /claude-stage-status
+    CLAUDE_DENIAL_URL        可选，默认与审批 URL 同主机的
+                             /claude-denial
     CLAUDE_APPROVAL_TIMEOUT  可选，秒，默认 240（须小于钩子的 timeout）
     CLAUDE_APPROVAL_MATCHER  可选，逗号分隔的工具名，只对匹配的工具转发；
                              默认全部转发。例：Bash,Edit,Write
@@ -121,6 +127,10 @@ STAGE_URL = cfg(
     "CLAUDE_STAGE_URL",
     WINDOWS_URL.rsplit("/", 1)[0] + "/claude-stage-status",
 )
+DENIAL_URL = cfg(
+    "CLAUDE_DENIAL_URL",
+    WINDOWS_URL.rsplit("/", 1)[0] + "/claude-denial",
+)
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 
@@ -143,6 +153,12 @@ def notify_stage_status(hook_input: dict, status: str) -> None:
         "cwd": hook_input.get("cwd"),
         "transcript_path": hook_input.get("transcript_path"),
     }
+    if status == "completed":
+        risk = denial_risk_summary(
+            str(hook_input.get("session_id") or "")
+        )
+        if risk:
+            payload["denial_risk"] = risk
     request = urllib.request.Request(
         STAGE_URL,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -207,7 +223,251 @@ def open_sync_db() -> sqlite3.Connection:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS permission_denials (
+            session_id TEXT NOT NULL,
+            prompt_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            input_hash TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            count INTEGER NOT NULL,
+            asked INTEGER NOT NULL DEFAULT 0,
+            unresolved INTEGER NOT NULL DEFAULT 1,
+            first_seen REAL NOT NULL,
+            last_seen REAL NOT NULL,
+            PRIMARY KEY (session_id, prompt_id, fingerprint)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS permission_denials_session
+        ON permission_denials(session_id, unresolved, last_seen)
+        """
+    )
     return connection
+
+
+def normalized_denial_value(value):
+    """生成稳定拒绝指纹，忽略字符串中的无意义空白差异。"""
+    if isinstance(value, dict):
+        return {
+            str(key): normalized_denial_value(child)
+            for key, child in sorted(value.items())
+        }
+    if isinstance(value, list):
+        return [normalized_denial_value(child) for child in value]
+    if isinstance(value, str):
+        return " ".join(value.split())
+    return value
+
+
+def denial_reason(hook_input: dict) -> str:
+    for key in (
+        "permission_denied_reason",
+        "reason",
+        "message",
+    ):
+        value = hook_input.get(key)
+        if value:
+            return " ".join(str(value).split())
+    return "Auto mode 分类器判定该操作存在风险"
+
+
+def denial_fingerprint(
+    tool_name: str,
+    tool_input: dict,
+    reason: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "tool_name": tool_name,
+            "tool_input": normalized_denial_value(tool_input),
+            "reason": " ".join(reason.lower().split()),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def denial_detail(tool_input: dict) -> str:
+    command = tool_input.get("command")
+    if command:
+        return " ".join(str(command).split())[:1000]
+    return json.dumps(
+        tool_input,
+        ensure_ascii=False,
+        sort_keys=True,
+    )[:1000]
+
+
+def record_permission_denial(
+    hook_input: dict,
+    tool_input: dict,
+) -> dict:
+    """记录拒绝；同一指纹第二次仅升级一次同步询问。"""
+    session_id = str(hook_input.get("session_id") or "unknown-session")
+    prompt_id = str(hook_input.get("prompt_id") or "")
+    tool_name = str(hook_input.get("tool_name") or "未知工具")
+    reason = denial_reason(hook_input)
+    fingerprint = denial_fingerprint(tool_name, tool_input, reason)
+    now = time.time()
+    count = 1
+    should_ask = False
+
+    with closing(open_sync_db()) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DELETE FROM permission_denials WHERE last_seen < ?",
+            (now - 24 * 3600,),
+        )
+        row = connection.execute(
+            """
+            SELECT count, asked
+            FROM permission_denials
+            WHERE session_id = ? AND prompt_id = ? AND fingerprint = ?
+            """,
+            (session_id, prompt_id, fingerprint),
+        ).fetchone()
+        if row is None:
+            connection.execute(
+                """
+                INSERT INTO permission_denials(
+                    session_id, prompt_id, fingerprint, tool_name,
+                    input_hash, detail, reason, count, asked, unresolved,
+                    first_seen, last_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 1, ?, ?)
+                """,
+                (
+                    session_id,
+                    prompt_id,
+                    fingerprint,
+                    tool_name,
+                    tool_input_hash(tool_input),
+                    denial_detail(tool_input),
+                    reason,
+                    now,
+                    now,
+                ),
+            )
+        else:
+            count = int(row[0]) + 1
+            should_ask = count >= 2 and not bool(row[1])
+            connection.execute(
+                """
+                UPDATE permission_denials
+                SET count = ?, asked = ?, unresolved = 1, last_seen = ?
+                WHERE session_id = ? AND prompt_id = ? AND fingerprint = ?
+                """,
+                (
+                    count,
+                    1 if should_ask or row[1] else 0,
+                    now,
+                    session_id,
+                    prompt_id,
+                    fingerprint,
+                ),
+            )
+
+    return {
+        "status": "denied",
+        "session_id": session_id,
+        "prompt_id": prompt_id,
+        "fingerprint": fingerprint,
+        "tool_name": tool_name,
+        "tool_use_id": str(hook_input.get("tool_use_id") or ""),
+        "detail": denial_detail(tool_input),
+        "reason": reason,
+        "count": count,
+        "escalated": should_ask,
+        "should_ask": should_ask,
+        "cwd": hook_input.get("cwd"),
+    }
+
+
+def recover_permission_denials(
+    hook_input: dict,
+) -> list[dict]:
+    """同工具后续成功时，将当前会话中未恢复的拒绝标记为已恢复。"""
+    session_id = str(hook_input.get("session_id") or "")
+    tool_name = str(hook_input.get("tool_name") or "")
+    if not session_id or not tool_name:
+        return []
+    recovered: list[dict] = []
+    with closing(open_sync_db()) as connection, connection:
+        rows = connection.execute(
+            """
+            SELECT fingerprint, count
+            FROM permission_denials
+            WHERE session_id = ? AND tool_name = ? AND unresolved = 1
+            """,
+            (session_id, tool_name),
+        ).fetchall()
+        if rows:
+            connection.execute(
+                """
+                UPDATE permission_denials
+                SET unresolved = 0, last_seen = ?
+                WHERE session_id = ? AND tool_name = ? AND unresolved = 1
+                """,
+                (time.time(), session_id, tool_name),
+            )
+    for fingerprint, count in rows:
+        recovered.append(
+            {
+                "status": "recovered",
+                "session_id": session_id,
+                "fingerprint": fingerprint,
+                "tool_name": tool_name,
+                "count": int(count),
+            }
+        )
+    return recovered
+
+
+def denial_risk_summary(session_id: str) -> Optional[dict]:
+    if not session_id:
+        return None
+    try:
+        with closing(open_sync_db()) as connection:
+            rows = connection.execute(
+                """
+                SELECT tool_name, detail, reason, count
+                FROM permission_denials
+                WHERE session_id = ? AND unresolved = 1
+                ORDER BY last_seen DESC
+                """,
+                (session_id,),
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    return {
+        "count": sum(int(row[3]) for row in rows),
+        "fingerprints": len(rows),
+        "last_tool_name": rows[0][0],
+        "last_detail": rows[0][1],
+        "last_reason": rows[0][2],
+    }
+
+
+def reset_denial_state(session_id: str) -> None:
+    if not session_id:
+        return
+    try:
+        with closing(open_sync_db()) as connection, connection:
+            connection.execute(
+                "DELETE FROM permission_denials WHERE session_id = ?",
+                (session_id,),
+            )
+    except sqlite3.Error:
+        pass
 
 
 def record_pretooluse(hook_input: dict, tool_input: dict) -> Optional[str]:
@@ -562,6 +822,95 @@ def handle_result(
     # ask / timeout / dismissed / 其他：不输出，回退到终端正常提示
 
 
+def notify_denial_event(payload: dict) -> None:
+    """上报拒绝/恢复状态；短请求失败不影响 Agent。"""
+    request = urllib.request.Request(
+        DENIAL_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+    except Exception as exc:
+        note(f"请求 {DENIAL_URL} 失败：{exc}")
+
+
+def emit_permission_denied_retry() -> None:
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionDenied",
+            "retry": True,
+        }
+    }
+    print(json.dumps(output, ensure_ascii=False))
+
+
+def ask_permission_denied_retry(
+    hook_input: dict,
+    tool_input: dict,
+    denial: dict,
+) -> None:
+    payload = {
+        "request_id": uuid.uuid4().hex,
+        "session_id": denial["session_id"],
+        "prompt_id": denial["prompt_id"],
+        "tool_use_id": denial["tool_use_id"],
+        "cwd": hook_input.get("cwd"),
+        "tool_name": denial["tool_name"],
+        "tool_input": tool_input,
+        "message": (
+            f"Auto mode 已连续 {denial['count']} 次阻止 "
+            f"{denial['tool_name']}。是否允许 Claude 重试一次？"
+        ),
+        "options": [
+            {"id": "retry", "label": "允许 Claude 重试一次"},
+            {"id": "keep_denied", "label": "保持阻止"},
+        ],
+        "timeout_seconds": TIMEOUT - 10,
+        "kind": "denial",
+    }
+    request = urllib.request.Request(
+        WINDOWS_URL,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        note(f"请求 {WINDOWS_URL} 失败：{exc}，维持 Auto mode 阻止")
+        return
+    if isinstance(result, dict) and result.get("decision") == "retry":
+        emit_permission_denied_retry()
+
+
+def handle_permission_denied(
+    hook_input: dict,
+    tool_input: dict,
+) -> None:
+    try:
+        denial = record_permission_denial(hook_input, tool_input)
+    except sqlite3.Error as exc:
+        note(f"记录 PermissionDenied 失败：{exc}")
+        return
+    notify_denial_event(
+        {
+            key: value
+            for key, value in denial.items()
+            if key != "should_ask"
+        }
+    )
+    if denial["should_ask"]:
+        ask_permission_denied_retry(hook_input, tool_input, denial)
+
+
 def emit_pretooluse_answer(questions: list, answers: list) -> None:
     """
     PreToolUse 代答输出：allow + updatedInput。
@@ -635,6 +984,35 @@ def main() -> None:
             hook_input,
             "completed" if event == "Stop" else "resumed",
         )
+        if event == "UserPromptSubmit":
+            reset_denial_state(
+                str(hook_input.get("session_id") or "")
+            )
+        sys.exit(0)
+
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+
+    if event == "PermissionDenied":
+        if MATCHED_TOOLS and tool_name not in MATCHED_TOOLS:
+            sys.exit(0)
+        if not TOKEN:
+            note("缺少 CLAUDE_NOTIFY_TOKEN，无法上报 Auto mode 拒绝")
+            sys.exit(0)
+        handle_permission_denied(hook_input, tool_input)
+        sys.exit(0)
+
+    if event == "PostToolUse":
+        if not TOKEN:
+            sys.exit(0)
+        try:
+            recovered = recover_permission_denials(hook_input)
+        except sqlite3.Error as exc:
+            note(f"更新 PermissionDenied 恢复状态失败：{exc}")
+            recovered = []
+        for payload in recovered:
+            notify_denial_event(payload)
         sys.exit(0)
 
     # PermissionRequest 通道下 AskUserQuestion 让位给 PreToolUse 代答
@@ -658,10 +1036,6 @@ def main() -> None:
             f"{CONFIG_PATH} 均未配置），交给终端处理"
         )
         sys.exit(0)  # 未配置 Token → 交给终端
-
-    tool_input = hook_input.get("tool_input")
-    if not isinstance(tool_input, dict):
-        tool_input = {}
 
     # 普通 PreToolUse 只记录官方 tool_use_id，绝不做审批决定。
     # AskUserQuestion 保留原有桌面代答流程。
