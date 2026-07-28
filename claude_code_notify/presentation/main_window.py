@@ -17,8 +17,8 @@ from ..application.hooks import (
     local_claude_dir, merge_settings_json,
 )
 from ..config import (
-    APP_DATA_DIR, APP_NAME, APPROVAL_PATH, HOST, LOG_FILE, NOTIFY_PATH, PORT,
-    STAGE_STATUS_PATH, UI_CONFIG_FILE,
+    APP_DATA_DIR, APP_NAME, APPROVAL_PATH, DENIAL_PATH, HOST, LOG_FILE,
+    NOTIFY_PATH, PORT, STAGE_STATUS_PATH, UI_CONFIG_FILE,
 )
 from ..core import (
     escape_html, format_approval_type_counts, get_local_ip,
@@ -30,7 +30,7 @@ from ..infrastructure.http_server import HttpEventBridge, ServerWorker
 from ..infrastructure.local_integration import LOCAL_INTEGRATION
 from ..infrastructure.platform import PLATFORM, POPUP_SCREEN_MODES
 from .approval_popup import ApprovalPopup
-from .components import ApprovalStatsPopup, OptionSegment
+from .components import ApprovalStatsPopup, DenialStatsPopup, OptionSegment
 from .dialogs import DeployDialog, EnvShellDialog, LocalDeployDialog
 from .stage_popup import StageCompletionPopup
 from .theme import LOG_COLORS, MAX_LOG_LINES
@@ -46,6 +46,8 @@ class MainWindow(QMainWindow):
         self.notification_count = 0
         self.approval_count = 0
         self.approval_type_counts: dict[str, int] = {}
+        self.denial_count = 0
+        self.denial_records: dict[str, dict[str, Any]] = {}
         self.token_visible = False
         ui_config = self.load_ui_config()
         self.popup_screen_mode = str(
@@ -320,6 +322,25 @@ class MainWindow(QMainWindow):
         self.approval_stats_popup = ApprovalStatsPopup(self)
         self.approval_stat_value.clicked.connect(
             self.toggle_approval_stats_popup
+        )
+
+        denial_stat_box = QVBoxLayout()
+        denial_stat_box.setSpacing(0)
+        self.denial_stat_value = QPushButton("0")
+        self.denial_stat_value.setObjectName("approvalStatValue")
+        self.denial_stat_value.setCursor(Qt.PointingHandCursor)
+        self.denial_stat_value.setToolTip("点击查看 Auto mode 拒绝明细")
+        denial_stat_label = QLabel("Auto mode 拒绝")
+        denial_stat_label.setObjectName("statLabel")
+        denial_stat_label.setAlignment(Qt.AlignCenter)
+        denial_stat_box.addWidget(self.denial_stat_value)
+        denial_stat_box.addWidget(denial_stat_label)
+        header.addLayout(denial_stat_box)
+        header.addSpacing(10)
+
+        self.denial_stats_popup = DenialStatsPopup(self)
+        self.denial_stat_value.clicked.connect(
+            self.toggle_denial_stats_popup
         )
 
         # 状态胶囊
@@ -670,6 +691,9 @@ class MainWindow(QMainWindow):
         self.bridge.approval_cancelled.connect(
             self.on_approval_cancelled
         )
+        self.bridge.denial_received.connect(
+            self.on_denial_received
+        )
         self.bridge.stage_status_received.connect(
             self.on_stage_status_received
         )
@@ -691,6 +715,7 @@ class MainWindow(QMainWindow):
         self.refresh_deploy_summary()
         self.update_pending_count()
         self.update_approval_count()
+        self.update_denial_count()
 
     def update_status_pill(self) -> None:
         if self.server_running:
@@ -728,6 +753,59 @@ class MainWindow(QMainWindow):
         self.approval_stats_popup.update_stats(
             self.approval_count,
             self.approval_type_counts,
+        )
+
+    def update_denial_count(self) -> None:
+        self.denial_stat_value.setText(str(self.denial_count))
+        self.denial_stat_value.setAccessibleName(
+            f"{self.denial_count} 次 Auto mode 拒绝，点击查看明细"
+        )
+        self.denial_stats_popup.update_stats(
+            self.denial_count,
+            list(self.denial_records.values()),
+        )
+
+    @Slot(object)
+    def on_denial_received(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        fingerprint = safe_string(payload.get("fingerprint"))
+        if not fingerprint:
+            return
+
+        status = safe_string(payload.get("status"))
+        current = self.denial_records.get(fingerprint, {})
+        if status == "recovered":
+            if current:
+                current["recovered"] = True
+                current["recovered_at"] = time.time()
+                self.update_denial_count()
+            return
+        if status != "denied":
+            return
+
+        self.denial_count += 1
+        record = dict(current)
+        record.update(
+            {
+                "fingerprint": fingerprint,
+                "tool_name": safe_string(payload.get("tool_name")),
+                "detail": safe_string(payload.get("detail")),
+                "reason": safe_string(payload.get("reason")),
+                "count": int(payload.get("count") or 1),
+                "escalated": bool(payload.get("escalated")),
+                "recovered": False,
+                "last_seen": time.time(),
+            }
+        )
+        self.denial_records[fingerprint] = record
+        self.update_denial_count()
+
+        tool_name = record["tool_name"] or "未知工具"
+        detail = record["detail"] or "未提供操作详情"
+        self.show_tray_notification(
+            f"Auto mode 已阻止 {tool_name}",
+            f"{detail[:220]}\n本会话同类拒绝第 {record['count']} 次",
         )
 
     @Slot()
@@ -768,6 +846,48 @@ class MainWindow(QMainWindow):
         )
 
         popup.move(x, y)
+        popup.show()
+        popup.raise_()
+        popup.activateWindow()
+        popup.setFocus(Qt.PopupFocusReason)
+
+    @Slot()
+    def toggle_denial_stats_popup(self) -> None:
+        popup = self.denial_stats_popup
+        if popup.isVisible():
+            popup.close()
+            return
+        popup.update_stats(
+            self.denial_count,
+            list(self.denial_records.values()),
+        )
+        anchor = self.denial_stat_value.mapToGlobal(
+            QPoint(
+                self.denial_stat_value.width(),
+                self.denial_stat_value.height() + 6,
+            )
+        )
+        screen = QGuiApplication.screenAt(anchor) or self.screen()
+        available = screen.availableGeometry()
+        x = max(
+            available.left(),
+            min(
+                anchor.x() - popup.width(),
+                available.right() - popup.width() + 1,
+            ),
+        )
+        y = anchor.y()
+        if y + popup.height() > available.bottom() + 1:
+            y = self.denial_stat_value.mapToGlobal(
+                QPoint(0, -popup.height() - 6)
+            ).y()
+        popup.move(
+            x,
+            max(
+                available.top(),
+                min(y, available.bottom() - popup.height() + 1),
+            ),
+        )
         popup.show()
         popup.raise_()
         popup.activateWindow()
@@ -905,7 +1025,12 @@ class MainWindow(QMainWindow):
 
         if status != "completed":
             return
-        if not self.stage_completion_enabled:
+        denial_risk = payload.get("denial_risk")
+        has_denial_risk = (
+            isinstance(denial_risk, dict)
+            and int(denial_risk.get("count") or 0) > 0
+        )
+        if not self.stage_completion_enabled and not has_denial_risk:
             self.append_log(
                 "info",
                 "阶段完成提醒未开启，本次不弹窗："
@@ -924,6 +1049,7 @@ class MainWindow(QMainWindow):
             session_id=session_id,
             cwd=safe_string(payload.get("cwd")),
             screen_mode=self.popup_screen_mode,
+            denial_risk=denial_risk if has_denial_risk else None,
         )
         popup.dismissed.connect(self.on_stage_popup_dismissed)
         self.stage_completion_popups[session_id] = popup
@@ -933,8 +1059,12 @@ class MainWindow(QMainWindow):
         popup.activateWindow()
         self.append_log(
             "notify",
-            "Claude 已完成当前阶段，已显示置顶提醒："
-            f"session={session_id[:16]}, project={popup.project_name}",
+            (
+                "检测到未恢复的 Auto mode 拒绝，已显示任务风险提醒："
+                if has_denial_risk
+                else "Claude 已完成当前阶段，已显示置顶提醒："
+            )
+            + f"session={session_id[:16]}, project={popup.project_name}",
         )
 
     @Slot(str)
@@ -1032,6 +1162,7 @@ class MainWindow(QMainWindow):
         )
         if (
             completed_here
+            and request.kind != "denial"
             and is_completed_approval_decision(decision)
         ):
             self.approval_count += 1
@@ -1153,6 +1284,7 @@ class MainWindow(QMainWindow):
             env_pairs: dict[str, Any] = {
                 "CLAUDE_NOTIFY_TOKEN": self.token,
                 "CLAUDE_APPROVAL_URL": f"{base_url}{APPROVAL_PATH}",
+                "CLAUDE_DENIAL_URL": f"{base_url}{DENIAL_PATH}",
                 "CLAUDE_STAGE_URL": f"{base_url}{STAGE_STATUS_PATH}",
                 "CLAUDE_APPROVAL_TIMEOUT": 240,
                 # 标记 AskUserQuestion 走 PreToolUse 代答通道，
