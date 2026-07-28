@@ -79,6 +79,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import closing
 from typing import Optional
 
 CONFIG_PATH = os.path.join(
@@ -222,7 +223,7 @@ def record_pretooluse(hook_input: dict, tool_input: dict) -> Optional[str]:
     request_id = uuid.uuid4().hex
     now = time.time()
     try:
-        with open_sync_db() as connection:
+        with closing(open_sync_db()) as connection, connection:
             connection.execute(
                 "DELETE FROM pending_tool_uses WHERE created_at < ?",
                 (now - 3600,),
@@ -322,7 +323,7 @@ def delete_correlation(request_id: str) -> None:
     if not request_id:
         return
     try:
-        with open_sync_db() as connection:
+        with closing(open_sync_db()) as connection, connection:
             connection.execute(
                 "DELETE FROM pending_tool_uses WHERE request_id = ?",
                 (request_id,),
