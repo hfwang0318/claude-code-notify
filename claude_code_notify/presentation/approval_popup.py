@@ -127,12 +127,19 @@ class ApprovalPopup(QWidget):
         layout.setSpacing(8)
 
         is_question = request.kind == "question"
+        is_denial = request.kind == "denial"
         self.allow_button = None
 
         # ---- 顶部：紧急度标记 + 关闭 ----
         kicker_row = QHBoxLayout()
         kicker = QLabel(
-            "QUESTION FROM CLAUDE" if is_question else "PERMISSION REQUIRED"
+            "QUESTION FROM CLAUDE"
+            if is_question
+            else (
+                "AUTO MODE BLOCKED"
+                if is_denial
+                else "PERMISSION REQUIRED"
+            )
         )
         kicker.setObjectName("approvalKicker")
         kicker_row.addWidget(kicker)
@@ -155,7 +162,13 @@ class ApprovalPopup(QWidget):
         layout.addLayout(kicker_row)
 
         title = QLabel(
-            "Claude 想问你一个问题" if is_question else "Claude 请求执行权限"
+            "Claude 想问你一个问题"
+            if is_question
+            else (
+                "Auto mode 重复阻止了这项操作"
+                if is_denial
+                else "Claude 请求执行权限"
+            )
         )
         title.setObjectName("approvalTitle")
         layout.addWidget(title)
@@ -163,7 +176,11 @@ class ApprovalPopup(QWidget):
         desc = QLabel(
             "选择选项作答 · Esc 交给终端；超时未处理将自动返回终端。"
             if is_question
-            else "Enter 允许 · Esc 交给终端；超时未处理将自动返回终端。"
+            else (
+                "允许后仅恢复 Agent 重试，操作仍会重新经过 Auto mode 检查。"
+                if is_denial
+                else "Enter 允许 · Esc 交给终端；超时未处理将自动返回终端。"
+            )
         )
         desc.setObjectName("approvalDesc")
         layout.addWidget(desc)
