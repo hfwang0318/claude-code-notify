@@ -1,5 +1,4 @@
 """Deployment and local-connection dialogs."""
-import sys
 import time
 from typing import Any, Optional
 from PySide6.QtCore import QThread, Signal, Slot
@@ -13,6 +12,10 @@ from ..application.hooks import (
 from ..core import escape_html
 from ..config import USER_HOME
 from ..infrastructure.deployment import DeployWorker, ServerTestWorker
+from ..infrastructure.local_integration import (
+    LOCAL_INTEGRATION,
+    LocalIntegrationAdapter,
+)
 from ..infrastructure.secrets import SECRET_STORE
 from .components import OptionSegment
 from .theme import LOG_COLORS
@@ -68,8 +71,13 @@ class EnvShellDialog(QDialog):
 class LocalDeployDialog(QDialog):
     """本机 Claude Code 接入：选通知方式与是否写入环境变量。"""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        integration: LocalIntegrationAdapter = LOCAL_INTEGRATION,
+    ) -> None:
         super().__init__(parent)
+        self.integration = integration
         self.setWindowTitle("接入本机 Claude Code")
         self.setModal(True)
         self.setMinimumWidth(520)
@@ -94,11 +102,7 @@ class LocalDeployDialog(QDialog):
         self.mode_combo.addItem(DEPLOY_MODES["notify"], "notify")
         layout.addWidget(self.mode_combo)
 
-        if sys.platform == "win32":
-            env_text = "同时将 Token 写入用户环境变量（可选；钩子默认读配置文件，setx 仅供手动调试）"
-        else:
-            env_text = "同时将 Token 写入 shell 环境变量（bash/zsh/csh/fish，可选）"
-        self.env_check = QCheckBox(env_text)
+        self.env_check = QCheckBox(integration.env_option_text)
         self.env_check.setChecked(False)
         layout.addWidget(self.env_check)
 

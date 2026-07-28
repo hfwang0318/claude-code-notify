@@ -16,6 +16,7 @@ from claude_code_notify.core import *
 from claude_code_notify.domain.approval import *
 from claude_code_notify.infrastructure.deployment import *
 from claude_code_notify.infrastructure.http_server import *
+from claude_code_notify.infrastructure.local_integration import *
 from claude_code_notify.infrastructure.platform import *
 from claude_code_notify.infrastructure.secrets import *
 from claude_code_notify.presentation.approval_popup import *
@@ -26,8 +27,10 @@ from claude_code_notify.presentation.stage_popup import *
 from claude_code_notify.presentation.theme import *
 
 import claude_code_notify.config as _config_module
+import claude_code_notify.infrastructure.local_integration as _local_integration_module
 import claude_code_notify.infrastructure.platform as _platform_module
 import claude_code_notify.presentation.approval_popup as _approval_popup_module
+import claude_code_notify.presentation.dialogs as _dialogs_module
 import claude_code_notify.presentation.main_window as _main_window_module
 import claude_code_notify.presentation.stage_popup as _stage_popup_module
 
@@ -42,6 +45,10 @@ class _CompatibilityModule(ModuleType):
             _approval_popup_module.PLATFORM = value
             _stage_popup_module.PLATFORM = value
             _main_window_module.PLATFORM = value
+        elif name == "LOCAL_INTEGRATION":
+            _local_integration_module.LOCAL_INTEGRATION = value
+            _dialogs_module.LOCAL_INTEGRATION = value
+            _main_window_module.LOCAL_INTEGRATION = value
         elif name == "UI_CONFIG_FILE":
             _config_module.UI_CONFIG_FILE = value
             _main_window_module.UI_CONFIG_FILE = value

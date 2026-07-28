@@ -250,18 +250,41 @@ def build_local_hook_entry(
     POSIX：shell form，环境变量直接内联，Claude Code 从任何目录启动都能读到。
     """
     if sys.platform == "win32":
-        return {
-            "type": "command",
-            "command": resolve_local_python(),
-            "args": [str(script_path)],
-        }
+        return build_exec_hook_entry(
+            resolve_local_python(),
+            script_path,
+        )
+    return build_shell_hook_entry(
+        env_pairs,
+        script_path,
+        local_python_command(),
+    )
 
+
+def build_exec_hook_entry(
+    python_executable: str,
+    script_path: Path,
+) -> dict[str, Any]:
+    """生成不经过 shell 的本机 Hook handler。"""
+    return {
+        "type": "command",
+        "command": python_executable,
+        "args": [str(script_path)],
+    }
+
+
+def build_shell_hook_entry(
+    env_pairs: dict[str, Any],
+    script_path: Path,
+    python_command: str = "python3",
+) -> dict[str, Any]:
+    """生成 POSIX shell form 的本机 Hook handler。"""
     parts = [
         f"{key}={shlex.quote(str(value))}"
         for key, value in env_pairs.items()
     ]
     parts.append(
-        f"{local_python_command()} {shlex.quote(str(script_path))}"
+        f"{python_command} {shlex.quote(str(script_path))}"
     )
     return {"type": "command", "command": " ".join(parts)}
 

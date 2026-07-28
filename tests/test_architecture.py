@@ -72,6 +72,30 @@ class ArchitectureBoundaryTests(unittest.TestCase):
             ("claude_code_notify.presentation",),
         )
 
+    def test_presentation_has_no_platform_branches(self) -> None:
+        forbidden_imports = {"os", "platform", "subprocess", "sys"}
+        forbidden_tokens = (
+            "sys.platform",
+            "win32",
+            "darwin",
+            ".chmod(",
+            '"setx"',
+        )
+        violations: list[str] = []
+        for path in self.python_files("presentation"):
+            imports = imports_in(path)
+            for imported in sorted(imports & forbidden_imports):
+                violations.append(
+                    f"{path.relative_to(PROJECT_ROOT)} imports {imported}"
+                )
+            text = path.read_text(encoding="utf-8")
+            for token in forbidden_tokens:
+                if token in text:
+                    violations.append(
+                        f"{path.relative_to(PROJECT_ROOT)} contains {token}"
+                    )
+        self.assertEqual(violations, [], "\n".join(violations))
+
     def test_compatibility_entry_contains_no_business_classes(self) -> None:
         path = PROJECT_ROOT / "claude_notify_server.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))

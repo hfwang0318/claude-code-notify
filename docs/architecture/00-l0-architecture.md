@@ -64,6 +64,7 @@ flowchart TB
 | `application/hooks.py` | Hook 命令、settings.json 幂等合并、本机接入配置 |
 | `infrastructure/http_server.py` | HTTP 路由、鉴权、长轮询和 Qt 信号桥 |
 | `infrastructure/deployment.py` | SSH 部署与远程验证 |
+| `infrastructure/local_integration.py` | Windows/POSIX 本机 Hook 安装、权限、验证与环境变量适配 |
 | `infrastructure/platform.py` | Windows/macOS/Linux 平台端口 |
 | `infrastructure/secrets.py` | DPAPI、Keychain、空实现 |
 | `presentation/approval_popup.py` | 权限审批弹窗 |
@@ -103,6 +104,8 @@ flowchart TB
 
 - 新协议先落在 `domain/application`，再增加 HTTP、Hook 或 UI 适配。
 - 新平台只能实现平台端口，不能在窗口类中散落 `sys.platform` 分支。
+- Presentation 不得导入 `sys`、`os`、`platform` 或 `subprocess`；
+  本机接入统一依赖 `LocalIntegrationAdapter`。
 - 新窗口不得直接解析 HTTP payload 或操作 SSH。
 - Hook 脚本保持独立、零第三方依赖；不要导入桌面应用包。
 - 对外路径、事件名或响应结构的变更必须提供兼容期和协议回归测试。

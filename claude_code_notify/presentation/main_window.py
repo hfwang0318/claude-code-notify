@@ -1,12 +1,8 @@
 """Main application window and orchestration of presentation use cases."""
 import json
-import re
-import subprocess
-import sys
 import threading
 import time
 from collections import deque
-from pathlib import Path
 from typing import Any, Optional
 from PySide6.QtCore import QPoint, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QGuiApplication, QIcon, QPixmap
@@ -16,10 +12,9 @@ from PySide6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 from ..application.hooks import (
-    APPROVAL_SCRIPT_NAME, DEPLOY_CACHE_FILE, DEPLOY_MODES, ENV_MARK_BEGIN,
-    ENV_MARK_END, HOOK_CONFIG_NAME, NOTIFY_SCRIPT_NAME, SHELL_RC_FILES,
-    build_env_block, build_local_hook_entry, detect_local_deploy,
-    load_deploy_cache, local_claude_dir, local_python_command, merge_settings_json,
+    APPROVAL_SCRIPT_NAME, DEPLOY_CACHE_FILE, DEPLOY_MODES, HOOK_CONFIG_NAME,
+    NOTIFY_SCRIPT_NAME, detect_local_deploy, load_deploy_cache,
+    local_claude_dir, merge_settings_json,
 )
 from ..config import (
     APP_DATA_DIR, APP_NAME, APPROVAL_PATH, HOST, LOG_FILE, NOTIFY_PATH, PORT,
@@ -32,6 +27,7 @@ from ..core import (
 )
 from ..domain.approval import ApprovalRequest
 from ..infrastructure.http_server import HttpEventBridge, ServerWorker
+from ..infrastructure.local_integration import LOCAL_INTEGRATION
 from ..infrastructure.platform import PLATFORM, POPUP_SCREEN_MODES
 from .approval_popup import ApprovalPopup
 from .components import ApprovalStatsPopup, OptionSegment
@@ -1083,7 +1079,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def open_local_deploy_dialog(self) -> None:
-        dialog = LocalDeployDialog(self)
+        dialog = LocalDeployDialog(self, LOCAL_INTEGRATION)
         if dialog.exec() != QDialog.Accepted:
             return
 
@@ -1091,7 +1087,7 @@ class MainWindow(QMainWindow):
         write_env = dialog.write_env()
         env_shells: list[str] = []
 
-        if write_env and sys.platform != "win32":
+        if write_env and LOCAL_INTEGRATION.requires_shell_selection:
             env_dialog = EnvShellDialog(self)
             if env_dialog.exec() != QDialog.Accepted:
                 return
@@ -1122,8 +1118,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         claude_dir = local_claude_dir()
         claude_dir.mkdir(parents=True, exist_ok=True)
-        if sys.platform != "win32":
-            claude_dir.chmod(0o700)
+        LOCAL_INTEGRATION.prepare_directory(claude_dir)
 
         if mode == "popup":
             script_name = APPROVAL_SCRIPT_NAME
@@ -1138,8 +1133,7 @@ class MainWindow(QMainWindow):
 
         script_path = claude_dir / script_name
         script_path.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-        if sys.platform != "win32":
-            script_path.chmod(0o755)
+        LOCAL_INTEGRATION.prepare_executable(script_path)
         (claude_dir / removed_script).unlink(missing_ok=True)
         self.append_log("info", f"本机钩子脚本已写入 {script_path}")
 
@@ -1172,9 +1166,10 @@ class MainWindow(QMainWindow):
                 "CLAUDE_STAGE_URL": f"{base_url}{STAGE_STATUS_PATH}",
             }
 
-        # Windows 用 exec form（解释器绝对路径 + args），不经过 shell、
-        # 不依赖 PATH；POSIX 用 shell form 内联环境变量
-        hook_entry = build_local_hook_entry(env_pairs, script_path)
+        hook_entry = LOCAL_INTEGRATION.build_hook_entry(
+            env_pairs,
+            script_path,
+        )
         merged = merge_settings_json(
             existing,
             mode=mode,
@@ -1186,21 +1181,22 @@ class MainWindow(QMainWindow):
         )
         settings_path.write_text(merged, encoding="utf-8")
         self.append_log("notify", f"本机 settings.json 已合并（{DEPLOY_MODES[mode]}）")
-        if sys.platform == "win32":
+        hook_description = LOCAL_INTEGRATION.hook_description(
+            hook_entry
+        )
+        if hook_description:
             self.append_log(
                 "info",
-                f"钩子解释器：{hook_entry['command']}（绝对路径，exec form）",
+                hook_description,
             )
 
         # 配置文件：钩子启动时读取 Token/URL，立即生效。
-        # Windows 上尤其关键——不依赖 setx，无需重启 Claude Code/终端。
         config_path = claude_dir / HOOK_CONFIG_NAME
         config_path.write_text(
             json.dumps(env_pairs, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        if sys.platform != "win32":
-            config_path.chmod(0o600)
+        LOCAL_INTEGRATION.protect_config(config_path)
         self.append_log("info", f"钩子配置已写入 {config_path}")
 
         # 语法验证：用 py_compile 只编译、不执行。
@@ -1208,22 +1204,7 @@ class MainWindow(QMainWindow):
         # 配置文件）并对 "{}" 输入发起真实审批请求——弹出幽灵弹窗，用户
         # 还没来得及点，10 秒超时就把钩子杀掉，部署被误判为失败。
         # 只编译不执行则零副作用，且与钩子脚本新旧版本无关。
-        if sys.platform == "win32":
-            # 与 settings.json 里 exec form 用的是同一个解释器
-            verify_python = hook_entry["command"]
-        else:
-            verify_python = local_python_command()
-        result = subprocess.run(
-            [verify_python, "-m", "py_compile", str(script_path)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"钩子脚本编译验证失败 exit={result.returncode}: {result.stderr[:200]}"
-            )
+        LOCAL_INTEGRATION.verify_hook(script_path, hook_entry)
 
         if write_env:
             self.apply_local_env_import(env_shells)
@@ -1234,43 +1215,15 @@ class MainWindow(QMainWindow):
         )
 
     def apply_local_env_import(self, env_shells: list[str]) -> None:
-        if sys.platform == "win32":
-            subprocess.run(
-                ["setx", "CLAUDE_NOTIFY_TOKEN", self.token],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+        messages = LOCAL_INTEGRATION.write_environment(
+            self.token,
+            env_shells,
+        )
+        for message in messages:
             self.append_log(
                 "info",
-                "已用 setx 写入用户环境变量 CLAUDE_NOTIFY_TOKEN（新进程生效）。",
+                message,
             )
-            return
-
-        home = Path.home()
-        for shell in env_shells:
-            if shell not in SHELL_RC_FILES:
-                continue
-            shell_label, rc_rel = SHELL_RC_FILES[shell]
-            rc_path = home / rc_rel
-            rc_path.parent.mkdir(parents=True, exist_ok=True)
-
-            existing = ""
-            if rc_path.exists():
-                existing = rc_path.read_text(encoding="utf-8")
-
-            pattern = re.compile(
-                re.escape(ENV_MARK_BEGIN)
-                + r".*?"
-                + re.escape(ENV_MARK_END)
-                + r"\n?",
-                re.S,
-            )
-            cleaned = pattern.sub("", existing).rstrip()
-            block = build_env_block(shell, self.token)
-            updated = f"{cleaned}\n\n{block}\n" if cleaned else f"{block}\n"
-            rc_path.write_text(updated, encoding="utf-8")
-            self.append_log("info", f"已写入 {shell_label} 环境变量 → {rc_path}")
 
     @Slot()
     def show_test_approval(self) -> None:

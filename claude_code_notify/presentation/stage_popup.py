@@ -1,5 +1,4 @@
 """Stage-completion popup view."""
-import os
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -42,7 +41,7 @@ class StageCompletionPopup(QWidget):
         if not self.cwd:
             return "未知项目"
         normalized = self.cwd.rstrip("/\\")
-        return os.path.basename(normalized) or normalized
+        return normalized.replace("\\", "/").rsplit("/", 1)[-1] or normalized
 
     def build_ui(self) -> None:
         outer = QVBoxLayout(self)
