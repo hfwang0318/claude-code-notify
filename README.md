@@ -22,6 +22,8 @@ Claude Code Notify 是一个基于 Python 与 PySide6 的跨平台桌面应用�
 - **远端一键部署**：通过 SSH 上传 Hook、合并 `settings.json` 并验证网络连接。
 - **本机一键接入**：自动配置同一台计算机上的 Claude Code Hooks。
 - **审批统计**：记录本次运行期间的审批数量，并按工具类型展示明细。
+- **Auto mode 拒绝介入**：首次拒绝即时通知；同类操作第二次被拒绝时
+  请求用户决定是否允许 Claude 重试，并记录拒绝与恢复状态。
 - **多屏与多桌面支持**：支持主屏、鼠标所在屏幕和 Windows 焦点窗口屏幕；
   macOS 弹窗可跟随当前 Space。
 - **安全凭证存储**：Windows 使用 DPAPI，macOS 使用登录 Keychain 保存可选的
@@ -46,6 +48,15 @@ flowchart LR
 |---|---|---|---|
 | 应用置顶弹窗 | `PermissionRequest` | 弹出审批窗口 | 桌面或终端 |
 | 系统通知中心 | `Notification` | 系统通知/托盘气泡 | 原终端 |
+
+应用置顶弹窗模式还会注册 `PermissionDenied` 与 `PostToolUse`：
+
+- 每次 Auto mode 拒绝都会立即发送桌面通知并计入拒绝明细；
+- 同一会话、同一轮任务中的相同操作第二次被拒绝时，显示置顶决策弹窗；
+- “允许 Claude 重试一次”返回 `retry: true`，不会跳过 Auto mode 分类器；
+- 同一拒绝指纹最多询问一次，避免循环弹窗；
+- 后续同工具成功执行时标记为已恢复；阶段结束仍未恢复时，即使未开启
+  阶段完成提醒，也会显示任务完整性风险提示。
 
 阶段完成提醒独立于通知方式。开启后，`Stop` 事件显示置顶提醒，
 `UserPromptSubmit` 事件关闭对应会话的提醒。
@@ -249,6 +260,7 @@ GitHub Actions 会在 Windows、macOS 和 Ubuntu 上运行相同的质量检查�
 | `claude-notify.log` | 运行日志 |
 | `deploy_config.json` | SSH 部署表单缓存 |
 | `ui_config.json` | 界面偏好 |
+| `approval-sync.sqlite3` | 工具调用关联与 Auto mode 拒绝状态 |
 | `startup-crash.log` | 启动异常日志，仅发生异常时生成 |
 
 请注意：
