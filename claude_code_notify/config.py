@@ -7,6 +7,7 @@ PORT = 18765
 NOTIFY_PATH = "/claude-notify"
 APPROVAL_PATH = "/claude-approval"
 APPROVAL_RESOLVED_PATH = "/claude-approval-resolved"
+DENIAL_PATH = "/claude-denial"
 STAGE_STATUS_PATH = "/claude-stage-status"
 HEALTH_PATH = "/health"
 MAX_REQUEST_SIZE = 1024 * 1024
