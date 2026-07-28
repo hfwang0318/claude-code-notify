@@ -1,4 +1,3 @@
-import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,9 +56,18 @@ class LocalIntegrationAdapterTests(unittest.TestCase):
             config = root / "config.json"
             config.write_text("{}\n", encoding="utf-8")
 
-            adapter.prepare_directory(root)
-            adapter.prepare_executable(script)
-            adapter.protect_config(config)
+            with mock.patch.object(Path, "chmod") as chmod:
+                adapter.prepare_directory(root)
+                adapter.prepare_executable(script)
+                adapter.protect_config(config)
+
+            chmod.assert_has_calls(
+                [
+                    mock.call(0o700),
+                    mock.call(0o755),
+                    mock.call(0o600),
+                ]
+            )
             entry = adapter.build_hook_entry(
                 {"TOKEN": "with space"},
                 script,
@@ -70,18 +78,6 @@ class LocalIntegrationAdapterTests(unittest.TestCase):
             self.assertIn(
                 f"'{script}'",
                 entry["command"],
-            )
-            self.assertEqual(
-                stat.S_IMODE(root.stat().st_mode),
-                0o700,
-            )
-            self.assertEqual(
-                stat.S_IMODE(script.stat().st_mode),
-                0o755,
-            )
-            self.assertEqual(
-                stat.S_IMODE(config.stat().st_mode),
-                0o600,
             )
 
     def test_posix_environment_update_is_idempotent(self) -> None:
