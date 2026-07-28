@@ -84,9 +84,13 @@ class ApprovalRequest:
 
     @property
     def kind(self) -> str:
-        """permission（权限审批）或 question（AskUserQuestion 提问）。"""
+        """permission、question，或 Auto mode 拒绝后的 denial 决策。"""
         kind = safe_string(self.payload.get("kind"))
-        return kind if kind in {"permission", "question"} else "permission"
+        return (
+            kind
+            if kind in {"permission", "question", "denial"}
+            else "permission"
+        )
 
     @property
     def suggestions(self) -> list[dict[str, Any]]:
