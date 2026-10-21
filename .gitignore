@@ -3,8 +3,8 @@ __pycache__/
 *.py[cod]
 
 # PyInstaller outputs
-build/
-dist/
+/build/
+/dist/
 
 # Local logs and diagnostics
 *.log
