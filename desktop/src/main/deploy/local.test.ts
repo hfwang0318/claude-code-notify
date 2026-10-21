@@ -59,8 +59,14 @@ describe('deployLocal', () => {
     expect(settings.hooks.PermissionRequest).toHaveLength(2)
     expect(settings.hooks.PreToolUse).toHaveLength(1)
     expect(settings.hooks.PermissionRequest[0].hooks[0].command).toBe('echo third-party')
-    expect(settings.hooks.PermissionRequest[1].hooks[0].command).toContain('claude_approval_hook.py')
-    expect(settings.hooks.PermissionRequest[1].hooks[0].command).toContain("CLAUDE_NOTIFY_TOKEN='test-token'")
+    const installedHook = settings.hooks.PermissionRequest[1].hooks[0]
+    if (process.platform === 'win32') {
+      expect(installedHook.command).toMatch(/python(\.exe)?$/i)
+      expect(installedHook.args).toEqual([result.scriptPath])
+    } else {
+      expect(installedHook.command).toContain('claude_approval_hook.py')
+      expect(installedHook.command).toContain("CLAUDE_NOTIFY_TOKEN='test-token'")
+    }
 
     const config = JSON.parse(readFileSync(result.configPath, 'utf-8'))
     expect(config.CLAUDE_NOTIFY_TOKEN).toBe('test-token')
