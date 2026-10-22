@@ -59,7 +59,7 @@ pnpm dist:win
 ### 发布顺序
 
 1. 确认版本号已更新，提交并推送 `feat/electron-desktop`
-2. 创建并推送 annotated tag `desktop-v0.2.4`
+2. 创建并推送 annotated tag `desktop-v0.2.5`
 3. workflow 会在 tag 上自动创建 GitHub Release（如果不存在），随后上传：
    - macOS `*.dmg` + `SHA256SUMS-macos.txt`
    - Windows `*Setup*.exe`、portable zip、`SHA256SUMS-windows.txt`

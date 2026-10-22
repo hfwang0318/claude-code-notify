@@ -471,7 +471,7 @@ def maybe_dump(hook_input: dict) -> None:
 def event_matches(expected: str) -> bool:
     """只允许返回本次 hook 实际收到的事件名，避免 Claude 报 event name 不匹配。"""
     if CURRENT_EVENT and CURRENT_EVENT != expected:
-        note(f"拒绝返回 {expected} 输出：本次事件是 {CURRENT_EVENT}")
+        note(f"skip {expected} output: current event is {CURRENT_EVENT}")
         return False
     return True
 

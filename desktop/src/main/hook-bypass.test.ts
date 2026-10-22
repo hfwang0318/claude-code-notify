@@ -131,7 +131,7 @@ module.emit_allow()
       })
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout.trim().split(/\r?\n/)[0]).toBe('GUARD_OK')
-      expect(result.stderr).toContain('拒绝返回 PermissionRequest 输出')
+      expect(result.stderr).toContain('skip PermissionRequest output')
       const jsonLine = result.stdout.trim().split(/\r?\n/).at(-1) || ''
       expect(JSON.parse(jsonLine).hookSpecificOutput.hookEventName).toBe('PermissionRequest')
     } finally {
