@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.6 — 2026-10-22
+
+### 修复
+
+- Claude 结束一轮后通过 Stop hook 发送“已完成”通知，不再只依赖权限/通知事件
+- ExitPlanMode 的 PermissionRequest allow 现在回传原始 `updatedInput` 并 `setMode`，修复点击允许后计划对话框仍停留、Claude 不继续的问题（Claude Code 2.1.28x 兼容 workaround）
+- Hook 版本升到 5，旧 hook 会在应用启动时自动升级
+
+### 测试
+
+- 真实 Claude Stop 通知 E2E
+- ExitPlanMode allow 输出 hook 回归测试
+- bypass 工具矩阵测试（Bash/Write/Edit/MultiEdit/WebFetch/Read）
+- 当前 60 个测试通过
+
 ## 0.2.5 — 2026-10-22
 
 ### 修复

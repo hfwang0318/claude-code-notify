@@ -13,14 +13,14 @@ Claude Code 的桌面审批与通知工具：把权限请求、`AskUserQuestion`
 
 ## 下载
 
-最新版本：[Desktop v0.2.5](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.5)
+最新版本：[Desktop v0.2.6](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.6)
 
-- Windows 免安装：`Claude-Notify-0.2.5-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.2.5.exe`
-- macOS：`Claude.Notify-0.2.5-arm64.dmg`
+- Windows 免安装：`Claude-Notify-0.2.6-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.2.6.exe`
+- macOS：`Claude.Notify-0.2.6-arm64.dmg`
 - 校验：`SHA256SUMS-macos.txt` / `SHA256SUMS-windows.txt`
 
-也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.5) 下载。
+也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.6) 下载。
 
 Windows 包未签名，SmartScreen 提示时选“更多信息 → 仍要运行”。macOS DMG 未签名/未公证，macOS 26/27 上不能直接启动，详见 [desktop/README.md](desktop/README.md)。
 
@@ -31,7 +31,7 @@ cd desktop
 pnpm install
 pnpm dev          # 开发模式
 pnpm demo         # 构建后打开主窗口 + 演示审批
-pnpm test         # 55 个单测/集成测试
+pnpm test         # 60 个单测/集成测试
 pnpm e2e:claude   # 真实 Claude Code 端到端（需已登录 Claude）
 pnpm self-test    # HTTP 协议冒烟
 pnpm local-app    # macOS：生成可双击的本机启动器

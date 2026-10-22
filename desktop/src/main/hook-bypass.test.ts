@@ -139,6 +139,38 @@ module.emit_allow()
     }
   })
 
+  maybe('returns updatedInput when allowing ExitPlanMode', async () => {
+    const plan = { plan: '# Test plan' }
+    const result = await runHookPayload({
+      hook_event_name: 'PermissionRequest',
+      permission_mode: 'plan',
+      tool_name: 'ExitPlanMode',
+      tool_input: plan,
+      session_id: 'hook-test-plan'
+    })
+    expect(result.code, result.stderr).toBe(0)
+    const output = JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1) || '{}')
+    expect(output.hookSpecificOutput.decision).toMatchObject({
+      behavior: 'allow',
+      updatedInput: plan,
+      updatedPermissions: [{ type: 'setMode', mode: 'default', destination: 'session' }]
+    })
+  })
+
+  maybe('skips bypass requests for file and other tools too', async () => {
+    for (const tool of ['Write', 'Edit', 'MultiEdit', 'WebFetch', 'Read']) {
+      const result = await runHookPayload({
+        hook_event_name: 'PermissionRequest',
+        permission_mode: 'bypassPermissions',
+        tool_name: tool,
+        tool_input: {},
+        session_id: `hook-test-${tool}`
+      })
+      expect(result.code, `${tool}: ${result.stderr}`).toBe(0)
+      expect(result.requests, `${tool} should not request approval`).toBe(0)
+    }
+  })
+
   maybe('still requests approval in default mode', async () => {
     const result = await runHook('default')
     expect(result.code, result.stderr).toBe(0)

@@ -165,8 +165,8 @@ export function deployLocal(
     // Windows
   }
 
-  const scriptName = config.mode === 'popup' ? APPROVAL_SCRIPT_NAME : NOTIFY_SCRIPT_NAME
-  const removedScript = config.mode === 'popup' ? NOTIFY_SCRIPT_NAME : APPROVAL_SCRIPT_NAME
+  const isPopup = config.mode === 'popup'
+  const scriptName = isPopup ? APPROVAL_SCRIPT_NAME : NOTIFY_SCRIPT_NAME
   const source = join(scriptsDir, scriptName)
   if (!existsSync(source)) throw new Error(`找不到内置钩子脚本 ${source}`)
 
@@ -177,8 +177,20 @@ export function deployLocal(
   } catch {
     // Windows
   }
-  const removedPath = join(claudeDir, removedScript)
-  if (existsSync(removedPath)) unlinkSync(removedPath)
+  const notifySource = join(scriptsDir, NOTIFY_SCRIPT_NAME)
+  const notifyScriptPath = join(claudeDir, NOTIFY_SCRIPT_NAME)
+  if (isPopup) {
+    if (!existsSync(notifySource)) throw new Error(`找不到内置钩子脚本 ${notifySource}`)
+    writeFileSync(notifyScriptPath, readFileSync(notifySource, 'utf-8'), 'utf-8')
+    try {
+      chmodSync(notifyScriptPath, 0o755)
+    } catch {
+      // Windows
+    }
+  }
+  if (!isPopup && existsSync(join(claudeDir, APPROVAL_SCRIPT_NAME))) {
+    unlinkSync(join(claudeDir, APPROVAL_SCRIPT_NAME))
+  }
   onProgress('info', `本机钩子脚本已写入 ${scriptPath}`)
 
   const settingsPath = join(claudeDir, 'settings.json')
@@ -196,6 +208,7 @@ export function deployLocal(
       ? {
           CLAUDE_NOTIFY_TOKEN: config.token,
           CLAUDE_APPROVAL_URL: `${baseUrl}/claude-approval`,
+          CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`,
           CLAUDE_APPROVAL_TIMEOUT: config.timeoutSec ?? 240,
           CLAUDE_ASKUSER_CHANNEL: 'pretooluse',
           CLAUDE_NOTIFY_ORIGIN: config.origin || '本机',
@@ -211,11 +224,21 @@ export function deployLocal(
   const pythonPath =
     platform === 'win32' ? config.pythonPath || resolveWindowsPython() : undefined
   const hookEntry = buildLocalHookEntry(envPairs, scriptPath, platform, pythonPath)
+  const notifyEnvPairs: Record<string, string | number> = {
+    CLAUDE_NOTIFY_TOKEN: config.token,
+    CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`,
+    CLAUDE_NOTIFY_ORIGIN: config.origin || '本机',
+    [HOOK_VERSION_KEY]: HOOK_VERSION
+  }
+  const stopEntry = isPopup
+    ? buildLocalHookEntry(notifyEnvPairs, notifyScriptPath, platform, pythonPath)
+    : hookEntry
   const merged = mergeSettingsJson(existing, {
     mode: config.mode,
     hookEntry,
     hookTimeout: 300,
-    questionEntry: hookEntry
+    questionEntry: hookEntry,
+    stopEntry
   })
   writeFileSync(settingsPath, merged, 'utf-8')
   onProgress(

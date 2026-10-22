@@ -117,7 +117,7 @@ RESOLUTION_URL = cfg(
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
-HOOK_VERSION = "4"
+HOOK_VERSION = "5"
 CURRENT_EVENT = ""
 
 
@@ -476,7 +476,10 @@ def event_matches(expected: str) -> bool:
     return True
 
 
-def emit_allow(updated_permissions: Optional[list] = None) -> None:
+def emit_allow(
+    updated_permissions: Optional[list] = None,
+    updated_input: Optional[dict] = None,
+) -> None:
     """
     按 PermissionRequest 钩子协议输出允许决定。
     updated_permissions 为用户选择的 permission_suggestion 原对象
@@ -485,6 +488,8 @@ def emit_allow(updated_permissions: Optional[list] = None) -> None:
     if not event_matches("PermissionRequest"):
         return
     decision: dict = {"behavior": "allow"}
+    if updated_input is not None:
+        decision["updatedInput"] = updated_input
     if updated_permissions:
         decision["updatedPermissions"] = updated_permissions
     output = {
@@ -549,12 +554,24 @@ def format_answer_message(answers: list) -> str:
 def handle_result(
     result: dict,
     suggestions: list,
+    tool_name: str = "",
+    tool_input: Optional[dict] = None,
 ) -> None:
     """把桌面端的决定映射为 PermissionRequest 协议输出。"""
     decision = result.get("decision")
 
     if decision == "allow":
-        emit_allow()
+        if tool_name == "ExitPlanMode":
+            # Claude Code 2.1.28x requires updatedInput for human-gated tools;
+            # bare allow leaves the plan dialog open. setMode leaves plan mode.
+            emit_allow(
+                updated_permissions=[
+                    {"type": "setMode", "mode": "default", "destination": "session"}
+                ],
+                updated_input=tool_input if isinstance(tool_input, dict) else {},
+            )
+        else:
+            emit_allow()
     elif decision == "deny":
         emit_deny("用户在桌面通知端拒绝了此操作")
     elif decision == "suggestion":
@@ -807,7 +824,7 @@ def main() -> None:
     if event == "PreToolUse":
         handle_result_pretooluse(result, questions)
     else:
-        handle_result(result, suggestions)
+        handle_result(result, suggestions, tool_name, tool_input)
 
     sys.exit(0)
 

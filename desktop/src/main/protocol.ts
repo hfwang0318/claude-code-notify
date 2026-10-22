@@ -175,9 +175,13 @@ export function buildNotification(
   const project = projectName(cwd)
   const message = safeString(payload.message)
   const notificationType = safeString(payload.notification_type)
-  const title = `Claude Code 等待审批 · ${project}`
+  const isStop = notificationType === 'Stop' || safeString(payload.matcher) === 'Stop'
+  const title = isStop
+    ? `Claude Code 已完成 · ${project}`
+    : `Claude Code 等待审批 · ${project}`
   const bodyParts = [
-    message || 'Claude Code 正在等待权限审批。',
+    message ||
+      (isStop ? 'Claude Code 已完成当前回合。' : 'Claude Code 正在等待权限审批。'),
     `来源：${origin}${cwd ? ` · ${cwd}` : ''}`
   ]
   if (notificationType) bodyParts.push(`类型：${notificationType}`)

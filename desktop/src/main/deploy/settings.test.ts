@@ -59,6 +59,24 @@ describe('mergeSettingsJson', () => {
     expect(twice.hooks.PermissionRequest).toHaveLength(2)
   })
 
+  it('installs a Stop hook for turn-completion notifications', () => {
+    const notify: HookEntry = {
+      type: 'command',
+      command: "CLAUDE_NOTIFY_TOKEN='abc' python3 $HOME/.claude/claude_notify_hook.py"
+    }
+    const merged = JSON.parse(
+      mergeSettingsJson('', {
+        mode: 'popup',
+        hookEntry: hook,
+        hookTimeout: 300,
+        stopEntry: notify
+      })
+    )
+    expect(merged.hooks.Stop).toHaveLength(1)
+    expect(merged.hooks.Stop[0].hooks[0].command).toContain('claude_notify_hook.py')
+    expect(merged.hooks.Stop[0].hooks[0].timeout).toBe(30)
+  })
+
   it('uses timeout 30 for notification mode', () => {
     const merged = JSON.parse(
       mergeSettingsJson('', { mode: 'notify', hookEntry: hook, hookTimeout: 300 })

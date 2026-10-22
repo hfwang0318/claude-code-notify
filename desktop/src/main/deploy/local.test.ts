@@ -59,6 +59,7 @@ describe('deployLocal', () => {
     const settings = JSON.parse(readFileSync(result.settingsPath, 'utf-8'))
     expect(settings.hooks.PermissionRequest).toHaveLength(2)
     expect(settings.hooks.PreToolUse).toHaveLength(1)
+    expect(JSON.stringify(settings.hooks.Stop)).toContain('claude_notify_hook.py')
     expect(settings.hooks.PermissionRequest[0].hooks[0].command).toBe('echo third-party')
     const installedHook = settings.hooks.PermissionRequest[1].hooks[0]
     if (process.platform === 'win32') {
@@ -74,6 +75,8 @@ describe('deployLocal', () => {
     expect(config.CLAUDE_APPROVAL_URL).toBe('http://127.0.0.1:18765/claude-approval')
     expect(config[HOOK_VERSION_KEY]).toBe(HOOK_VERSION)
     expect(config.CLAUDE_ASKUSER_CHANNEL).toBe('pretooluse')
+    expect(config.CLAUDE_NOTIFY_URL).toBe('http://127.0.0.1:18765/claude-notify')
+    expect(existsSync(join(claudeDir, 'claude_notify_hook.py'))).toBe(true)
 
     const backups = readFileSync(result.settingsPath, 'utf-8')
     expect(backups).toContain('third-party')
@@ -169,6 +172,7 @@ it('supports notification mode locally', () => {
   expect(settings.hooks.Notification).toHaveLength(1)
   expect(settings.hooks.Notification[0].hooks[0].timeout).toBe(30)
   expect(settings.hooks.PermissionRequest).toBeUndefined()
+  expect(JSON.stringify(settings.hooks.Stop)).toContain('claude_notify_hook.py')
   const config = JSON.parse(readFileSync(result.configPath, 'utf-8'))
   expect(config.CLAUDE_NOTIFY_URL).toBe('http://127.0.0.1:18765/claude-notify')
   expect(detectLocalDeploy(claudeDir)).toBe('notify')

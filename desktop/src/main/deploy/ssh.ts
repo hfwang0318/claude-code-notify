@@ -262,11 +262,12 @@ export async function deployToServer(
     await execCommand(client, `mkdir -p ${shellQuote(claudeDir)} && chmod 700 ${shellQuote(claudeDir)}`)
     log(`创建目录 ${claudeDir}`)
 
-    const scriptName = config.mode === 'popup' ? APPROVAL_SCRIPT_NAME : NOTIFY_SCRIPT_NAME
-    const removedScript = config.mode === 'popup' ? NOTIFY_SCRIPT_NAME : APPROVAL_SCRIPT_NAME
+    const isPopup = config.mode === 'popup'
+    const scriptName = isPopup ? APPROVAL_SCRIPT_NAME : NOTIFY_SCRIPT_NAME
     const localScript = join(hooksDirectory(), scriptName)
     const scriptContent = readFileSync(localScript, 'utf-8')
     const remoteScript = `${claudeDir}/${scriptName}`
+    const remoteNotifyScript = `${claudeDir}/${NOTIFY_SCRIPT_NAME}`
 
     const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
       client.sftp((error, value) => (error ? reject(error) : resolve(value)))
@@ -275,7 +276,17 @@ export async function deployToServer(
       log(`上传钩子脚本 → ${remoteScript}`)
       await sftpWrite(sftp, remoteScript, scriptContent)
       await sftpChmod(sftp, remoteScript, 0o755)
-      await execCommand(client, `rm -f ${shellQuote(`${claudeDir}/${removedScript}`)}`)
+      if (isPopup) {
+        const notifyContent = readFileSync(
+          join(hooksDirectory(), NOTIFY_SCRIPT_NAME),
+          'utf-8'
+        )
+        log(`上传回合通知脚本 → ${remoteNotifyScript}`)
+        await sftpWrite(sftp, remoteNotifyScript, notifyContent)
+        await sftpChmod(sftp, remoteNotifyScript, 0o755)
+      } else {
+        await execCommand(client, `rm -f ${shellQuote(`${claudeDir}/${APPROVAL_SCRIPT_NAME}`)}`)
+      }
 
       const settingsPath = `${claudeDir}/settings.json`
       const existing = (await sftpRead(sftp, settingsPath)) || ''
@@ -291,6 +302,7 @@ export async function deployToServer(
           ? {
               CLAUDE_NOTIFY_TOKEN: config.token,
               CLAUDE_APPROVAL_URL: `${baseUrl}/claude-approval`,
+              CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`,
               CLAUDE_APPROVAL_TIMEOUT: config.approvalTimeout,
               CLAUDE_ASKUSER_CHANNEL: 'pretooluse',
               CLAUDE_NOTIFY_ORIGIN: config.origin || config.host,
@@ -307,12 +319,20 @@ export async function deployToServer(
       }
 
       const hookCommand = buildHookCommand(envPairs, scriptName)
+      const notifyEnvPairs: Record<string, string | number> = {
+        CLAUDE_NOTIFY_TOKEN: config.token,
+        CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`,
+        CLAUDE_NOTIFY_ORIGIN: config.origin || config.host,
+        [HOOK_VERSION_KEY]: HOOK_VERSION
+      }
+      const stopCommand = buildHookCommand(notifyEnvPairs, NOTIFY_SCRIPT_NAME)
       log('合并钩子配置（清除未选模式的残留）…')
       const merged = mergeSettingsJson(existing, {
         mode: config.mode,
         hookEntry: { type: 'command', command: hookCommand },
         hookTimeout: config.hookTimeout,
-        questionEntry: { type: 'command', command: hookCommand }
+        questionEntry: { type: 'command', command: hookCommand },
+        stopEntry: { type: 'command', command: stopCommand }
       })
       await sftpWrite(sftp, settingsPath, merged)
       log(`已写入 ${settingsPath}`)

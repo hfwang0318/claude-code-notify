@@ -12,7 +12,7 @@ pnpm e2e:claude
 正常输出：
 
 ```text
-E2E PASS · all · 105.2s
+E2E PASS · all · 80.5s
 ```
 
 脚本：`scripts/e2e-claude.mjs`
@@ -23,7 +23,8 @@ E2E PASS · all · 105.2s
 
 | 用例 | 触发方式 | 关键断言 |
 |---|---|---|
-| `bypass` | 真实 Claude 分别用 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions` 启动，强制调用 Bash / Write / Edit | 全程 pending=0；三个工具都真实执行；history 没有审批记录 |
+| `bypass` | 真实 Claude 分别用 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions` 启动，执行 Bash 并写入/编辑文件（Write/Edit 可用时优先） | 全程 pending=0；Bash + 文件结果真实产生；history 没有审批记录 |
+| `stop` | 真实 Claude 完成一轮（`-p`） | 应用日志收到 `type=Stop` 通知；标题是“已完成”而不是“等待审批” |
 | `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
 | `resolved` | 一路真实 Claude 请求权限，然后模拟终端侧已处理 | 调用 `/claude-approval-resolved` 返回 `resolved`；pending 清空；history 为 `cancelled/terminal` |
 | `timeout` | 一路真实 Claude 请求权限，使用 15s hook 超时（服务端 5s） | 不做决定时 pending 清空；`expired` 出现；history 为 `timeout/timeout`；调用确认后 `expired` 清空 |
@@ -33,6 +34,8 @@ E2E PASS · all · 105.2s
 `bypass` 用例的回归背景：旧版 `claude_approval_hook.py` 没有读取 `permission_mode`，在 bypass 下仍会把 Bash/文件工具转发到桌面。当前 hook 会跳过 `bypassPermissions` / `dontAsk`；应用启动时若检测到本机 hook 版本过期，会自动备份并更新。
 
 Hook 事件名回归：`PermissionRequest` 只能输出 `PermissionRequest`，`PreToolUse` 只能输出 `PreToolUse`；不匹配时静默回退终端，避免 Claude 报 `hook returned incorrect event name`。该路径由 `src/main/hook-bypass.test.ts` 覆盖。
+
+计划模式回归：`ExitPlanMode` 的 PermissionRequest allow 必须带原始 `updatedInput` 并 `setMode`，否则 Claude Code 2.1.28x 会保留计划审批对话框。真实 `-p` 当前没有 `ExitPlanMode` 工具，因此由 `src/main/hook-bypass.test.ts` 覆盖输出结构。
 
 `AskUserQuestion` 重复弹窗回归：问答由 PreToolUse 通道负责；旧部署缺少 `CLAUDE_ASKUSER_CHANNEL` 时，随后的 PermissionRequest 会再弹一次。服务端现在直接拒绝这种重复 PermissionRequest（回退终端），hook 测试也验证通道存在时不会发送。真实 `AskUserQuestion` 在当前 `-p` 模型工具集不可用，因此该路径由 self-test + hook/server 单测覆盖，而不是本脚本的真实 Claude 用例。
 
@@ -45,6 +48,8 @@ Hook 事件名回归：`PermissionRequest` 只能输出 `PermissionRequest`，`P
 - 签名、安装包、系统通知点击、窗口拖拽等平台交互
 
 这些由 `pnpm test`、`pnpm self-test`、`pnpm capture` 和真机验收覆盖。
+
+Claude Code 当前会话的工具注册表可能动态只暴露 ToolSearch/Web 工具；此时 `multi`、`resolved`、`timeout` 会明确打印 SKIP 而不是超时失败。需要严格验证时设置 `E2E_REQUIRE_TOOLS=1`。
 
 ---
 
@@ -97,7 +102,7 @@ E2E_REQUIRE_CLAUDE=1 pnpm e2e:claude
 
 | 变量 | 作用 |
 |---|---|
-| `E2E_CASES` | `all` 或 `bypass,multi,resolved,timeout` |
+| `E2E_CASES` | `all` 或 `bypass,stop,multi,resolved,timeout` |
 | `E2E_CLAUDE_SETTINGS` | 提供 apiKeyHelper/env/model 的 Claude 设置文件 |
 | `E2E_SKIP_BUILD=1` | 跳过 `pnpm build` |
 | `E2E_KEEP=1` | 保留临时目录，失败时默认保留 |
@@ -105,6 +110,7 @@ E2E_REQUIRE_CLAUDE=1 pnpm e2e:claude
 | `E2E_SKIP_AUTH_PROBE=1` | 跳过认证探测（不建议） |
 | `E2E_ORIGIN` | 覆盖测试来源标签，默认 `e2e-claude` |
 | `E2E_THEME` | 测试实例主题，默认 `dark`；需要浅色截图时设为 `light` |
+| `E2E_REQUIRE_TOOLS=1` | Claude 工具未暴露时不再 SKIP，直接失败（严格模式） |
 | `CLAUDE_BIN` | 指定 Claude 可执行文件 |
 
 退出码：
@@ -202,4 +208,4 @@ E2E 需要显示窗口。Linux 无头环境用 `xvfb-run -a pnpm e2e:claude`；m
 
 已验证环境：Claude Code **2.1.295**。`bypass` 下 Bash / Write / Edit 均执行且 pending=0；`multi` 下两路真实 `-p` 会话并发，先批准第二路，弹窗自动切回第一路；两路均输出 `DONE` 并生成 `result.txt`；history 中记录 `allow/popup`，session 标签/颜色/来源正确。
 
-自动 E2E 四个用例当前均通过，耗时约 **90–110s**。`bypass` 同时覆盖 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions`。
+自动 E2E 五个用例当前均通过，耗时约 **60–130s**，取决于 Claude 当前会话是否暴露 Bash/文件工具。`bypass` 同时覆盖 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions`；`stop` 验证真实回合结束通知。

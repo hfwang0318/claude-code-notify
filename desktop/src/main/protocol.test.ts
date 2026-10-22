@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { approvalFromPayload } from './protocol'
+import { approvalFromPayload, buildNotification } from './protocol'
 
 describe('approvalFromPayload', () => {
   it('preserves multi-session identity, terminal metadata and risk', () => {
@@ -45,5 +45,29 @@ describe('approvalFromPayload', () => {
     )
     expect(item.correlation).toBe('unmatched')
     expect(item.sessionKey).toBe('本机:s')
+  })
+})
+
+
+describe('buildNotification', () => {
+  it('names Stop notifications as completed, not waiting for approval', () => {
+    const notification = buildNotification({
+      session_id: 'session-a',
+      origin: '本机',
+      cwd: '/work/backend-api',
+      notification_type: 'Stop'
+    })
+    expect(notification.title).toContain('已完成')
+    expect(notification.title).not.toContain('等待审批')
+    expect(notification.body).toContain('完成当前回合')
+  })
+
+  it('keeps permission notifications labeled as waiting for approval', () => {
+    const notification = buildNotification({
+      session_id: 'session-a',
+      cwd: '/work/backend-api',
+      notification_type: 'permission_request'
+    })
+    expect(notification.title).toContain('等待审批')
   })
 })

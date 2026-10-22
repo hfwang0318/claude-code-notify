@@ -2,7 +2,7 @@ export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
 export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
-export const HOOK_VERSION = '4'
+export const HOOK_VERSION = '5'
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
 
 export const ENV_MARK_BEGIN = '# >>> claude-notify >>>'
@@ -29,6 +29,7 @@ export interface MergeOptions {
   hookTimeout: number
   matcher?: string
   questionEntry?: HookEntry
+  stopEntry?: HookEntry
 }
 
 export function buildHookCommand(
@@ -73,7 +74,7 @@ export function mergeSettingsJson(
       : {}
   settings.hooks = hooks
 
-  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification']) {
+  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification', 'Stop']) {
     const entries = hooks[sectionName]
     if (!Array.isArray(entries)) continue
     const cleaned = entries.filter((entry) => !isOurs(entry))
@@ -91,6 +92,17 @@ export function mergeSettingsJson(
     : []
   section.push({ matcher: options.matcher || '', hooks: [entry] })
   hooks[sectionName] = section
+
+  if (options.stopEntry) {
+    const stopSection = Array.isArray(hooks.Stop)
+      ? (hooks.Stop as unknown[])
+      : []
+    stopSection.push({
+      matcher: '',
+      hooks: [{ ...options.stopEntry, timeout: 30 }]
+    })
+    hooks.Stop = stopSection
+  }
 
   if (options.mode === 'popup' && options.questionEntry) {
     const questionEntry: Record<string, unknown> = {
@@ -128,7 +140,7 @@ export function stripSettingsJson(existingText: string): {
       : null
   if (!hooks) return { text: existingText, removed: 0, changed: false }
   let removed = 0
-  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification']) {
+  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification', 'Stop']) {
     const entries = hooks[sectionName]
     if (!Array.isArray(entries)) continue
     const cleaned = entries.filter((entry) => {
