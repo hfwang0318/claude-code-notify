@@ -18,8 +18,8 @@ Claude Code 的桌面审批与通知工具：把权限请求、`AskUserQuestion`
 最新版本：[Desktop v0.2.0](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.0)
 
 - Windows 免安装：Release 里的 `Claude-Notify-0.2.0-win-x64-portable.zip`
-- Windows 安装版：`Claude Notify Setup 0.2.0.exe`
-- macOS：`Claude Notify-0.2.0-arm64.dmg`
+- Windows 安装版：`Claude.Notify.Setup.0.2.0.exe`
+- macOS：`Claude.Notify-0.2.0-arm64.dmg`
 
 也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.0) 下载。
 

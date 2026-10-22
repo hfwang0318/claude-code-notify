@@ -87,8 +87,8 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ## 下载、安装与升级
 
 - Windows 免安装：Release 里的 `Claude-Notify-0.2.0-win-x64-portable.zip`
-- Windows 安装版：`Claude Notify Setup 0.2.0.exe`（windows-latest CI 构建）
-- macOS：`Claude Notify-0.2.0-arm64.dmg`（未签名/未公证）
+- Windows 安装版：`Claude.Notify.Setup.0.2.0.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.2.0-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
