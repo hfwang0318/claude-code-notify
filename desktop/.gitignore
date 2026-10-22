@@ -7,3 +7,5 @@ release
 build/icon.iconset
 
 Claude Notify Local.app
+
+*.tsbuildinfo

@@ -1,13 +1,12 @@
 .DS_Store
-__pycache__/
-*.py[cod]
-.venv/
-.pytest_cache/
-.ruff_cache/
+.serena/
 
-# PyInstaller outputs
-/build/
-/dist/
+# Dependencies and build outputs
+node_modules/
+out/
+dist/
+release/
+artifacts/
 
 # Local logs and diagnostics
 *.log
