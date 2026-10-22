@@ -104,6 +104,8 @@ export default function Preferences({
   const [ruleTool, setRuleTool] = useState('Bash')
   const [rulePattern, setRulePattern] = useState('')
   const [ruleProject, setRuleProject] = useState('')
+  const [ruleSessionKey, setRuleSessionKey] = useState('')
+  const [ruleOrigin, setRuleOrigin] = useState('')
   const [ruleMessage, setRuleMessage] = useState('')
 
   useEffect(() => {
@@ -114,6 +116,8 @@ export default function Preferences({
     setMaxPending(String(state.prefs.maxPending))
     setNetworkMessage('')
     setRuleMessage('')
+    setRuleSessionKey('')
+    setRuleOrigin('')
     if (state.pending[0]) setRuleProject(state.pending[0].project)
   }, [open, state.prefs.port, state.prefs.bindMode, state.prefs.timeoutSec, state.prefs.maxPending])
 
@@ -131,6 +135,17 @@ export default function Preferences({
 
   const previews = useMemo(() => state.sessions.slice(0, 8), [state.sessions])
   const waitingCount = state.sessions.filter((session) => session.state === 'waiting').length
+  const waitingSessions = useMemo(
+    () => state.sessions.filter((session) => session.waiting > 0),
+    [state.sessions]
+  )
+  const ruleOrigins = useMemo(() => {
+    const values = [
+      ...state.sessions.map((session) => session.origin),
+      ...state.pending.map((entry) => entry.origin)
+    ]
+    return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)))
+  }, [state.sessions, state.pending])
 
   if (!open) return null
 
@@ -151,8 +166,13 @@ export default function Preferences({
 
   const addRule = async (): Promise<void> => {
     setRuleMessage('')
-    if (ruleScope === 'session' && !state.pending[0]) {
-      setRuleMessage('当前没有等待中的会话；请改用项目或全局作用域')
+    const targetSession = waitingSessions.find((session) => session.key === ruleSessionKey)
+    if (ruleScope === 'session' && !targetSession) {
+      setRuleMessage(
+        waitingSessions.length === 0
+          ? '当前没有等待中的会话；请改用项目或全局作用域'
+          : '请选择目标会话'
+      )
       return
     }
     if (ruleScope === 'project' && !ruleProject.trim()) {
@@ -164,11 +184,9 @@ export default function Preferences({
         scope: ruleScope,
         tool: ruleTool,
         pattern: rulePattern,
-        project:
-          ruleScope === 'project'
-            ? ruleProject.trim() || state.pending[0]?.project
-            : undefined,
-        sessionKey: ruleScope === 'session' ? state.pending[0]?.sessionKey : undefined
+        project: ruleScope === 'project' ? ruleProject.trim() : undefined,
+        sessionKey: ruleScope === 'session' ? targetSession?.key : undefined,
+        origin: ruleScope === 'project' && ruleOrigin ? ruleOrigin : undefined
       })
       setRulePattern('')
       setRuleMessage('规则已保存')
@@ -575,19 +593,65 @@ export default function Preferences({
                       onChange={(event) => setRulePattern(event.target.value)}
                     />
                   </label>
-                  {ruleScope === 'project' ? (
-                    <label className="field">
-                      <span>项目名</span>
-                      <input
-                        value={ruleProject}
-                        placeholder="例如 backend-api"
-                        onChange={(event) => setRuleProject(event.target.value)}
-                      />
+                  {ruleScope === 'session' ? (
+                    <label className="field wide">
+                      <span>目标会话</span>
+                      <select
+                        value={ruleSessionKey}
+                        disabled={waitingSessions.length === 0}
+                        onChange={(event) => setRuleSessionKey(event.target.value)}
+                      >
+                        <option value="">
+                          {waitingSessions.length === 0
+                            ? '没有等待中的会话'
+                            : '请选择目标会话'}
+                        </option>
+                        {waitingSessions.map((session) => (
+                          <option key={session.key} value={session.key}>
+                            {`${session.label} · ${session.origin}`}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                   ) : null}
+                  {ruleScope === 'project' ? (
+                    <>
+                      <label className="field">
+                        <span>项目名</span>
+                        <input
+                          value={ruleProject}
+                          placeholder="例如 backend-api"
+                          onChange={(event) => setRuleProject(event.target.value)}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>来源</span>
+                        <select
+                          value={ruleOrigin}
+                          onChange={(event) => setRuleOrigin(event.target.value)}
+                        >
+                          <option value="">所有来源</option>
+                          {ruleOrigins.map((origin) => (
+                            <option key={origin} value={origin}>
+                              {origin}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </>
+                  ) : null}
                 </div>
+                {ruleScope === 'session' && waitingSessions.length === 0 ? (
+                  <div className="form-note">
+                    当前没有等待中的会话，无法添加会话规则；请改用项目或全局作用域。
+                  </div>
+                ) : null}
                 <div className="row">
-                  <button className="btn primary" onClick={() => void addRule()}>
+                  <button
+                    className="btn primary"
+                    disabled={ruleScope === 'session' && waitingSessions.length === 0}
+                    onClick={() => void addRule()}
+                  >
                     添加规则
                   </button>
                   {ruleMessage ? <span className="form-note">{ruleMessage}</span> : null}

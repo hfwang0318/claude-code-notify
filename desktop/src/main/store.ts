@@ -77,7 +77,8 @@ export class Store {
         hookVersion: '',
         hookStale: false,
         modeMismatch: false,
-        profiles: []
+        profiles: [],
+        drift: []
       },
       network: {
         addresses: options.localIps.map((address) => ({

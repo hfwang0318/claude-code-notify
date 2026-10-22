@@ -240,7 +240,7 @@ export function deployLocal(
     questionEntry: hookEntry,
     stopEntry
   })
-  writeFileSync(settingsPath, merged, 'utf-8')
+  writePrivate(settingsPath, merged)
   onProgress(
     'notify',
     `本机 settings.json 已合并（${config.mode === 'popup' ? '置顶弹窗' : '系统通知'}）`
@@ -367,7 +367,7 @@ export function removeLocalDeploy(
     const stripped = stripSettingsJson(existing)
     removedHooks = stripped.removed
     if (stripped.changed) {
-      writeFileSync(settingsPath, stripped.text, 'utf-8')
+      writePrivate(settingsPath, stripped.text)
       onProgress('info', `已从本机 settings.json 移除 ${removedHooks} 个钩子条目`)
     }
   }
@@ -411,7 +411,7 @@ export function restoreLocalBackup(
   if (backupOfCurrent) {
     writeFileSync(backupOfCurrent, readFileSync(settingsPath, 'utf-8'), 'utf-8')
   }
-  writeFileSync(settingsPath, readFileSync(backup, 'utf-8'), 'utf-8')
+  writePrivate(settingsPath, readFileSync(backup, 'utf-8'))
   onProgress('notify', `已恢复 settings.json ← ${backup}`)
   return { ok: true, restoredFrom: backup, backupOfCurrent }
 }

@@ -9,11 +9,12 @@ import {
   nativeTheme,
   Notification,
   screen,
+  session,
   shell,
   Tray
 } from 'electron'
 import { spawnSync } from 'node:child_process'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import {
   appendFileSync,
   chmodSync,
@@ -53,6 +54,8 @@ import {
   sortByDeadline
 } from '../shared/session'
 import { buildRuleFromItem, matchingRule, validateRule } from '../shared/rules'
+import { canDeliverSystemNotification } from '../shared/notification-policy'
+import { computeDeployDrift } from '../shared/deploy-drift'
 import {
   appDataDir,
   decryptSecret,
@@ -87,12 +90,13 @@ import { HOOK_VERSION } from './deploy/settings'
 import {
   deployToServer,
   humanizeSshError,
+  isDeployCancelled,
   removeDeployFromServer,
   restoreDeployBackup,
   testSshConnection
 } from './deploy/ssh'
 import { HistoryStore } from './history'
-import { listAddresses, preferredAddress } from './net'
+import { isPortFree, listAddresses, preferredAddress } from './net'
 import { approvalFromPayload } from './protocol'
 import { NotifyServer } from './server'
 import { SessionRegistry } from './sessions'
@@ -104,6 +108,9 @@ const DEFAULT_PORT = 18765
 const POPUP_WIDTH = 560
 const POPUP_HEIGHT = 540
 const LOG_MAX_BYTES = 5 * 1024 * 1024
+const BROADCAST_INTERVAL_MS = 16
+const MAIN_QUEUE_FLUSH_DELAY_MS = 30
+const MAIN_QUEUE_MAX = 200
 
 const isCapture = process.argv.includes('--capture')
 const isSelfTest = process.argv.includes('--self-test')
@@ -146,6 +153,16 @@ const localApprovals = new Map<string, (decision: string) => void>()
 const decisionSources = new Map<string, DecisionSource>()
 const itemCache = new Map<string, ApprovalItem>()
 const settledIds = new Set<string>()
+
+let mainWindowReady = false
+let mainQueueTimer: NodeJS.Timeout | null = null
+const mainQueue: Array<{ channel: string; args: unknown[] }> = []
+
+let broadcastTimer: NodeJS.Timeout | null = null
+let pendingBroadcast: AppState | null = null
+
+let quitting = false
+let quitAllowed = false
 
 let sessions: SessionRegistry
 let history: HistoryStore
@@ -204,18 +221,67 @@ function persistPendingSnapshot(): void {
   }
 }
 
-function broadcast(state: AppState): void {
+function flushBroadcast(): void {
+  if (broadcastTimer) {
+    clearTimeout(broadcastTimer)
+    broadcastTimer = null
+  }
+  const state = pendingBroadcast
+  pendingBroadcast = null
+  if (!state) return
   for (const window of [mainWindow, popupWindow]) {
     if (window && !window.isDestroyed()) window.webContents.send('state:update', state)
   }
+  // Keep the non-state side effects tied to the final coalesced update.
   updateBadge()
   scheduleTrayRefresh()
 }
 
-function sendToMain(channel: string, ...args: unknown[]): void {
-  if (mainWindow && !mainWindow.isDestroyed()) {
+function broadcast(state: AppState): void {
+  pendingBroadcast = state
+  if (broadcastTimer) return
+  broadcastTimer = setTimeout(flushBroadcast, BROADCAST_INTERVAL_MS)
+}
+
+function sendToMainNow(channel: string, ...args: unknown[]): boolean {
+  if (!mainWindow || mainWindow.isDestroyed()) return false
+  try {
     mainWindow.webContents.send(channel, ...args)
+    return true
+  } catch {
+    return false
   }
+}
+
+function flushMainQueue(): void {
+  mainQueueTimer = null
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindowReady) return
+  const queued = mainQueue.splice(0, mainQueue.length)
+  for (let index = 0; index < queued.length; index += 1) {
+    const message = queued[index]
+    if (!sendToMainNow(message.channel, ...message.args)) {
+      // Window went away mid-flush; preserve the rest for the next window.
+      mainQueue.unshift(...queued.slice(index))
+      return
+    }
+  }
+}
+
+function scheduleMainQueueFlush(): void {
+  if (mainQueueTimer) return
+  mainQueueTimer = setTimeout(flushMainQueue, MAIN_QUEUE_FLUSH_DELAY_MS)
+}
+
+function sendToMain(channel: string, ...args: unknown[]): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  // Keep strict ordering: while anything is queued, later messages queue too.
+  if (mainWindowReady && mainQueue.length === 0) {
+    sendToMainNow(channel, ...args)
+    return
+  }
+  mainQueue.push({ channel, args })
+  if (mainQueue.length > MAIN_QUEUE_MAX) mainQueue.splice(0, mainQueue.length - MAIN_QUEUE_MAX)
+  if (mainWindowReady) scheduleMainQueueFlush()
 }
 
 function sendUiCommand(command: 'prefs' | 'about' | 'inbox'): void {
@@ -240,6 +306,49 @@ function loadRenderer(window: BrowserWindow, hash: string): Promise<void> {
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (devUrl) return window.loadURL(`${devUrl}#${hash}`)
   return window.loadFile(join(__dirname, '../renderer/index.html'), { hash })
+}
+
+/**
+ * Renderer pages may only navigate within the Vite dev server (when present)
+ * or to a bundled file:// page. Anything else is blocked; external links are
+ * still opened by `setWindowOpenHandler` via `shell.openExternal`.
+ */
+function isAllowedRendererNavigation(url: string): boolean {
+  try {
+    const target = new URL(url)
+    if (target.protocol === 'file:') return true
+    const devUrl = process.env['ELECTRON_RENDERER_URL']
+    if (!devUrl) return false
+    return target.origin === new URL(devUrl).origin
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Apply the navigation and webview guards shared by every app window.
+ * `<webview>` is never part of this UI, so attaching one is always denied.
+ */
+function hardenWebContents(contents: Electron.WebContents): void {
+  contents.on('will-navigate', (event) => {
+    if (isAllowedRendererNavigation(event.url)) return
+    event.preventDefault()
+    log('warn', `已阻止渲染进程导航 · ${event.url}`)
+  })
+  contents.on('will-attach-webview', (event) => {
+    event.preventDefault()
+  })
+}
+
+/**
+ * Deny every renderer permission request (camera, microphone, geolocation,
+ * notifications, ...). Main-process `Notification` delivery is unaffected
+ * because it does not go through the renderer session permission handler.
+ */
+function installPermissionRequestGuard(): void {
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => callback(false)
+  )
 }
 
 function windowsBuild(): number {
@@ -295,7 +404,7 @@ function createMainWindow(): BrowserWindow {
       : undefined,
     webPreferences: {
       preload: preloadPath(),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false
     }
@@ -304,13 +413,23 @@ function createMainWindow(): BrowserWindow {
   window.once('ready-to-show', () => {
     if (!headless) window.show()
   })
+  mainWindowReady = false
+  window.webContents.on('did-finish-load', () => {
+    if (window !== mainWindow) return
+    // Give the renderer one tick to attach its listeners before replaying
+    // commands that arrived while the window was being created/reloaded.
+    mainWindowReady = true
+    scheduleMainQueueFlush()
+  })
   window.on('closed', () => {
     mainWindow = null
+    mainWindowReady = false
   })
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
+  hardenWebContents(window.webContents)
   void loadRenderer(window, 'main')
   return window
 }
@@ -440,7 +559,7 @@ function createPopupWindow(): BrowserWindow {
     type: process.platform === 'darwin' ? 'panel' : undefined,
     webPreferences: {
       preload: preloadPath(),
-      sandbox: false,
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false
@@ -470,6 +589,7 @@ function createPopupWindow(): BrowserWindow {
     if (store.get().pending.length > 0) window.setAlwaysOnTop(true, 'screen-saver')
   })
   window.on('moved', savePopupPosition)
+  hardenWebContents(window.webContents)
   void loadRenderer(window, 'popup')
   return window
 }
@@ -731,6 +851,31 @@ function computeModeMismatch(): boolean {
   return localMismatch || remoteMismatch
 }
 
+function fingerprintToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex').slice(0, 16)
+}
+
+/**
+ * Recompute the deployment drift list (and the legacy mode mismatch flag) from
+ * the current store. Only call after bootstrap has created the Store.
+ */
+function refreshDeployHealth(): void {
+  if (!store) return
+  const state = store.get()
+  store.setDeploy({
+    drift: computeDeployDrift({
+      localMode: state.deploy.localMode,
+      prefsMode: state.prefs.mode,
+      profiles: state.deploy.profiles,
+      hookVersion: HOOK_VERSION,
+      localIp: state.prefs.localIp,
+      port: state.server.port,
+      tokenFingerprint: fingerprintToken(state.server.token)
+    }),
+    modeMismatch: computeModeMismatch()
+  })
+}
+
 function decisionLabel(decision: string): string {
   if (decision === 'allow') return '允许'
   if (decision === 'deny') return '拒绝'
@@ -755,6 +900,9 @@ function decisionLevel(decision: string, source: DecisionSource): LogLevel {
 }
 
 function finishItem(item: ApprovalItem, decision: string, source: DecisionSource): void {
+  // Always drop per-item bookkeeping, even for ids that were already settled.
+  decisionSources.delete(item.id)
+  itemCache.delete(item.id)
   if (settledIds.has(item.id)) return
   settledIds.add(item.id)
   if (settledIds.size > 1000) settledIds.clear()
@@ -884,15 +1032,30 @@ function flushApprovalNotifications(): void {
 }
 
 function notifyApproval(item: ApprovalItem): void {
-  if (muted(item.sessionKey)) {
+  const state = store.get()
+  const sessionMuted = muted(item.sessionKey)
+  if (sessionMuted) {
     log('info', `${item.sessionLabel} 已静音提醒；审批仍在队列中`)
     return
   }
-  if (!headless && store.get().prefs.sound && Date.now() - lastBeepAt > 1200) {
+  if (!headless && state.prefs.sound && Date.now() - lastBeepAt > 1200) {
     lastBeepAt = Date.now()
     shell.beep()
   }
-  if (!store.get().prefs.systemNotifications || headless) return
+  const supported = Notification.isSupported()
+  if (
+    !canDeliverSystemNotification({
+      headless,
+      enabled: state.prefs.systemNotifications,
+      muted: sessionMuted,
+      supported
+    })
+  ) {
+    if (!headless && !state.prefs.systemNotifications) {
+      log('info', `${item.sessionLabel} 系统通知已关闭；审批仍在队列中`)
+    }
+    return
+  }
   if (popupWindow?.isFocused()) return
   notificationQueue.push(item)
   if (notificationTimer) return
@@ -900,10 +1063,18 @@ function notifyApproval(item: ApprovalItem): void {
 }
 
 function notifyTimeout(item: ApprovalItem): void {
-  if (headless || !store.get().prefs.systemNotifications) return
-  if (muted(item.sessionKey)) return
+  const state = store.get()
+  if (
+    !canDeliverSystemNotification({
+      headless,
+      enabled: state.prefs.systemNotifications,
+      muted: muted(item.sessionKey),
+      supported: Notification.isSupported()
+    })
+  ) {
+    return
+  }
   if (popupWindow?.isVisible()) return
-  if (!Notification.isSupported()) return
   const notification = new Notification({
     title: '审批已回退终端',
     body: `${item.sessionLabel} · ${item.tool} 未在 ${item.timeoutSec}s 内处理`,
@@ -1071,20 +1242,41 @@ function createNotifyServer(): NotifyServer {
       store.patch((draft) => {
         draft.server.notified += 1
       })
-      log('notify', `通知 · ${projectName(cwd) || '未知项目'}${key ? '' : ''} · ${title}`)
+      const state = store.get()
+      const supported = Notification.isSupported()
+      const sessionMuted = key ? sessions.isMuted(key) : false
+      const deliver = canDeliverSystemNotification({
+        headless,
+        enabled: state.prefs.systemNotifications,
+        muted: sessionMuted,
+        supported
+      })
+      log('notify', `通知 · ${projectName(cwd) || '未知项目'} · ${title}`)
       refreshSessions()
-      if (Notification.isSupported() && !headless) {
-        const notification = new Notification({
-          title,
-          body,
-          silent: !store.get().prefs.sound
-        })
-        notification.on('click', () => {
-          if (key) focusSession(key)
-          else showMainWindow()
-        })
-        notification.show()
+      if (!deliver) {
+        const reason = headless
+          ? '无界面模式'
+          : !supported
+            ? '当前系统不支持通知'
+            : !state.prefs.systemNotifications
+              ? '系统通知已关闭'
+              : '会话已静音'
+        log(
+          'info',
+          `未推送系统通知 · ${reason} · ${projectName(cwd) || '未知项目'} · ${title}`
+        )
+        return
       }
+      const notification = new Notification({
+        title,
+        body,
+        silent: !state.prefs.sound
+      })
+      notification.on('click', () => {
+        if (key) focusSession(key)
+        else showMainWindow()
+      })
+      notification.show()
     },
     onLog: (level, message) => log(level, message)
   })
@@ -1128,11 +1320,32 @@ async function startServer(): Promise<boolean> {
   }
 }
 
+function cancelLocalApprovals(): void {
+  if (!store) return
+  for (const [itemId, resolve] of [...localApprovals]) {
+    localApprovals.delete(itemId)
+    try {
+      resolve('cancelled')
+    } catch {
+      // the awaiter is gone; still clean the pending entry below
+    }
+    const item =
+      store.get().pending.find((entry) => entry.id === itemId) || itemCache.get(itemId) || null
+    if (!item) continue
+    decisionSources.set(itemId, 'server-stop')
+    store.removePending(itemId)
+    finishItem(item, 'cancelled', 'server-stop')
+  }
+}
+
 async function stopServer(reason: 'manual' | 'restart' = 'manual'): Promise<void> {
+  if (!server || !store) return
   for (const item of store.get().pending) {
     decisionSources.set(item.id, reason === 'manual' ? 'server-stop' : 'server-stop')
   }
   await server.stop()
+  // Local test approvals never touch the HTTP server, so cancel them here too.
+  cancelLocalApprovals()
   store.setListening(false)
   log('warn', 'HTTP 服务已停止，后续审批将回退到终端')
   updateBadge()
@@ -1166,6 +1379,27 @@ async function applyNetwork(port: number, bindMode: BindMode): Promise<{ ok: boo
   if (port === serverPort && bindMode === serverBindMode && server.isListening()) {
     return { ok: true, message: '服务配置未变化' }
   }
+  const previousPort = serverPort
+  const previousBindMode = serverBindMode
+  const targetHost = (mode: BindMode): string => (mode === 'loopback' ? '127.0.0.1' : '0.0.0.0')
+  // Same port + only a bind change can be applied by restarting on the port we
+  // already own, so skip the preflight. Any new port (or a stopped service) is
+  // checked before we tear down a working listener.
+  const needsPortCheck = port !== previousPort || !server.isListening()
+  if (needsPortCheck) {
+    const free = await isPortFree(port, targetHost(bindMode))
+    if (!free) {
+      const conflict =
+        port === previousPort
+          ? `端口 ${port} 当前不可用`
+          : `端口 ${port} 已被占用或不可用`
+      log('warn', `网络设置未应用：${conflict}，保留 ${previousBindMode === 'loopback' ? '127.0.0.1' : '0.0.0.0'}:${previousPort}`)
+      return {
+        ok: false,
+        message: `${conflict}，已保留原配置 ${previousBindMode === 'loopback' ? '127.0.0.1' : '0.0.0.0'}:${previousPort}`
+      }
+    }
+  }
   const pending = store.get().pending.length
   if (pending > 0) {
     const confirmed = await confirm({
@@ -1184,13 +1418,31 @@ async function applyNetwork(port: number, bindMode: BindMode): Promise<{ ok: boo
   server = createNotifyServer()
   const ok = await startServer()
   if (!ok) {
+    const failure = store.get().network.error || '启动失败'
+    // Roll back to the last known-good listener so a typo/conflict does not
+    // leave the app without an HTTP endpoint.
+    serverPort = previousPort
+    serverBindMode = previousBindMode
+    server = createNotifyServer()
+    const restored = await startServer()
+    const previousHost = previousBindMode === 'loopback' ? '127.0.0.1' : '0.0.0.0'
+    if (!restored) {
+      const rollbackError = store.get().network.error || failure
+      log('error', `端口 ${port} 启动失败（${failure}），回滚到 ${previousHost}:${previousPort} 也失败：${rollbackError}`)
+      return {
+        ok: false,
+        message: `端口 ${port} 启动失败（${failure}），已回滚到原端口 ${previousPort} 但恢复失败，请手动重启服务`
+      }
+    }
+    log('warn', `端口 ${port} 启动失败（${failure}），已回滚到 ${previousHost}:${previousPort}`)
     return {
       ok: false,
-      message: `端口 ${port} 启动失败，请换一个端口`
+      message: `端口 ${port} 启动失败（${failure}），已回滚到原端口 ${previousPort}`
     }
   }
   store.setPrefs({ port, bindMode })
   saveUiConfig({ port, bindMode })
+  refreshDeployHealth()
   log('info', `监听配置已更新 · ${bindHost()}:${port}`)
   if (store.get().deploy.localMode || profiles.some((profile) => profile.status === 'deployed')) {
     store.setToast('端口已变更，需要重新接入或部署')
@@ -1228,6 +1480,7 @@ function applyLocalDeploy(mode: 'popup' | 'notify'): { ok: boolean; message: str
       hookStale: false,
       modeMismatch: mode !== store.get().prefs.mode
     })
+    refreshDeployHealth()
     store.setToast('本机接入完成')
     refreshSessions()
     return { ok: true, message: '本机接入完成' }
@@ -1287,6 +1540,7 @@ async function localRemoveWithConfirm(): Promise<{ ok: boolean; message: string 
       hookStale: false,
       modeMismatch: computeModeMismatch()
     })
+    refreshDeployHealth()
     store.setToast('本机接入已断开')
     return { ok: true, message: '本机接入已断开' }
   } catch (error) {
@@ -1320,6 +1574,7 @@ async function localRestoreWithConfirm(): Promise<{ ok: boolean; message: string
       message: `已恢复设置 · ${result.restoredFrom}`,
       modeMismatch: computeModeMismatch()
     })
+    refreshDeployHealth()
     store.setToast('已恢复本机配置')
     return { ok: true, message: '已恢复本机配置' }
   } catch (error) {
@@ -1332,6 +1587,30 @@ async function localRestoreWithConfirm(): Promise<{ ok: boolean; message: string
 // ---------------------------------------------------------------------------
 // remote deployment
 // ---------------------------------------------------------------------------
+
+let activeDeployController: AbortController | null = null
+
+const DEPLOY_BUSY_SUMMARY = '已有部署进行中，请等待当前部署完成或先取消'
+
+type DeployOperationStart =
+  | { started: true; controller: AbortController }
+  | { started: false; result: DeployResult }
+
+function beginDeployOperation(): DeployOperationStart {
+  if (activeDeployController) {
+    return {
+      started: false,
+      result: { success: false, summary: DEPLOY_BUSY_SUMMARY, connectivity: false }
+    }
+  }
+  const controller = new AbortController()
+  activeDeployController = controller
+  return { started: true, controller }
+}
+
+function finishDeployOperation(controller: AbortController): void {
+  if (activeDeployController === controller) activeDeployController = null
+}
 
 function knownFingerprintFor(host: string, port: number): string {
   return knownHosts[`${host}:${port}`]?.fingerprint || ''
@@ -1385,7 +1664,8 @@ function upsertProfile(form: DeployFormConfig, result: DeployResult): DeployProf
     lastDeployAt: Date.now(),
     status: result.success ? 'deployed' : 'failed',
     hooks: result.success ? (form.mode === 'popup' ? 2 : 1) : 0,
-    hookVersion: HOOK_VERSION
+    hookVersion: HOOK_VERSION,
+    tokenFingerprint: fingerprintToken(store.get().server.token)
   }
   profiles = [profile, ...profiles.filter((entry) => entry.id !== id)].slice(0, 20)
   saveDeployProfiles(profiles)
@@ -1423,16 +1703,23 @@ function saveDeployFormCache(form: DeployFormConfig): void {
 
 async function deployStart(
   form: DeployFormConfig,
-  progress: (level: LogLevel, message: string) => void
+  progress: (level: LogLevel, message: string) => void,
+  signal?: AbortSignal
 ): Promise<DeployResult> {
   saveDeployFormCache(form)
   const config = toDeployConfig(form)
   if (!config.hostFingerprint) {
-    const probe = await testSshConnection({
-      ...config,
-      hostFingerprint: undefined,
-      trustHost: false
-    })
+    const probe = await testSshConnection(
+      {
+        ...config,
+        hostFingerprint: undefined,
+        trustHost: false
+      },
+      signal
+    )
+    if (signal?.aborted) {
+      return { success: false, summary: '部署已取消', connectivity: false }
+    }
     if (probe.fingerprint) {
       return {
         success: false,
@@ -1455,12 +1742,9 @@ async function deployStart(
   })
   log('deploy', `开始部署 · ${profileId(form)} · ${form.mode === 'popup' ? '弹窗' : '通知'}`)
   try {
-    const result = await deployToServer(config, progress)
+    const result = await deployToServer(config, progress, signal)
     const profile = upsertProfile(form, result)
     rememberFingerprint(form.host.trim(), Number(form.sshPort), result.fingerprint)
-    const deployMismatch =
-      form.mode !== store.get().prefs.mode ||
-      profiles.some((entry) => entry.status === 'deployed' && entry.mode !== store.get().prefs.mode)
     store.setDeploy({
       status: 'deployed',
       host: `${profile.username}@${profile.host}:${profile.sshPort}`,
@@ -1468,8 +1752,9 @@ async function deployStart(
       message: result.connectivity
         ? `上次成功 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
         : '已写入，连通性未通过',
-      modeMismatch: deployMismatch
+      modeMismatch: computeModeMismatch()
     })
+    refreshDeployHealth()
     if (result.connectivity) store.setToast('部署完成 · 钩子已生效')
     else store.setToast('已写入，但回调连通性未通过')
     return {
@@ -1479,6 +1764,16 @@ async function deployStart(
     }
   } catch (error) {
     const message = humanizeSshError(error)
+    if (isDeployCancelled(error)) {
+      log('warn', '部署已取消')
+      store.setDeploy({
+        status: 'error',
+        host: profileId(form),
+        hooks: 0,
+        message: '部署已取消'
+      })
+      return { success: false, summary: message, connectivity: false }
+    }
     log('error', `部署失败：${message}`)
     upsertProfile(form, { success: false, summary: message, connectivity: false })
     store.setDeploy({ status: 'error', host: profileId(form), hooks: 0, message: '部署失败' })
@@ -1488,11 +1783,15 @@ async function deployStart(
 
 async function deployRemove(
   form: DeployFormConfig,
-  progress: (level: LogLevel, message: string) => void
+  progress: (level: LogLevel, message: string) => void,
+  signal?: AbortSignal
 ): Promise<DeployResult> {
   const config = toDeployConfig(form)
   if (!config.hostFingerprint) {
-    const probe = await testSshConnection({ ...config, hostFingerprint: undefined })
+    const probe = await testSshConnection({ ...config, hostFingerprint: undefined }, signal)
+    if (signal?.aborted) {
+      return { success: false, summary: '部署已取消', connectivity: false }
+    }
     if (probe.fingerprint) {
       return {
         success: false,
@@ -1503,7 +1802,7 @@ async function deployRemove(
     return { success: false, summary: probe.message, connectivity: false }
   }
   try {
-    const result = await removeDeployFromServer(config, progress)
+    const result = await removeDeployFromServer(config, progress, signal)
     const id = profileId(form)
     profiles = profiles.map((profile) =>
       profile.id === id ? { ...profile, status: 'unknown', hooks: 0 } : profile
@@ -1515,10 +1814,15 @@ async function deployRemove(
       message: '服务器钩子已移除',
       modeMismatch: computeModeMismatch()
     })
+    refreshDeployHealth()
     store.setToast('服务器接入已断开')
     return { success: true, summary: result.summary, connectivity: false }
   } catch (error) {
     const message = humanizeSshError(error)
+    if (isDeployCancelled(error)) {
+      log('warn', '移除服务器钩子已取消')
+      return { success: false, summary: message, connectivity: false }
+    }
     log('error', `移除服务器钩子失败：${message}`)
     return { success: false, summary: message, connectivity: false }
   }
@@ -1560,6 +1864,7 @@ async function regenerateToken(): Promise<void> {
   } catch (error) {
     log('error', `Token 写入失败：${String(error)}`)
   }
+  refreshDeployHealth()
   log('warn', 'Token 已重新生成，旧 Token 立即失效；请重新部署服务器钩子')
   store.setToast('Token 已更新，需重新部署')
   if (!deployed) return
@@ -1614,8 +1919,8 @@ function applyPrefs(incoming: Partial<Prefs>): void {
       }))
     })
   }
-  if (patch.mode) {
-    store.setDeploy({ modeMismatch: computeModeMismatch() })
+  if (patch.mode || patch.localIp) {
+    refreshDeployHealth()
   }
   log('info', `偏好已更新 · 位置=${store.get().prefs.position} · 模式=${store.get().prefs.mode}`)
 }
@@ -1673,38 +1978,66 @@ function registerIpc(): void {
     }
     return result
   })
-  ipcMain.handle('deploy:start', async (event, form: DeployFormConfig): Promise<DeployResult> => {
-    const progress = (level: LogLevel, message: string): void => {
+  const deployProgress =
+    (event: Electron.IpcMainInvokeEvent) =>
+    (level: LogLevel, message: string): void => {
       log(level, message)
       if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', { level, message })
     }
-    return deployStart(form, progress)
+  ipcMain.handle('deploy:start', async (event, form: DeployFormConfig): Promise<DeployResult> => {
+    const operation = beginDeployOperation()
+    if (!operation.started) return operation.result
+    try {
+      return await deployStart(form, deployProgress(event), operation.controller.signal)
+    } finally {
+      finishDeployOperation(operation.controller)
+    }
   })
   ipcMain.handle('deploy:remove', async (event, form: DeployFormConfig): Promise<DeployResult> => {
-    const progress = (level: LogLevel, message: string): void => {
-      log(level, message)
-      if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', { level, message })
+    const operation = beginDeployOperation()
+    if (!operation.started) return operation.result
+    try {
+      return await deployRemove(form, deployProgress(event), operation.controller.signal)
+    } finally {
+      finishDeployOperation(operation.controller)
     }
-    return deployRemove(form, progress)
   })
   ipcMain.handle('deploy:restore', async (event, form: DeployFormConfig): Promise<DeployResult> => {
-    const config = toDeployConfig(form)
-    if (!config.hostFingerprint) {
-      return { success: false, summary: '请先测试连接并确认主机指纹', connectivity: false }
-    }
-    const progress = (level: LogLevel, message: string): void => {
-      log(level, message)
-      if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', { level, message })
-    }
+    const operation = beginDeployOperation()
+    if (!operation.started) return operation.result
     try {
-      const result = await restoreDeployBackup(config, progress)
-      store.setToast(result.summary)
-      return { success: result.success, summary: result.summary, connectivity: false }
-    } catch (error) {
-      const message = humanizeSshError(error)
-      log('error', `恢复服务器备份失败：${message}`)
-      return { success: false, summary: message, connectivity: false }
+      const config = toDeployConfig(form)
+      if (!config.hostFingerprint) {
+        return { success: false, summary: '请先测试连接并确认主机指纹', connectivity: false }
+      }
+      try {
+        const result = await restoreDeployBackup(
+          config,
+          deployProgress(event),
+          operation.controller.signal
+        )
+        store.setToast(result.summary)
+        return { success: result.success, summary: result.summary, connectivity: false }
+      } catch (error) {
+        const message = humanizeSshError(error)
+        if (isDeployCancelled(error)) {
+          log('warn', '恢复服务器备份已取消')
+          return { success: false, summary: message, connectivity: false }
+        }
+        log('error', `恢复服务器备份失败：${message}`)
+        return { success: false, summary: message, connectivity: false }
+      }
+    } finally {
+      finishDeployOperation(operation.controller)
     }
+  })
+  ipcMain.handle('deploy:cancel', (): { ok: boolean; message?: string } => {
+    if (!activeDeployController) {
+      return { ok: false, message: '当前没有进行中的部署' }
+    }
+    activeDeployController.abort()
+    log('warn', '正在取消部署…')
+    return { ok: true, message: '正在取消部署…' }
   })
   ipcMain.handle('local:status', () => {
     const state = detectLocalState()
@@ -1742,10 +2075,12 @@ function registerIpc(): void {
         pattern: string
         project?: string
         sessionKey?: string
+        origin?: string
       }
     ) => {
       const message = validateRule(input)
       if (message) throw new Error(message)
+      const origin = (input.origin ?? '').trim().slice(0, 80)
       const rule: ApprovalRule = {
         id: randomUUID(),
         scope: input.scope,
@@ -1753,6 +2088,7 @@ function registerIpc(): void {
         pattern: input.pattern.trim() || '*',
         project: input.project,
         sessionKey: input.sessionKey,
+        ...(origin ? { origin } : {}),
         createdAt: Date.now(),
         enabled: true
       }
@@ -2387,6 +2723,7 @@ async function runCapture(): Promise<void> {
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function bootstrap(): Promise<void> {
+  installPermissionRequestGuard()
   ensureDataDir()
   logFile = join(appDataDir(), 'claude-notify.log')
   pendingSnapshotPath = join(appDataDir(), 'pending.json')
@@ -2515,7 +2852,8 @@ async function bootstrap(): Promise<void> {
     hookVersion: local.version,
     hookStale: local.stale,
     modeMismatch: false,
-    profiles
+    profiles,
+    drift: []
   }
   initialDeploy.modeMismatch =
     Boolean(localMode && localMode !== prefs.mode) ||
@@ -2528,6 +2866,7 @@ async function bootstrap(): Promise<void> {
     conflict: false,
     error: ''
   })
+  refreshDeployHealth()
   refreshSessions()
   store.subscribe(broadcast)
 
@@ -2617,6 +2956,39 @@ app.on('window-all-closed', () => {
   // Keep running in the tray on every platform; quit is explicit.
 })
 
-app.on('before-quit', () => {
-  void server?.stop()
+app.on('before-quit', (event) => {
+  if (quitAllowed) return
+  // Cancel the default quit first, run async cleanup, then quit for real.
+  event.preventDefault()
+  if (quitting) return
+  quitting = true
+  void (async () => {
+    try {
+      await stopServer('manual')
+    } catch (error) {
+      console.error('[shutdown] stop server', error)
+    }
+    try {
+      cancelLocalApprovals()
+    } catch (error) {
+      console.error('[shutdown] local approvals', error)
+    }
+    try {
+      sessions?.flush()
+    } catch (error) {
+      console.error('[shutdown] session metadata', error)
+    }
+    try {
+      flushBroadcast()
+    } catch (error) {
+      console.error('[shutdown] broadcast', error)
+    }
+    try {
+      persistPendingSnapshot()
+    } catch (error) {
+      console.error('[shutdown] pending snapshot', error)
+    }
+    quitAllowed = true
+    app.quit()
+  })()
 })

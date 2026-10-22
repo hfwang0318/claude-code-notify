@@ -32,14 +32,20 @@ export interface MergeOptions {
   stopEntry?: HookEntry
 }
 
+function quoteShellValue(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
 export function buildHookCommand(
   envPairs: Record<string, string | number>,
   scriptName: string
 ): string {
   const parts = Object.entries(envPairs).map(
-    ([key, value]) => `${key}='${String(value)}'`
+    ([key, value]) => `${key}=${quoteShellValue(String(value))}`
   )
-  parts.push(`python3 $HOME/.claude/${scriptName}`)
+  // Double quotes keep the path safe while still allowing the remote shell to
+  // expand $HOME. Single quotes would prevent expansion.
+  parts.push(`python3 "$HOME/.claude/${scriptName}"`)
   return parts.join(' ')
 }
 

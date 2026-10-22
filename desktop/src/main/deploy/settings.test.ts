@@ -102,8 +102,31 @@ describe('buildHookCommand', () => {
       'claude_approval_hook.py'
     )
     expect(command).toBe(
-      "CLAUDE_NOTIFY_TOKEN='abc' CLAUDE_APPROVAL_TIMEOUT='240' python3 $HOME/.claude/claude_approval_hook.py"
+      'CLAUDE_NOTIFY_TOKEN=\'abc\' CLAUDE_APPROVAL_TIMEOUT=\'240\' python3 "$HOME/.claude/claude_approval_hook.py"'
     )
+  })
+
+  it('escapes single quotes in env values', () => {
+    const command = buildHookCommand({ CLAUDE_NOTIFY_ORIGIN: "a'b" }, 'claude_notify_hook.py')
+    expect(command).toBe(
+      "CLAUDE_NOTIFY_ORIGIN='a'\\''b' python3 \"$HOME/.claude/claude_notify_hook.py\""
+    )
+  })
+
+  it('keeps spaces and dollar signs literal inside single-quoted values', () => {
+    const command = buildHookCommand(
+      {
+        CLAUDE_NOTIFY_URL: 'http://host/a b',
+        CLAUDE_NOTIFY_TOKEN: '$HOME/secret',
+        CLAUDE_APPROVAL_MATCHER: 'Bash(git commit)'
+      },
+      'claude_approval_hook.py'
+    )
+    expect(command).toBe(
+      "CLAUDE_NOTIFY_URL='http://host/a b' CLAUDE_NOTIFY_TOKEN='$HOME/secret' CLAUDE_APPROVAL_MATCHER='Bash(git commit)' python3 \"$HOME/.claude/claude_approval_hook.py\""
+    )
+    // The script path must stay in double quotes so the remote shell expands $HOME.
+    expect(command.endsWith('python3 "$HOME/.claude/claude_approval_hook.py"')).toBe(true)
   })
 })
 

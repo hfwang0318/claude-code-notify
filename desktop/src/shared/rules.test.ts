@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalItem, ApprovalRule } from './types'
-import { buildRuleFromItem, matchingRule, patternMatches, validateRule } from './rules'
+import {
+  buildRuleFromItem,
+  describeRule,
+  matchingRule,
+  patternMatches,
+  validateRule
+} from './rules'
 
 function item(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
   return {
@@ -64,6 +70,23 @@ describe('approval rules', () => {
     expect(
       matchingRule([rule({ scope: 'project', project: 'other' })], item())
     ).toBeNull()
+  })
+
+  it('keeps project rules without an origin compatible with every origin', () => {
+    const projectRule = rule({ scope: 'project', project: 'app' })
+    expect(matchingRule([projectRule], item({ origin: '本机' }))?.id).toBe('r1')
+    expect(matchingRule([projectRule], item({ origin: '远程主机' }))?.id).toBe('r1')
+  })
+
+  it('requires an exact origin match when the rule binds one', () => {
+    const boundRule = rule({ scope: 'project', project: 'app', origin: '本机' })
+    expect(matchingRule([boundRule], item({ origin: '本机' }))?.id).toBe('r1')
+    expect(matchingRule([boundRule], item({ origin: '远程主机' }))).toBeNull()
+  })
+
+  it('shows the bound origin in the rule description', () => {
+    expect(describeRule(rule({ origin: '远程主机' }))).toContain('来源 远程主机')
+    expect(describeRule(rule())).not.toContain('来源')
   })
 
   it('ignores disabled and mismatched tools', () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { AppState, PopupPosition } from '../../shared/types'
 import { api } from './api'
 import DeployDialog from './DeployDialog'
@@ -107,10 +107,21 @@ export default function App(): React.JSX.Element {
     setDeployOpen(true)
   }
 
-  const openSettings = (section: SettingsSection = 'general'): void => {
+  const openSettings = useCallback((section: SettingsSection = 'general'): void => {
     setSettingsSection(section)
     setSettingsOpen(true)
-  }
+  }, [])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent): void => {
+      if ((event.metaKey || event.ctrlKey) && event.key === ',') {
+        event.preventDefault()
+        openSettings()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [openSettings])
 
   const address = state
     ? `http://${state.server.localIp}:${state.server.port}`
@@ -131,6 +142,9 @@ export default function App(): React.JSX.Element {
   const deployed = Boolean(state.deploy.localMode) || state.deploy.profiles.length > 0
   const deployRunning = state.deploy.status === 'running'
   const latestProfile = state.deploy.profiles.find((profile) => profile.status === 'deployed')
+  const hasDeployedProfile = state.deploy.profiles.some(
+    (profile) => profile.status === 'deployed'
+  )
   const serverSummary = state.deploy.localMode
     ? `本机 · ${state.deploy.localMode === 'popup' ? '弹窗' : '通知'}`
     : latestProfile
@@ -223,6 +237,30 @@ export default function App(): React.JSX.Element {
           </div>
           <button className="btn compact" disabled={localBusy} onClick={() => void connectLocal()}>
             {localBusy ? '更新中…' : '立即更新'}
+          </button>
+        </div>
+      ) : null}
+
+      {state.deploy.drift.length > 0 ? (
+        <div className="banner warn">
+          <div>
+            <b>部署配置需要更新</b>
+            <span>
+              {state.deploy.drift[0]}
+              {state.deploy.drift.length > 1
+                ? `（另有 ${state.deploy.drift.length - 1} 项）`
+                : ''}
+            </span>
+          </div>
+          <button
+            className="btn compact"
+            disabled={localBusy}
+            onClick={() => {
+              if (hasDeployedProfile) setDeployOpen(true)
+              else void connectLocal()
+            }}
+          >
+            {hasDeployedProfile ? '重新部署' : localBusy ? '接入中…' : '重新接入本机'}
           </button>
         </div>
       ) : null}
@@ -636,7 +674,11 @@ export default function App(): React.JSX.Element {
         onClose={() => setSettingsOpen(false)}
       />
 
-      {state.toast ? <div className="toast">{state.toast}</div> : null}
+      {state.toast ? (
+        <div className="toast" role="status" aria-live="polite" aria-atomic="true">
+          {state.toast}
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -31,7 +31,7 @@ cd desktop
 pnpm install
 pnpm dev          # 开发模式
 pnpm demo         # 构建后打开主窗口 + 演示审批
-pnpm test         # 60 个单测/集成测试
+pnpm test         # 当前 111 个单测/集成测试，以实际输出为准
 pnpm e2e:claude   # 真实 Claude Code 端到端（需已登录 Claude）
 pnpm self-test    # HTTP 协议冒烟
 pnpm local-app    # macOS：生成可双击的本机启动器

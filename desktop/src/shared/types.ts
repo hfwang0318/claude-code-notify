@@ -146,6 +146,8 @@ export interface ApprovalRule {
   scope: RuleScope
   project?: string
   sessionKey?: string
+  /** 绑定的来源；为空表示适用于所有来源。 */
+  origin?: string
   tool: string
   pattern: string
   createdAt: number
@@ -204,6 +206,8 @@ export interface DeployProfile {
   status: 'deployed' | 'failed' | 'unknown'
   hooks: number
   hookVersion: string
+  /** Short hash of the token used at deploy time; absent on older profiles. */
+  tokenFingerprint?: string
 }
 
 export interface DeployResult {
@@ -228,6 +232,8 @@ export interface DeployState {
   hookStale: boolean
   modeMismatch: boolean
   profiles: DeployProfile[]
+  /** Human-readable deployment drift, newest checks first, capped for the UI. */
+  drift: string[]
 }
 
 export interface NetworkAddress {
@@ -319,6 +325,8 @@ export interface DesktopApi {
   startDeploy(config: DeployFormConfig): Promise<DeployResult>
   removeDeploy(config: DeployFormConfig): Promise<DeployResult>
   restoreDeploy(config: DeployFormConfig): Promise<DeployResult>
+  /** Optional so the browser-preview fallback can omit it without a main process. */
+  cancelDeploy?: () => Promise<{ ok: boolean; message?: string }>
   onDeployProgress(callback: (progress: { level: LogLevel; message: string }) => void): () => void
   localStatus(): Promise<{ deployed: boolean; mode: DeployMode | null }>
   localDeploy(mode: DeployMode): Promise<{ ok: boolean; canceled?: boolean; message: string }>
@@ -334,6 +342,7 @@ export interface DesktopApi {
     pattern: string
     project?: string
     sessionKey?: string
+    origin?: string
   }): Promise<void>
   removeRule(id: string): Promise<void>
   toggleRule(id: string): Promise<void>

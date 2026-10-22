@@ -1,4 +1,5 @@
 import { request } from 'node:http'
+import { createConnection } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApprovalItem } from '../shared/types'
 import { NotifyServer, type ServerCallbacks } from './server'
@@ -38,6 +39,56 @@ async function waitFor<T>(probe: () => T | null, timeout = 3000): Promise<T> {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
   throw new Error('waitFor timeout')
+}
+
+function approvalBody(requestId: string, overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    request_id: requestId,
+    tool_name: 'Bash',
+    cwd: '/tmp/project',
+    message: 'test',
+    timeout_seconds: 30,
+    ...overrides
+  })
+}
+
+/**
+ * Send headers plus half a body over a raw socket and wait for the server to
+ * either answer or close. Proves a stalled upload cannot pin the connection.
+ */
+function halfBodyRequest(
+  port: number,
+  path: string
+): Promise<{ response: string; closed: boolean }> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: '127.0.0.1', port })
+    let response = ''
+    let settled = false
+    const finish = (closed: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      resolve({ response, closed })
+    }
+    const timer = setTimeout(() => finish(false), 3000)
+    socket.on('connect', () => {
+      socket.write(
+        `POST ${path} HTTP/1.1\r\n` +
+          'Host: 127.0.0.1\r\n' +
+          `Authorization: Bearer ${TOKEN}\r\n` +
+          'Content-Type: application/json\r\n' +
+          'Content-Length: 100\r\n' +
+          '\r\n' +
+          '{"request_id":"slow'
+      )
+    })
+    socket.on('data', (chunk) => {
+      response += chunk.toString('utf-8')
+    })
+    socket.on('close', () => finish(true))
+    socket.on('error', reject)
+  })
 }
 
 describe('NotifyServer', () => {
@@ -284,8 +335,119 @@ describe('NotifyServer', () => {
       })
     })
     const item = await waitFor(() => approvals[0] || null)
+    // Graceful shutdown must not wait out the keep-alive timeout.
+    const started = Date.now()
     await server.stop()
+    expect(Date.now() - started).toBeLessThan(1500)
     expect(await (await promise).json()).toMatchObject({ decision: 'cancelled' })
     expect(resolutions.find((entry) => entry.id === item.id)?.decision).toBe('cancelled')
+  })
+
+  it('still resolves the hook when onResolved throws', async () => {
+    const logs: string[] = []
+    const seen: ApprovalItem[] = []
+    const throwing = new NotifyServer(0, TOKEN, {
+      onApproval: (item) => seen.push(item),
+      onResolved: () => {
+        throw new Error('persistence exploded')
+      },
+      onNotify: () => undefined,
+      onLog: (_level, message) => {
+        logs.push(message)
+      }
+    })
+    await throwing.start()
+    try {
+      const pending = fetch(`http://127.0.0.1:${throwing.getPort()}/claude-approval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: approvalBody('req_resolved_throws')
+      })
+      const item = await waitFor(() => seen[0] || null)
+      expect(throwing.respond(item.id, 'allow')).toBe(true)
+      const response = await pending
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ status: 'ok', decision: 'allow' })
+      expect(logs.some((message) => message.includes('审批完成回调异常'))).toBe(true)
+    } finally {
+      await throwing.stop()
+    }
+  })
+
+  it('returns decision ask when onApproval throws', async () => {
+    const logs: string[] = []
+    const throwing = new NotifyServer(0, TOKEN, {
+      onApproval: () => {
+        throw new Error('ui exploded')
+      },
+      onResolved: () => undefined,
+      onNotify: () => undefined,
+      onLog: (_level, message) => {
+        logs.push(message)
+      }
+    })
+    await throwing.start()
+    try {
+      const response = await fetch(`http://127.0.0.1:${throwing.getPort()}/claude-approval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: approvalBody('req_approval_throws')
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ status: 'ok', decision: 'ask' })
+      expect(logs.some((message) => message.includes('审批回调异常'))).toBe(true)
+    } finally {
+      await throwing.stop()
+    }
+  })
+
+  it('returns 200 when onNotify throws', async () => {
+    const logs: string[] = []
+    const throwing = new NotifyServer(0, TOKEN, {
+      onApproval: () => undefined,
+      onResolved: () => undefined,
+      onNotify: () => {
+        throw new Error('notification exploded')
+      },
+      onLog: (_level, message) => {
+        logs.push(message)
+      }
+    })
+    await throwing.start()
+    try {
+      const response = await rawPost(
+        throwing.getPort(),
+        '/claude-notify',
+        { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        JSON.stringify({ session_id: 'notify-throwing', notification_type: 'idle_prompt', message: 'x' })
+      )
+      expect(response.status).toBe(200)
+      expect(JSON.parse(response.body)).toMatchObject({ status: 'ok' })
+      expect(logs.some((message) => message.includes('通知回调异常'))).toBe(true)
+    } finally {
+      await throwing.stop()
+    }
+  })
+
+  it('times out a half-sent body and closes the connection', async () => {
+    const slow = new NotifyServer(
+      0,
+      TOKEN,
+      {
+        onApproval: () => undefined,
+        onResolved: () => undefined,
+        onNotify: () => undefined
+      },
+      { bodyTimeoutMs: 120 }
+    )
+    await slow.start()
+    try {
+      const result = await halfBodyRequest(slow.getPort(), '/claude-approval')
+      expect(result.response).toContain('408')
+      expect(result.response).toContain('request_timeout')
+      expect(result.closed).toBe(true)
+    } finally {
+      await slow.stop()
+    }
   })
 })

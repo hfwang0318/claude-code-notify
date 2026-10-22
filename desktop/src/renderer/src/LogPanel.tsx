@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LogEntry } from '../../shared/types'
 import { LEVEL_LABEL, formatTime } from './format'
 import { api } from './api'
+import { countNewLogs, tailLogId } from './log-delta'
 
 interface Props {
   logs: LogEntry[]
@@ -25,7 +26,7 @@ export default function LogPanel({ logs }: Props): React.JSX.Element {
   const [stick, setStick] = useState(true)
   const [newCount, setNewCount] = useState(0)
   const bodyRef = useRef<HTMLDivElement>(null)
-  const lastLength = useRef(logs.length)
+  const lastTail = useRef<string | null>(tailLogId(logs))
 
   const filtered = useMemo(() => {
     const text = query.trim().toLowerCase()
@@ -44,12 +45,13 @@ export default function LogPanel({ logs }: Props): React.JSX.Element {
   }
 
   useEffect(() => {
-    const added = logs.length - lastLength.current
-    lastLength.current = logs.length
+    // 不能只比较 length：store 最多保留 800 条，达到上限后 length 不再变化。
+    const added = countNewLogs(lastTail.current, logs)
+    lastTail.current = tailLogId(logs)
     if (added <= 0) return
     if (stick) scrollToBottom()
     else setNewCount((value) => value + added)
-  }, [logs.length, stick])
+  }, [logs, stick])
 
   const onScroll = (): void => {
     const body = bodyRef.current

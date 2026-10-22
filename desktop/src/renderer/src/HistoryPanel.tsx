@@ -19,16 +19,44 @@ const DECISION_FILTERS = [
   { id: 'answer', label: '回答' }
 ]
 
+const RISK_FILTERS = [
+  { id: 'all', label: '全部风险' },
+  { id: 'high', label: RISK_LABEL.high },
+  { id: 'medium', label: RISK_LABEL.medium },
+  { id: 'low', label: RISK_LABEL.low }
+]
+
+const SOURCE_FILTERS = [
+  { id: 'all', label: '全部来源' },
+  ...Object.entries(SOURCE_LABEL).map(([id, label]) => ({ id, label }))
+]
+
+const TIME_FILTERS = [
+  { id: 'all', label: '全部时间' },
+  { id: '24h', label: '最近 24 小时' },
+  { id: '7d', label: '最近 7 天' }
+]
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
 export default function HistoryPanel({ history, now, onOpenInbox }: Props): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [decision, setDecision] = useState('all')
+  const [risk, setRisk] = useState('all')
+  const [source, setSource] = useState('all')
+  const [timeRange, setTimeRange] = useState('all')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
 
   const filtered = useMemo(() => {
     const text = query.trim().toLowerCase()
+    const minTs =
+      timeRange === '24h' ? now - DAY_MS : timeRange === '7d' ? now - 7 * DAY_MS : null
     return history.filter((record) => {
       if (decision !== 'all' && record.decision !== decision) return false
+      if (risk !== 'all' && record.risk !== risk) return false
+      if (source !== 'all' && record.source !== source) return false
+      if (minTs !== null && record.ts < minTs) return false
       if (!text) return true
       return [
         record.sessionLabel,
@@ -43,7 +71,7 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
         .toLowerCase()
         .includes(text)
     })
-  }, [decision, history, query])
+  }, [decision, history, now, query, risk, source, timeRange])
 
   const exportCsv = async (): Promise<void> => {
     setBusy(true)
@@ -75,9 +103,58 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
             </button>
           ))}
         </div>
+        <div className="filter-chips" role="group" aria-label="风险、来源与时间筛选">
+          <select
+            className="ip-select"
+            style={{ width: 'auto', flex: 'none' }}
+            value={risk}
+            onChange={(event) => setRisk(event.target.value)}
+            aria-label="按风险筛选"
+            title="按风险筛选"
+          >
+            {RISK_FILTERS.map((filter) => (
+              <option key={filter.id} value={filter.id}>
+                {filter.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="ip-select"
+            style={{ width: 'auto', flex: 'none' }}
+            value={source}
+            onChange={(event) => setSource(event.target.value)}
+            aria-label="按来源筛选"
+            title="按来源筛选"
+          >
+            {SOURCE_FILTERS.map((filter) => (
+              <option key={filter.id} value={filter.id}>
+                {filter.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="ip-select"
+            style={{ width: 'auto', flex: 'none' }}
+            value={timeRange}
+            onChange={(event) => setTimeRange(event.target.value)}
+            aria-label="按时间范围筛选"
+            title="按时间范围筛选"
+          >
+            {TIME_FILTERS.map((filter) => (
+              <option key={filter.id} value={filter.id}>
+                {filter.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="panel-toolbar-actions">
-          <button className="btn compact" disabled={busy} onClick={() => void exportCsv()}>
-            {busy ? '导出中…' : '导出 CSV'}
+          <button
+            className="btn compact"
+            disabled={busy}
+            onClick={() => void exportCsv()}
+            title="导出磁盘上的完整历史，不受当前筛选影响"
+          >
+            {busy ? '导出中…' : '导出全部 CSV'}
           </button>
           <button
             className="btn subtle compact"
@@ -101,13 +178,13 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
       ) : filtered.length === 0 ? (
         <div className="inbox-empty">
           <h3>没有匹配的记录</h3>
-          <p>试试清空搜索词或切换结果筛选。</p>
+          <p>试试清空搜索词或调整结果、风险、来源与时间筛选。</p>
         </div>
       ) : (
         <>
           <div className="history-summary">
-            共 {history.length} 条 · 当前显示 {filtered.length} 条
-            <span>记录保存在 ~/.claude-notify/history.jsonl</span>
+            显示最近 300 条 · 共 {history.length} 条 · 当前显示 {filtered.length} 条
+            <span>导出全部 CSV 会读取磁盘上的完整历史，不受当前筛选影响</span>
           </div>
           <div className="history-list">
             {filtered.map((record) => (

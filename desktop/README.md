@@ -14,7 +14,7 @@ pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
 pnpm capture    # 离屏截图：onboarding / main / inbox / history / logs / settings / deploy / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
-pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（47 个）
+pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 111 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ```
 
@@ -73,7 +73,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 - 本机/远端部署都支持弹窗与通知两种模式；切换模式会提示重新接入/部署，不再假装“立即生效”
 - 单实例锁、托盘菜单、开机自启、系统通知、隐藏到托盘；托盘/Dock 显示待审批数
-- 系统通知聚合最近 1.2 秒内到达的会话，点击可跳转到对应会话；支持按会话静音提醒
+- 系统通知聚合最近 1.2 秒内到达的会话，点击可跳转到对应会话；审批提醒与回合完成通知都支持按会话静音，并遵循“系统通知”总开关
 - 深色 / 浅色 / 跟随系统主题；浅色模式使用不透明窗口保证对比度
 - 字体样式（系统 / 圆体 / 衬线 / 等宽）与字号（小 / 标准 / 大 / 特大），主窗口、设置面板和审批弹窗同步生效
 - 首次使用 3 步引导；主窗口支持“待审批 / 历史 / 日志”三个面板
@@ -101,11 +101,12 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：52 个测试（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务，settings 合并与移除，本机接入，Windows exec form，会话身份/风险/规则/协议）
+- `pnpm test`：当前 111 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与移除、本机接入、Windows exec form、会话身份/风险/规则/协议、历史导出、通知策略、部署漂移）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
 - `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口）、Stop 回合通知、双会话并发、终端已处理、真实超时回退；工具未暴露时明示 SKIP，约 60–130s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)
-- Docker Alpine sshd e2e：密码认证、私钥 + passphrase 认证、popup 部署、notify 重部署、反向 `/health`、幂等 bash 环境变量块
+- 改动 hooks / server / Popup / 通知 / 部署后必须跑 `pnpm e2e:claude`；没有 Claude 认证时记录 SKIP（与 [AGENTS.md](../AGENTS.md) 一致）
+- SSH 部署目前由单测/人工验证覆盖；真实服务器/防火墙场景仍需人工验收，仓库中没有对应的自动化脚本
 - macOS 全屏覆盖：`NSPanel` 弹窗在主窗口全屏时仍可见，点击与 Esc 均正常
 - 超时：返回 `timeout`，进入 `expired[]`，弹窗/收件箱显示“已回退终端”，确认后清除
 - 真实 Claude Code 2.1.295 双会话：`--settings` 隔离 + `--permission-mode default`，两路 `PermissionRequest` 同时到达；弹窗显示 2 个会话/2 条，先批准 H 后自动切到 G；两路均输出 `DONE` 并写入 `result.txt`
@@ -117,7 +118,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 - Windows 真机安装/运行验证（Acrylic、标题栏 overlay、焦点窗口定位）
 - macOS Developer ID 签名 / 公证；Windows 代码签名
-- 远端 SSH 部署已在 Docker sshd 上 e2e；真实服务器/防火墙场景待测
+- 远端 SSH 部署目前由单测/人工验证覆盖；真实服务器/防火墙场景仍需人工验收
 - 非全屏的多 Space 切换人工验证（全屏覆盖已用 NSPanel 验证通过）
 
 ## 结构

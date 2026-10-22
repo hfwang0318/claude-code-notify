@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { Client, type ConnectConfig, type SFTPWrapper } from 'ssh2'
+import { Client, type ClientChannel, type ConnectConfig, type SFTPWrapper } from 'ssh2'
 import type { LogLevel } from '../../shared/types'
 import { hooksDirectory, quoteShell as shellQuote, timestamp } from './paths'
 import {
@@ -49,6 +49,31 @@ export interface FingerprintError extends Error {
   fingerprint?: string
 }
 
+export const SSH_COMMAND_TIMEOUT = 'SSH_COMMAND_TIMEOUT'
+export const DEPLOY_CANCELLED = 'DEPLOY_CANCELLED'
+
+interface CodedError extends Error {
+  code?: string
+}
+
+function codedError(message: string, code: string): CodedError {
+  const error = new Error(message) as CodedError
+  error.code = code
+  return error
+}
+
+function cancelledError(): CodedError {
+  return codedError('部署已取消', DEPLOY_CANCELLED)
+}
+
+export function isDeployCancelled(error: unknown): boolean {
+  return (error as { code?: string })?.code === DEPLOY_CANCELLED
+}
+
+function checkAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw cancelledError()
+}
+
 function fingerprintOf(key: Buffer): string {
   return `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`
 }
@@ -56,6 +81,9 @@ function fingerprintOf(key: Buffer): string {
 export function humanizeSshError(error: unknown): string {
   const code = (error as { code?: string })?.code
   const message = error instanceof Error ? error.message : String(error)
+  if (code === DEPLOY_CANCELLED) return '部署已取消'
+  if (code === SSH_COMMAND_TIMEOUT) return 'SSH 命令执行超时，请检查网络或服务器负载'
+  if ((error as { name?: string })?.name === 'AbortError') return '部署已取消'
   if (code === 'ENOTFOUND') return '找不到这台服务器，请检查主机名或 DNS'
   if (code === 'ECONNREFUSED') return 'SSH 端口拒绝连接，请检查端口与服务器 sshd 状态'
   if (code === 'ETIMEDOUT' || /timed out/i.test(message)) return '连接超时，请检查网络或防火墙'
@@ -74,30 +102,94 @@ export function humanizeSshError(error: unknown): string {
   return message || 'SSH 连接失败'
 }
 
-function execCommand(
+export function execCommand(
   client: Client,
   command: string,
-  timeout = 30000
+  timeout = 30000,
+  signal?: AbortSignal
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    void timeout
-    client.exec(command, (error, stream) => {
-      if (error) {
+    let settled = false
+    let stream: ClientChannel | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let onAbort: (() => void) | null = null
+
+    const cleanup = (): void => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+      if (signal && onAbort) {
+        signal.removeEventListener('abort', onAbort)
+        onAbort = null
+      }
+    }
+
+    const settle = (action: () => void): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      action()
+    }
+
+    const fail = (error: unknown): void => {
+      const channel = stream
+      settle(() => {
+        try {
+          channel?.close()
+        } catch {
+          // stream may already be closed
+        }
         reject(error)
+      })
+    }
+
+    timer = setTimeout(() => {
+      fail(
+        codedError(
+          `SSH 命令执行超时（${timeout}ms）：${command.slice(0, 80)}`,
+          SSH_COMMAND_TIMEOUT
+        )
+      )
+    }, timeout)
+
+    if (signal) {
+      if (signal.aborted) {
+        fail(cancelledError())
         return
       }
+      onAbort = (): void => fail(cancelledError())
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+
+    client.exec(command, (error, channel) => {
+      if (settled) {
+        try {
+          channel?.close()
+        } catch {
+          // the command already timed out or was cancelled
+        }
+        return
+      }
+      if (error) {
+        fail(error)
+        return
+      }
+      stream = channel
       let stdout = ''
       let stderr = ''
-      stream.on('data', (chunk: Buffer) => {
+      channel.on('data', (chunk: Buffer) => {
         stdout += chunk.toString('utf-8')
       })
-      stream.stderr.on('data', (chunk: Buffer) => {
+      channel.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString('utf-8')
       })
-      stream.on('close', (code: number) => {
-        resolve({ code: code ?? 0, stdout, stderr })
+      channel.on('close', (code: number) => {
+        settle(() => resolve({ code: code ?? 0, stdout, stderr }))
       })
-      stream.on('error', reject)
+      channel.on('error', (streamError: Error) => {
+        fail(streamError)
+      })
     })
   })
 }
@@ -152,17 +244,44 @@ function connectOptions(config: DeployConfig, state: ConnectState): ConnectConfi
 }
 
 async function openClient(
-  config: DeployConfig
+  config: DeployConfig,
+  signal?: AbortSignal
 ): Promise<{ client: Client; fingerprint: string }> {
+  checkAborted(signal)
   const client = new Client()
   const state: ConnectState = { fingerprint: '' }
   try {
     await new Promise<void>((resolve, reject) => {
-      client.once('ready', () => resolve())
-      client.once('error', (error) => reject(error))
+      let settled = false
+      const onAbort = (): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        try {
+          client.end()
+        } catch {
+          // the connection may not be established yet
+        }
+        reject(cancelledError())
+      }
+      const finish = (error?: Error): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve()
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      if (signal?.aborted) {
+        onAbort()
+        return
+      }
+      client.once('ready', () => finish())
+      client.once('error', (error) => finish(error))
       client.connect(connectOptions(config, state))
     })
   } catch (error) {
+    if (isDeployCancelled(error)) throw error
     const mismatch =
       Boolean(config.hostFingerprint) && state.fingerprint !== config.hostFingerprint
     const failure = new Error(humanizeSshError(error)) as FingerprintError
@@ -182,7 +301,10 @@ function connectivityCommand(config: DeployConfig): string {
   return `curl -s -m 5 ${shellQuote(healthUrl)} || wget -q -T 5 -O- ${shellQuote(healthUrl)}`
 }
 
-export async function testSshConnection(config: DeployConfig): Promise<{
+export async function testSshConnection(
+  config: DeployConfig,
+  signal?: AbortSignal
+): Promise<{
   ok: boolean
   message: string
   home?: string
@@ -195,7 +317,7 @@ export async function testSshConnection(config: DeployConfig): Promise<{
   let client: Client
   let fingerprint = ''
   try {
-    const opened = await openClient(config)
+    const opened = await openClient(config, signal)
     client = opened.client
     fingerprint = opened.fingerprint
   } catch (error) {
@@ -209,7 +331,7 @@ export async function testSshConnection(config: DeployConfig): Promise<{
     }
   }
   try {
-    const result = await execCommand(client, 'echo $HOME')
+    const result = await execCommand(client, 'echo $HOME', 30000, signal)
     const home = result.stdout.trim()
     if (result.code !== 0 || !home) {
       return { ok: false, message: 'SSH 已连接，但无法读取服务器 $HOME', fingerprint }
@@ -217,7 +339,7 @@ export async function testSshConnection(config: DeployConfig): Promise<{
     let connectivity = false
     let connectivityMessage = ''
     try {
-      const check = await execCommand(client, connectivityCommand(config), 20000)
+      const check = await execCommand(client, connectivityCommand(config), 20000, signal)
       connectivity =
         check.stdout.includes('"status": "ok"') || check.stdout.includes('"status":"ok"')
       connectivityMessage = connectivity
@@ -244,22 +366,31 @@ export async function testSshConnection(config: DeployConfig): Promise<{
 
 export async function deployToServer(
   config: DeployConfig,
-  onProgress: DeployProgress
+  onProgress: DeployProgress,
+  signal?: AbortSignal
 ): Promise<{ success: boolean; summary: string; connectivity: boolean; fingerprint: string }> {
   const log = (message: string, level: LogLevel = 'info'): void =>
     onProgress(level, message)
 
+  checkAborted(signal)
   log(`连接服务器 ${config.username}@${config.host}:${config.sshPort} …`)
-  const { client, fingerprint } = await openClient(config)
+  const { client, fingerprint } = await openClient(config, signal)
   log('SSH 连接成功')
 
   try {
-    const homeResult = await execCommand(client, 'echo $HOME')
+    checkAborted(signal)
+    const homeResult = await execCommand(client, 'echo $HOME', 30000, signal)
     const home = homeResult.stdout.trim()
     if (homeResult.code !== 0 || !home) throw new Error('无法获取服务器上的 $HOME')
 
     const claudeDir = `${home}/.claude`
-    await execCommand(client, `mkdir -p ${shellQuote(claudeDir)} && chmod 700 ${shellQuote(claudeDir)}`)
+    checkAborted(signal)
+    await execCommand(
+      client,
+      `mkdir -p ${shellQuote(claudeDir)} && chmod 700 ${shellQuote(claudeDir)}`,
+      30000,
+      signal
+    )
     log(`创建目录 ${claudeDir}`)
 
     const isPopup = config.mode === 'popup'
@@ -269,13 +400,16 @@ export async function deployToServer(
     const remoteScript = `${claudeDir}/${scriptName}`
     const remoteNotifyScript = `${claudeDir}/${NOTIFY_SCRIPT_NAME}`
 
+    checkAborted(signal)
     const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
       client.sftp((error, value) => (error ? reject(error) : resolve(value)))
     })
     try {
+      checkAborted(signal)
       log(`上传钩子脚本 → ${remoteScript}`)
       await sftpWrite(sftp, remoteScript, scriptContent)
       await sftpChmod(sftp, remoteScript, 0o755)
+      checkAborted(signal)
       if (isPopup) {
         const notifyContent = readFileSync(
           join(hooksDirectory(), NOTIFY_SCRIPT_NAME),
@@ -285,14 +419,25 @@ export async function deployToServer(
         await sftpWrite(sftp, remoteNotifyScript, notifyContent)
         await sftpChmod(sftp, remoteNotifyScript, 0o755)
       } else {
-        await execCommand(client, `rm -f ${shellQuote(`${claudeDir}/${APPROVAL_SCRIPT_NAME}`)}`)
+        await execCommand(
+          client,
+          `rm -f ${shellQuote(`${claudeDir}/${APPROVAL_SCRIPT_NAME}`)}`,
+          30000,
+          signal
+        )
       }
 
+      checkAborted(signal)
       const settingsPath = `${claudeDir}/settings.json`
       const existing = (await sftpRead(sftp, settingsPath)) || ''
       if (existing.trim()) {
         const backupPath = `${settingsPath}.bak.${timestamp()}`
-        await execCommand(client, `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`)
+        await execCommand(
+          client,
+          `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`,
+          30000,
+          signal
+        )
         log(`已备份现有配置 → ${backupPath}`)
       }
 
@@ -335,19 +480,28 @@ export async function deployToServer(
         stopEntry: { type: 'command', command: stopCommand }
       })
       await sftpWrite(sftp, settingsPath, merged)
+      await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
       log(`已写入 ${settingsPath}`)
 
       if (config.envImport && config.envShells.length > 0) {
         for (const shell of config.envShells) {
           const info = SHELL_RC_FILES[shell]
           if (!info) continue
+          checkAborted(signal)
           const rcFile = `${home}/${info.rc}`
-          await execCommand(client, `mkdir -p $(dirname ${shellQuote(rcFile)}) && touch ${shellQuote(rcFile)}`)
+          await execCommand(
+            client,
+            `mkdir -p $(dirname ${shellQuote(rcFile)}) && touch ${shellQuote(rcFile)}`,
+            30000,
+            signal
+          )
           const current = (await sftpRead(sftp, rcFile)) || ''
           const block = buildEnvBlock(shell, config.token)
           await execCommand(
             client,
-            `cp ${shellQuote(rcFile)} ${shellQuote(`${rcFile}.claude-notify-bak`)}`
+            `cp ${shellQuote(rcFile)} ${shellQuote(`${rcFile}.claude-notify-bak`)}`,
+            30000,
+            signal
           )
           const next = `${removeEnvBlock(current)}\n${block}\n`
           await sftpWrite(sftp, rcFile, next)
@@ -358,18 +512,28 @@ export async function deployToServer(
       sftp.end()
     }
 
+    checkAborted(signal)
     log('验证钩子脚本 …')
-    const verify = await execCommand(
-      client,
-      `printf '{}' | timeout 10 python3 ${shellQuote(remoteScript)} >/dev/null 2>&1; echo $?`,
-      20000
-    )
-    if (verify.code !== 0) log(`钩子脚本验证异常（exit=${verify.code}）`, 'warn')
-    else log('钩子脚本验证通过')
+    const pythonCheck = await execCommand(client, 'command -v python3', 15000, signal)
+    if (pythonCheck.code !== 0 || !pythonCheck.stdout.trim()) {
+      throw new Error('服务器没有可用的 python3')
+    }
+    const compileCommand =
+      `python3 -c "compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')" ` +
+      shellQuote(remoteScript)
+    const verify = await execCommand(client, compileCommand, 20000, signal)
+    if (verify.code !== 0) {
+      const detail = verify.stderr.trim().slice(0, 300)
+      throw new Error(
+        `钩子脚本验证失败（exit=${verify.code}）${detail ? `：${detail}` : ''}`
+      )
+    }
+    log('钩子脚本验证通过')
 
+    checkAborted(signal)
     const healthUrl = `http://${config.callbackIp}:${config.callbackPort}/health`
     log(`测试服务器到本机的连通性 ${healthUrl} …`)
-    const check = await execCommand(client, connectivityCommand(config), 20000)
+    const check = await execCommand(client, connectivityCommand(config), 20000, signal)
     const connectivity = check.stdout.includes('"status": "ok"') || check.stdout.includes('"status":"ok"')
     if (connectivity) {
       log('连通性测试通过 ✓', 'notify')
@@ -397,42 +561,60 @@ export async function deployToServer(
 
 export async function removeDeployFromServer(
   config: DeployConfig,
-  onProgress: DeployProgress
+  onProgress: DeployProgress,
+  signal?: AbortSignal
 ): Promise<{ success: boolean; summary: string; removedHooks: number }> {
   const log = (message: string, level: LogLevel = 'info'): void => onProgress(level, message)
+  checkAborted(signal)
   log(`连接服务器 ${config.username}@${config.host}:${config.sshPort} …`)
-  const { client } = await openClient(config)
+  const { client } = await openClient(config, signal)
   try {
-    const homeResult = await execCommand(client, 'echo $HOME')
+    checkAborted(signal)
+    const homeResult = await execCommand(client, 'echo $HOME', 30000, signal)
     const home = homeResult.stdout.trim()
     if (homeResult.code !== 0 || !home) throw new Error('无法获取服务器上的 $HOME')
     const claudeDir = `${home}/.claude`
     const settingsPath = `${claudeDir}/settings.json`
+    checkAborted(signal)
     const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
       client.sftp((error, value) => (error ? reject(error) : resolve(value)))
     })
     let removedHooks = 0
     try {
+      checkAborted(signal)
       const existing = await sftpRead(sftp, settingsPath)
       if (existing && existing.trim()) {
         const backupPath = `${settingsPath}.bak.${timestamp()}`
-        await execCommand(client, `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`)
+        await execCommand(
+          client,
+          `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`,
+          30000,
+          signal
+        )
         log(`已备份现有配置 → ${backupPath}`)
         const stripped = stripSettingsJson(existing)
         removedHooks = stripped.removed
         if (stripped.changed) {
           await sftpWrite(sftp, settingsPath, stripped.text)
+          await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
           log(`已从 settings.json 移除 ${removedHooks} 个钩子条目`)
         }
       }
+      checkAborted(signal)
       for (const script of [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME, 'claude_notify_config.json']) {
-        await execCommand(client, `rm -f ${shellQuote(`${claudeDir}/${script}`)}`)
+        await execCommand(
+          client,
+          `rm -f ${shellQuote(`${claudeDir}/${script}`)}`,
+          30000,
+          signal
+        )
       }
       log('已删除服务器上的钩子脚本')
       if (config.envImport && config.envShells.length > 0) {
         for (const shell of config.envShells) {
           const info = SHELL_RC_FILES[shell]
           if (!info) continue
+          checkAborted(signal)
           const rcFile = `${home}/${info.rc}`
           const current = await sftpRead(sftp, rcFile)
           if (!current) continue
@@ -459,28 +641,43 @@ export async function removeDeployFromServer(
 
 export async function restoreDeployBackup(
   config: DeployConfig,
-  onProgress: DeployProgress
+  onProgress: DeployProgress,
+  signal?: AbortSignal
 ): Promise<{ success: boolean; summary: string; restoredFrom: string }> {
   const log = (message: string, level: LogLevel = 'info'): void => onProgress(level, message)
+  checkAborted(signal)
   log(`连接服务器 ${config.username}@${config.host}:${config.sshPort} …`)
-  const { client } = await openClient(config)
+  const { client } = await openClient(config, signal)
   try {
-    const homeResult = await execCommand(client, 'echo $HOME')
+    checkAborted(signal)
+    const homeResult = await execCommand(client, 'echo $HOME', 30000, signal)
     const home = homeResult.stdout.trim()
     if (homeResult.code !== 0 || !home) throw new Error('无法获取服务器上的 $HOME')
     const settingsPath = `${home}/.claude/settings.json`
+    checkAborted(signal)
     const listed = await execCommand(
       client,
-      `ls -1t ${shellQuote(settingsPath)}.bak.* 2>/dev/null | head -n 1`
+      `ls -1t ${shellQuote(settingsPath)}.bak.* 2>/dev/null | head -n 1`,
+      30000,
+      signal
     )
     const restoredFrom = listed.stdout.trim().split('\n')[0]
     if (!restoredFrom) throw new Error('服务器上没有找到 settings.json 备份')
+    checkAborted(signal)
     const safety = `${settingsPath}.pre-restore.${timestamp()}`
-    await execCommand(client, `cp ${shellQuote(settingsPath)} ${shellQuote(safety)}`)
     await execCommand(
       client,
-      `cp ${shellQuote(restoredFrom)} ${shellQuote(settingsPath)}`
+      `cp ${shellQuote(settingsPath)} ${shellQuote(safety)}`,
+      30000,
+      signal
     )
+    await execCommand(
+      client,
+      `cp ${shellQuote(restoredFrom)} ${shellQuote(settingsPath)}`,
+      30000,
+      signal
+    )
+    await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
     log(`已恢复 ${settingsPath} ← ${restoredFrom}`, 'notify')
     return {
       success: true,

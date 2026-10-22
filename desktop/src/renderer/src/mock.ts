@@ -92,6 +92,7 @@ export const mockState: AppState = {
     hookVersion: '2',
     hookStale: false,
     modeMismatch: false,
+    drift: [],
     profiles: [
       {
         id: 'deploy@192.168.1.20:22',

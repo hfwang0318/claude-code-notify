@@ -28,6 +28,7 @@ export function ruleMatches(rule: ApprovalRule, item: ApprovalItem): boolean {
   if (rule.scope === 'project') {
     if (rule.project !== item.project && rule.project !== item.cwd) return false
   }
+  if (rule.origin && rule.origin !== item.origin) return false
   if (rule.tool !== '*' && rule.tool.toLowerCase() !== item.tool.toLowerCase()) return false
   return patternMatches(rule.pattern, approvalCommand(item))
 }
@@ -68,7 +69,8 @@ export function describeRule(rule: ApprovalRule): string {
       : rule.scope === 'project'
         ? `项目 ${rule.project || '?'}`
         : '当前会话'
-  return `${scope} · ${rule.tool} · ${rule.pattern}`
+  const origin = rule.origin ? ` · 来源 ${rule.origin}` : ''
+  return `${scope}${origin} · ${rule.tool} · ${rule.pattern}`
 }
 
 export function validateRule(rule: {

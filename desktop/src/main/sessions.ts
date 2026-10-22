@@ -14,12 +14,30 @@ import {
 
 const IDLE_RETENTION_MS = 24 * 60 * 60 * 1000
 const MAX_SESSIONS = 16
+const PERSIST_DEBOUNCE_MS = 200
 
 export class SessionRegistry {
   private meta: SessionMetaMap
+  private persistTimer: NodeJS.Timeout | null = null
+  private dirty = false
 
   constructor(meta: SessionMetaMap = loadSessionMeta()) {
     this.meta = meta
+  }
+
+  /** Write pending metadata changes immediately (used on shutdown/tests). */
+  flush(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer)
+      this.persistTimer = null
+    }
+    if (!this.dirty) return
+    this.dirty = false
+    try {
+      saveSessionMeta(this.meta)
+    } catch {
+      // session metadata is best-effort
+    }
   }
 
   getMeta(): SessionMetaMap {
@@ -144,6 +162,7 @@ export class SessionRegistry {
     for (const key of Object.keys(this.meta)) keys.add(key)
 
     const sessions: SessionInfo[] = []
+    let removedExpired = false
     for (const key of keys) {
       const meta: SessionMeta = this.meta[key] || {}
       const waitingItems = pending.filter((item) => item.sessionKey === key)
@@ -157,6 +176,7 @@ export class SessionRegistry {
       )
       if (!waiting && lastSeen > 0 && now - lastSeen > IDLE_RETENTION_MS) {
         delete this.meta[key]
+        removedExpired = true
         continue
       }
       const label =
@@ -185,18 +205,18 @@ export class SessionRegistry {
       })
     }
 
-    let recolored = false
+    let changed = false
     const usedColors = new Set<string>()
     for (const session of sessions) {
       if (usedColors.has(session.color)) {
         const next = pickSessionColor(session.key, usedColors)
         session.color = next
         this.meta[session.key] = { ...(this.meta[session.key] || {}), color: next }
-        recolored = true
+        changed = true
       }
       usedColors.add(session.color)
     }
-    if (recolored) this.persist()
+    if (changed || removedExpired) this.persist()
 
     return sessions
       .sort((left, right) => {
@@ -207,10 +227,12 @@ export class SessionRegistry {
   }
 
   private persist(): void {
-    try {
-      saveSessionMeta(this.meta)
-    } catch {
-      // session metadata is best-effort
-    }
+    this.dirty = true
+    if (this.persistTimer) return
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null
+      this.flush()
+    }, PERSIST_DEBOUNCE_MS)
+    this.persistTimer.unref?.()
   }
 }

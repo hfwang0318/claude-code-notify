@@ -29,14 +29,22 @@ function parseLine(line: string): ApprovalRecord | null {
   }
 }
 
-function readAll(): ApprovalRecord[] {
+function parseRecords(text: string): ApprovalRecord[] {
+  return text
+    .split('\n')
+    .map(parseLine)
+    .filter((record): record is ApprovalRecord => record !== null)
+}
+
+function readAllStrict(): ApprovalRecord[] {
   const file = historyFilePath()
   if (!existsSync(file)) return []
+  return parseRecords(readFileSync(file, 'utf-8'))
+}
+
+function readAll(): ApprovalRecord[] {
   try {
-    return readFileSync(file, 'utf-8')
-      .split('\n')
-      .map(parseLine)
-      .filter((record): record is ApprovalRecord => record !== null)
+    return readAllStrict()
   } catch {
     return []
   }
@@ -111,25 +119,36 @@ export class HistoryStore {
       const text = String(value ?? '')
       return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
     }
-    const rows = [...this.records]
-      .reverse()
-      .map((record) =>
-        [
-          new Date(record.ts).toISOString(),
-          record.sessionLabel,
-          record.origin,
-          record.project,
-          record.tool,
-          record.decision,
-          record.source,
-          record.latencyMs,
-          record.risk,
-          record.command
-        ]
-          .map(escape)
-          .join(',')
-      )
+    // Export the complete on-disk history (~1500 records after compaction),
+    // not just the 300 records kept in memory for the UI.
+    let records: ApprovalRecord[]
+    try {
+      records = readAllStrict()
+    } catch {
+      records = []
+    }
+    // readAllStrict returns [] for a missing/empty file as well. In that case
+    // retain the old best-effort behaviour and export whatever is in memory.
+    if (records.length === 0 && this.records.length > 0) {
+      records = [...this.records].reverse()
+    }
+    const rows = records.map((record) =>
+      [
+        new Date(record.ts).toISOString(),
+        record.sessionLabel,
+        record.origin,
+        record.project,
+        record.tool,
+        record.decision,
+        record.source,
+        record.latencyMs,
+        record.risk,
+        record.command
+      ]
+        .map(escape)
+        .join(',')
+    )
     writeFileSync(target, `${[header.join(','), ...rows].join('\n')}\n`, 'utf-8')
-    return this.records.length
+    return records.length
   }
 }

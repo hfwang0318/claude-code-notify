@@ -21,6 +21,48 @@ interface Props {
   onOpenHistory: () => void
 }
 
+function BellIcon(): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  )
+}
+
+function BellOffIcon(): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M8.7 3A6 6 0 0 1 18 8c0 2.3.7 4.2 1.5 5.6" />
+      <path d="M17 17H4s3-2 3-9a6 6 0 0 1 .6-2.6" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+      <line x1="3" y1="3" x2="21" y2="21" />
+    </svg>
+  )
+}
+
 function sessionMeta(state: AppState, item: ApprovalItem) {
   return (
     state.sessions.find((session) => session.key === item.sessionKey) || {
@@ -276,7 +318,7 @@ export default function Inbox({
                   aria-label={muted ? '取消静音提醒' : '静音提醒 30 分钟'}
                   onClick={() => mute(group.key, muted)}
                 >
-                  {muted ? '🔕' : '🔔'}
+                  {muted ? <BellOffIcon /> : <BellIcon />}
                 </button>
                 {confirmBatch === group.key ? (
                   <>

@@ -1,8 +1,22 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildLocalHookEntry, deployLocal, detectLocalDeploy, detectLocalState } from './local'
+import {
+  buildLocalHookEntry,
+  deployLocal,
+  detectLocalDeploy,
+  detectLocalState,
+  removeLocalDeploy,
+  restoreLocalBackup
+} from './local'
 import { HOOK_VERSION, HOOK_VERSION_KEY } from './settings'
 
 const directories: string[] = []
@@ -80,6 +94,51 @@ describe('deployLocal', () => {
 
     const backups = readFileSync(result.settingsPath, 'utf-8')
     expect(backups).toContain('third-party')
+  })
+
+  it('restricts settings.json permissions to 0600 on POSIX', () => {
+    const claudeDir = tempDir()
+    const result = deployLocal(
+      {
+        mode: 'popup',
+        token: 'test-token',
+        port: 18765,
+        timeoutSec: 240,
+        writeEnv: false,
+        envShells: [],
+        claudeDir,
+        hooksDir: join(process.cwd(), 'resources', 'hooks')
+      },
+      () => undefined
+    )
+    if (process.platform !== 'win32') {
+      expect(statSync(result.settingsPath).mode & 0o777).toBe(0o600)
+    }
+  })
+
+  it('keeps settings.json private after remove and restore on POSIX', () => {
+    const claudeDir = tempDir()
+    deployLocal(
+      {
+        mode: 'notify',
+        token: 'test-token',
+        port: 18765,
+        writeEnv: false,
+        envShells: [],
+        claudeDir,
+        hooksDir: join(process.cwd(), 'resources', 'hooks')
+      },
+      () => undefined
+    )
+    const settingsPath = join(claudeDir, 'settings.json')
+    removeLocalDeploy({ claudeDir }, () => undefined)
+    if (process.platform !== 'win32') {
+      expect(statSync(settingsPath).mode & 0o777).toBe(0o600)
+    }
+    restoreLocalBackup(claudeDir, () => undefined)
+    if (process.platform !== 'win32') {
+      expect(statSync(settingsPath).mode & 0o777).toBe(0o600)
+    }
   })
 
   it('marks an old or missing hook version as stale', () => {

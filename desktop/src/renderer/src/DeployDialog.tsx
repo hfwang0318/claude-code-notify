@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types'
 import { api } from './api'
 import { formatRelative } from './format'
+import { useFocusTrap } from './useFocusTrap'
 
 interface Props {
   open: boolean
@@ -60,11 +61,17 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
   const [running, setRunning] = useState(false)
   const [testing, setTesting] = useState(false)
   const [removing, setRemoving] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [confirmRestore, setConfirmRestore] = useState(false)
   const [result, setResult] = useState<DeployResult | null>(null)
   const [testResult, setTestResult] = useState<DeployTestResult | null>(null)
   const initialized = useRef(false)
+  const dialogRef = useRef<HTMLElement>(null)
+
+  useFocusTrap(open, dialogRef, () => {
+    if (!running && !testing && !removing) onClose()
+  })
 
   useEffect(() => {
     if (!open) {
@@ -106,18 +113,6 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
     })
     return off
   }, [open, state.server.localIp, state.network.port, state.prefs.mode])
-
-  useEffect(() => {
-    if (!open) return
-    const handler = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !running && !testing && !removing) {
-        event.preventDefault()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [open, running, testing, removing, onClose])
 
   if (!open) return null
 
@@ -249,6 +244,7 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
       setResult({ success: false, summary: text, connectivity: false })
     } finally {
       setRunning(false)
+      setCancelling(false)
     }
   }
 
@@ -276,6 +272,7 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
       setError(text)
     } finally {
       setRemoving(false)
+      setCancelling(false)
     }
   }
 
@@ -302,6 +299,33 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
       setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       setRemoving(false)
+      setCancelling(false)
+    }
+  }
+
+  const cancelDeploy = async (): Promise<void> => {
+    if (cancelling) return
+    if (!api.cancelDeploy) {
+      setError('当前环境不支持取消部署')
+      return
+    }
+    setCancelling(true)
+    try {
+      const response = await api.cancelDeploy()
+      if (!response.ok) {
+        setCancelling(false)
+        if (response.message) {
+          setLogs((current) => [...current, { level: 'warn', message: response.message as string }])
+        }
+        return
+      }
+      setLogs((current) => [
+        ...current,
+        { level: 'warn', message: response.message || '正在取消…' }
+      ])
+    } catch (caught) {
+      setCancelling(false)
+      setError(caught instanceof Error ? caught.message : String(caught))
     }
   }
 
@@ -309,7 +333,14 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
 
   return (
     <div className="modal-backdrop" role="presentation">
-      <section className="deploy-modal" role="dialog" aria-modal="true" aria-labelledby="deploy-title">
+      <section
+        className="deploy-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="deploy-title"
+        ref={dialogRef}
+        tabIndex={-1}
+      >
         <header className="modal-head">
           <div>
             <div className="modal-kicker">服务器接入</div>
@@ -633,7 +664,11 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
               <button className="btn danger" onClick={() => void remove()} disabled={removing}>
                 {removing ? '移除中…' : '确认移除服务器钩子'}
               </button>
-              <button className="btn subtle" onClick={() => setConfirmRemove(false)}>
+              <button
+                className="btn subtle"
+                onClick={() => setConfirmRemove(false)}
+                disabled={removing}
+              >
                 取消
               </button>
             </>
@@ -642,7 +677,11 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
               <button className="btn primary" onClick={() => void restore()} disabled={removing}>
                 {removing ? '恢复中…' : '确认恢复上一个备份'}
               </button>
-              <button className="btn subtle" onClick={() => setConfirmRestore(false)}>
+              <button
+                className="btn subtle"
+                onClick={() => setConfirmRestore(false)}
+                disabled={removing}
+              >
                 取消
               </button>
             </>
@@ -661,6 +700,15 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
               </button>
             </>
           )}
+          {running || removing ? (
+            <button
+              className="btn danger"
+              onClick={() => void cancelDeploy()}
+              disabled={cancelling}
+            >
+              {cancelling ? '正在取消…' : '取消部署'}
+            </button>
+          ) : null}
         </footer>
       </section>
     </div>

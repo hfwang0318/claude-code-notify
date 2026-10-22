@@ -2000,6 +2000,12 @@ kbd {
   color: var(--ink);
 }
 
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
 /* --- titlebar extensions --- */
 
 .pending-pill {

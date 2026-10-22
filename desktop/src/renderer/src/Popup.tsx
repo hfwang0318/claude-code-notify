@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type {
-  AppState,
-  ApprovalAnswer,
-  ApprovalItem
-} from '../../shared/types'
+import type { AppState, ApprovalItem } from '../../shared/types'
 import {
   approvalCommand,
   extractEditDiff,
@@ -15,14 +11,14 @@ import {
   sortByDeadline
 } from '../../shared/session'
 import { describeSuggestion } from '../../shared/suggestions'
+import {
+  buildAnswers,
+  validateDrafts,
+  withOtherToggled,
+  type QuestionDraft
+} from '../../shared/questions'
 import { api } from './api'
 import { formatTime } from './format'
-
-interface QuestionDraft {
-  selected: string[]
-  text: string
-  other: boolean
-}
 
 function emptyDrafts(item: ApprovalItem): QuestionDraft[] {
   return item.questions.map(() => ({ selected: [], text: '', other: false }))
@@ -38,7 +34,8 @@ export default function Popup(): React.JSX.Element | null {
   const [now, setNow] = useState(Date.now())
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [drafts, setDrafts] = useState<Record<string, QuestionDraft[]>>({})
-  const [answerHint, setAnswerHint] = useState(false)
+  const [answerErrors, setAnswerErrors] = useState<number[]>([])
+  const [activeQuestion, setActiveQuestion] = useState(0)
   const [showQueue, setShowQueue] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [confirmHighRisk, setConfirmHighRisk] = useState(false)
@@ -89,7 +86,8 @@ export default function Popup(): React.JSX.Element | null {
     if (!item) return
     setDetailsOpen(false)
     setConfirmHighRisk(false)
-    setAnswerHint(false)
+    setAnswerErrors([])
+    setActiveQuestion(0)
     setDrafts((current) => {
       if (current[item.id]) return current
       return { ...current, [item.id]: emptyDrafts(item) }
@@ -155,19 +153,21 @@ export default function Popup(): React.JSX.Element | null {
 
   const submitAnswers = (): void => {
     if (!item) return
-    const answers: ApprovalAnswer[] = []
-    item.questions.forEach((question, index) => {
-      const entry = draft[index]
-      if (!entry) return
-      const text = entry.text.trim()
-      if (entry.selected.length === 0 && !text) return
-      answers.push({ question: question.question, selected: entry.selected, text })
-    })
-    if (answers.length === 0) {
-      setAnswerHint(true)
+    const invalid = validateDrafts(item.questions, draft)
+    if (invalid.length > 0) {
+      setAnswerErrors(invalid)
+      setActiveQuestion(invalid[0])
+      const target = cardRef.current?.querySelector<HTMLElement>(
+        `[data-question-index="${invalid[0]}"]`
+      )
+      target?.focus()
+      target?.scrollIntoView({ block: 'nearest' })
       return
     }
-    void api.respond(item.id, 'answer', { answers })
+    setAnswerErrors([])
+    void api.respond(item.id, 'answer', {
+      answers: buildAnswers(item.questions, draft)
+    })
   }
 
   const allow = (): void => {
@@ -196,7 +196,8 @@ export default function Popup(): React.JSX.Element | null {
 
   const toggleOption = (index: number, label: string, multi: boolean): void => {
     if (!item) return
-    setAnswerHint(false)
+    setActiveQuestion(index)
+    setAnswerErrors((current) => current.filter((entry) => entry !== index))
     const current = drafts[item.id] || emptyDrafts(item)
     setDrafts({
       ...drafts,
@@ -215,7 +216,8 @@ export default function Popup(): React.JSX.Element | null {
 
   const updateText = (index: number, text: string): void => {
     if (!item) return
-    setAnswerHint(false)
+    setActiveQuestion(index)
+    setAnswerErrors((current) => current.filter((entry) => entry !== index))
     const current = drafts[item.id] || emptyDrafts(item)
     setDrafts({
       ...drafts,
@@ -227,11 +229,13 @@ export default function Popup(): React.JSX.Element | null {
 
   const toggleOther = (index: number): void => {
     if (!item) return
+    setActiveQuestion(index)
+    setAnswerErrors((current) => current.filter((entry) => entry !== index))
     const current = drafts[item.id] || emptyDrafts(item)
     setDrafts({
       ...drafts,
       [item.id]: current.map((entry, entryIndex) =>
-        entryIndex === index ? { ...entry, other: !entry.other } : entry
+        entryIndex === index ? withOtherToggled(entry) : entry
       )
     })
   }
@@ -257,10 +261,11 @@ export default function Popup(): React.JSX.Element | null {
     if (!item) return
     const handler = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
-      const typing =
+      const typing = Boolean(
         target?.tagName === 'INPUT' ||
-        target?.tagName === 'TEXTAREA' ||
-        target?.isContentEditable
+          target?.tagName === 'TEXTAREA' ||
+          target?.isContentEditable
+      )
       if (isExpired) {
         if (event.key === 'Escape' || event.key === 'Enter') {
           event.preventDefault()
@@ -289,6 +294,12 @@ export default function Popup(): React.JSX.Element | null {
         return
       }
       if (event.key === 'Escape') {
+        if (typing) {
+          // 输入框内的 Esc 先退出输入，不提交“交给终端”；再按一次才交给终端。
+          event.preventDefault()
+          target?.blur()
+          return
+        }
         event.preventDefault()
         ask()
         return
@@ -299,7 +310,10 @@ export default function Popup(): React.JSX.Element | null {
       }
       if (item.kind === 'question') {
         if (/^[1-9]$/.test(event.key)) {
-          const questionIndex = 0
+          const questionIndex =
+            activeQuestion >= 0 && activeQuestion < item.questions.length
+              ? activeQuestion
+              : 0
           const question = item.questions[questionIndex]
           const option = question?.options[Number(event.key) - 1]
           if (question && option) {
@@ -329,7 +343,7 @@ export default function Popup(): React.JSX.Element | null {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [item, isExpired, highRisk, confirmHighRisk, draft, state])
+  }, [item, isExpired, highRisk, confirmHighRisk, draft, state, activeQuestion])
 
   if (!state || !item) return null
 
@@ -509,8 +523,16 @@ export default function Popup(): React.JSX.Element | null {
                 {item.questions.map((question, index) => {
                   const entry = draft[index] || { selected: [], text: '', other: false }
                   const multi = Boolean(question.multiSelect)
+                  const invalid = answerErrors.includes(index)
                   return (
-                    <div className="question-block" key={`${question.question}-${index}`}>
+                    <div
+                      className="question-block"
+                      key={`${question.question}-${index}`}
+                      data-question-index={index}
+                      tabIndex={-1}
+                      onClick={() => setActiveQuestion(index)}
+                      onFocus={() => setActiveQuestion(index)}
+                    >
                       <div className="question-head">
                         {item.questions.length > 1 ? (
                           <span className="question-index">问题 {index + 1}</span>
@@ -518,6 +540,13 @@ export default function Popup(): React.JSX.Element | null {
                         {multi ? <span className="question-multi">多选</span> : null}
                       </div>
                       <div className="question-text">{question.question}</div>
+                      {invalid ? (
+                        <div className="question-hint question-error" role="alert">
+                          {entry.other
+                            ? '自定义回答不能为空，请输入内容或选择一个选项。'
+                            : '请选择一个选项，或展开“其他”并输入回答。'}
+                        </div>
+                      ) : null}
                       {question.options.length > 0 ? (
                         <div className="question-options" role="group">
                           {question.options.map((option, optionIndex) => {
@@ -635,8 +664,12 @@ export default function Popup(): React.JSX.Element | null {
 
             {questionMode ? (
               <div className="popup-actions stack">
-                {answerHint ? (
-                  <div className="question-hint">请选择一个选项或输入回答</div>
+                {answerErrors.length > 0 ? (
+                  <div className="question-hint" role="alert">
+                    {answerErrors.length === 1
+                      ? '还有 1 道题未回答，请先处理标出的问题。'
+                      : `还有 ${answerErrors.length} 道题未回答，请先处理标出的问题。`}
+                  </div>
                 ) : null}
                 <button className="popup-btn allow" onClick={submitAnswers}>
                   确认回答
@@ -708,7 +741,7 @@ export default function Popup(): React.JSX.Element | null {
               </button>
               <span className="popup-foot-hint">
                 {questionMode
-                  ? '1–9 选择 · 点“确认回答”提交 · Esc 交给终端'
+                  ? '1–9 答当前题 · Enter 提交 · Esc 交给终端'
                   : highRisk
                     ? 'Enter 二次确认 · Esc 交给终端'
                     : 'Enter 允许 · Esc 交给终端'}

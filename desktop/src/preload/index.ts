@@ -60,6 +60,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('deploy:remove', config),
   restoreDeploy: (config: DeployFormConfig): Promise<DeployResult> =>
     ipcRenderer.invoke('deploy:restore', config),
+  cancelDeploy: (): Promise<{ ok: boolean; message?: string }> =>
+    ipcRenderer.invoke('deploy:cancel'),
   onDeployProgress: (callback: (progress: { level: LogLevel; message: string }) => void) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
@@ -91,6 +93,7 @@ const api: DesktopApi = {
     pattern: string
     project?: string
     sessionKey?: string
+    origin?: string
   }) => ipcRenderer.invoke('rules:add', rule),
   removeRule: (id: string) => ipcRenderer.invoke('rules:remove', id),
   toggleRule: (id: string) => ipcRenderer.invoke('rules:toggle', id),
