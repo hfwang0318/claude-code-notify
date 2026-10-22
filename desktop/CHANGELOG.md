@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 — 2026-10-22
+
+### 修复
+
+- 修复 Windows 升级后旧版本地 hook 仍在 bypass 权限下弹出 Bash/文件工具审批的问题
+- 应用启动时检测本机 hook 版本过期，自动备份并重新写入当前 hook；失败时保留提示
+- 主界面增加“本机 Hook 需要更新”显眼横幅，避免升级后忘记重新接入
+- 设置页持续显示 hook 版本/更新入口
+
+### 测试
+
+- 真实 Claude Code E2E 新增 bypass 用例：覆盖 `--permission-mode bypassPermissions` 与 `--dangerously-skip-permissions`
+- 同一用例强制调用 Bash、Write、Edit，断言 pending=0、工具真实执行、history 无审批记录
+- 新增旧 hook 版本检测单元测试；当前 52 个测试通过
+
 ## 0.2.0 — 2026-10-22
 
 ### 多会话

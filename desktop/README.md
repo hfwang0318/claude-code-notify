@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.2.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.0)。
+当前版本 **0.2.1**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.1)。
 
 ## 运行
 
@@ -39,7 +39,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - AskUserQuestion：单选、多选、多问题、自由输入，返回 `answers: [{question, selected, text}]`
 - 队列计数、倒计时、超时回退、Enter / Esc、动态高度、置顶与跨 Space
 - 超时后弹窗保留“已回退终端”提示，需点“我知道了”或按 Enter/Esc 关闭
-- `bypassPermissions` / `dontAsk` 下钩子直接跳过，不产生幽灵审批
+- `bypassPermissions` / `dontAsk` 下钩子直接跳过，不产生幽灵审批；0.2.1 起启动时自动备份并升级过期 hook
 
 ### 多会话与待审批收件箱
 
@@ -86,9 +86,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.2.0-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.2.0.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.2.0-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.2.1-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.2.1.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.2.1-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
@@ -99,9 +99,9 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：49 个测试（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务，settings 合并与移除，本机接入，Windows exec form，会话身份/风险/规则/协议）
+- `pnpm test`：52 个测试（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务，settings 合并与移除，本机接入，Windows exec form，会话身份/风险/规则/协议）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
-- `pnpm e2e:claude`：真实 Claude Code 2.1.295 双会话并发、弹窗切换/逐条批准、终端已处理、真实超时回退；约 30–45s
+- `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口，Bash/Write/Edit）、双会话并发、终端已处理、真实超时回退；约 90–110s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)
 - Docker Alpine sshd e2e：密码认证、私钥 + passphrase 认证、popup 部署、notify 重部署、反向 `/health`、幂等 bash 环境变量块
 - macOS 全屏覆盖：`NSPanel` 弹窗在主窗口全屏时仍可见，点击与 Esc 均正常

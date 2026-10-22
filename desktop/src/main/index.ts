@@ -2562,7 +2562,16 @@ async function bootstrap(): Promise<void> {
   if (!headless) showMainWindow()
 
   if (local.stale) {
-    log('warn', `本机钩子版本 ${local.version || '未知'} 低于当前版本 ${HOOK_VERSION}，建议重新接入`)
+    if (local.mode && !isDemo) {
+      const updated = applyLocalDeploy(local.mode)
+      if (updated.ok) {
+        log('info', `本机钩子版本 ${local.version || '未知'} 已自动更新到 ${HOOK_VERSION}`)
+      } else {
+        log('warn', `本机钩子自动更新失败：${updated.message}，请手动重新接入`)
+      }
+    } else {
+      log('warn', `本机钩子版本 ${local.version || '未知'} 低于当前版本 ${HOOK_VERSION}，建议重新接入`)
+    }
   }
   if (store.get().deploy.modeMismatch) {
     log('warn', '当前模式与已部署钩子不一致，需要重新接入或部署')

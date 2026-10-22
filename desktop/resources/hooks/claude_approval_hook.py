@@ -117,7 +117,7 @@ RESOLUTION_URL = cfg(
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
-HOOK_VERSION = "2"
+HOOK_VERSION = "3"
 
 
 def session_environment() -> dict:
@@ -157,6 +157,10 @@ def note(message: str) -> None:
 
 def data_dir() -> str:
     """返回稳定的本机状态目录；Windows 不受 Git Bash HOME 影响。"""
+    override = os.environ.get("CLAUDE_NOTIFY_DATA_DIR")
+    if override:
+        os.makedirs(override, exist_ok=True)
+        return override
     if os.name == "nt":
         home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
     else:

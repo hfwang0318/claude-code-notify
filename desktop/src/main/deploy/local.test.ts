@@ -2,7 +2,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildLocalHookEntry, deployLocal, detectLocalDeploy } from './local'
+import { buildLocalHookEntry, deployLocal, detectLocalDeploy, detectLocalState } from './local'
+import { HOOK_VERSION, HOOK_VERSION_KEY } from './settings'
 
 const directories: string[] = []
 
@@ -71,9 +72,36 @@ describe('deployLocal', () => {
     const config = JSON.parse(readFileSync(result.configPath, 'utf-8'))
     expect(config.CLAUDE_NOTIFY_TOKEN).toBe('test-token')
     expect(config.CLAUDE_APPROVAL_URL).toBe('http://127.0.0.1:18765/claude-approval')
+    expect(config[HOOK_VERSION_KEY]).toBe(HOOK_VERSION)
 
     const backups = readFileSync(result.settingsPath, 'utf-8')
     expect(backups).toContain('third-party')
+  })
+
+  it('marks an old or missing hook version as stale', () => {
+    const claudeDir = tempDir()
+    const base = {
+      mode: 'popup' as const,
+      token: 'test-token',
+      port: 18765,
+      timeoutSec: 240,
+      writeEnv: false,
+      envShells: [],
+      claudeDir,
+      hooksDir: join(process.cwd(), 'resources', 'hooks')
+    }
+    deployLocal(base, () => undefined)
+    expect(detectLocalState(claudeDir).stale).toBe(false)
+
+    const configPath = join(claudeDir, 'claude_notify_config.json')
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'))
+    config[HOOK_VERSION_KEY] = '1'
+    writeFileSync(configPath, JSON.stringify(config, null, 2))
+    expect(detectLocalState(claudeDir).stale).toBe(true)
+
+    delete config[HOOK_VERSION_KEY]
+    writeFileSync(configPath, JSON.stringify(config, null, 2))
+    expect(detectLocalState(claudeDir).stale).toBe(true)
   })
 
   it('is idempotent on repeated local deploys', () => {

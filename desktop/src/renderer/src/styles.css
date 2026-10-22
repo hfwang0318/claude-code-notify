@@ -2096,6 +2096,12 @@ kbd {
   color: #f0a99c;
 }
 
+.banner.warn {
+  border-color: rgba(210, 176, 122, 0.34);
+  background: rgba(210, 176, 122, 0.09);
+  color: #e2c08c;
+}
+
 .onboarding {
   margin: 10px 18px 0;
   padding: 14px 16px;

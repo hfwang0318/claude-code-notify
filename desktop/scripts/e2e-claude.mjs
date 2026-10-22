@@ -388,13 +388,17 @@ async function waitPending(count, timeout = 60000) {
   )
 }
 
-function startClaude(label, sessionId, settings, prompt) {
+function startClaude(label, sessionId, settings, prompt, permissionMode = 'default') {
   const workDir = join(workRoot, label)
   mkdirSync(workDir, { recursive: true })
   const outFile = join(logsDir, `${label}.out`)
   const errFile = join(logsDir, `${label}.err`)
   const out = openSync(outFile, 'w')
   const err = openSync(errFile, 'w')
+  const modeArgs =
+    permissionMode === 'dangerously-skip'
+      ? ['--dangerously-skip-permissions']
+      : ['--permission-mode', permissionMode]
   const child = spawn(
     claudeBin,
     [
@@ -402,8 +406,7 @@ function startClaude(label, sessionId, settings, prompt) {
       '',
       '--settings',
       settings,
-      '--permission-mode',
-      'default',
+      ...modeArgs,
       '--session-id',
       sessionId,
       '-p',
@@ -451,8 +454,62 @@ function recordFor(session) {
   )
 }
 
+async function runBypassProbe(permissionMode, label, prefix, description) {
+  const session = startClaude(
+    label,
+    randomUUID(),
+    settingsFile,
+    `Use the Bash tool to run \`pwd > ${prefix}-bash.txt\`, then use the Write tool to create ${prefix}-write.txt with content OK, then use the Edit tool to change OK to OK!. You must use those three tools. Do not ask for permission. After all tools succeed, reply with exactly DONE.`,
+    permissionMode
+  )
+  const deadline = Date.now() + 45000
+  while (Date.now() < deadline) {
+    if (session.child.exitCode !== null) break
+    const pending = readJson(pendingFile, [])
+    assert(
+      pending.length === 0,
+      `${description} 下产生了审批：${pending.map((item) => item.sessionLabel).join(', ')}`
+    )
+    await delay(250)
+  }
+  const code = await waitExit(session.child, 120000)
+  assert(code !== null, `${description} 会话未在 120s 内结束（疑似被审批卡住）`)
+  const output = existsSync(session.outFile)
+    ? readFileSync(session.outFile, 'utf-8')
+    : ''
+  assert(output.includes('DONE'), `${description} 会话未输出 DONE：${output.slice(0, 200)}`)
+  assert(existsSync(join(session.workDir, `${prefix}-bash.txt`)), `${description} Bash 没有执行`)
+  assert(
+    existsSync(join(session.workDir, `${prefix}-write.txt`)),
+    `${description} Write 没有执行`
+  )
+  assert(
+    readFileSync(join(session.workDir, `${prefix}-write.txt`), 'utf-8').includes('OK!'),
+    `${description} Edit 没有执行`
+  )
+  await waitPending(0, 5000)
+  assert(!recordFor(session), `${description} 不应写入审批历史`)
+}
+
+async function runBypassCase() {
+  log('用例 1/4：bypass 权限下 Bash / Write / Edit 不触发审批')
+  await runBypassProbe(
+    'bypassPermissions',
+    'work-bypass',
+    'bypass',
+    '--permission-mode bypassPermissions'
+  )
+  await runBypassProbe(
+    'dangerously-skip',
+    'work-bypass-flag',
+    'bypass-flag',
+    '--dangerously-skip-permissions'
+  )
+  log('  ✓ 两种 bypass 入口下 Bash/Write/Edit 全部执行，pending=0，history 无审批记录')
+}
+
 async function runMultiSessionCase() {
-  log('用例 1/3：两路真实 Claude 会话并发 + 会话条切换')
+  log('用例 2/4：两路真实 Claude 会话并发 + 会话条切换')
   const first = startClaude(
     'work-a',
     randomUUID(),
@@ -541,7 +598,7 @@ async function runMultiSessionCase() {
 }
 
 async function runResolvedCase() {
-  log('用例 2/3：终端侧已处理（/claude-approval-resolved）')
+  log('用例 3/4：终端侧已处理（/claude-approval-resolved）')
   const session = startClaude(
     'work-resolved',
     randomUUID(),
@@ -576,7 +633,7 @@ async function runResolvedCase() {
 }
 
 async function runTimeoutCase() {
-  log('用例 3/3：真实 Claude 请求超时回退 + expired 确认')
+  log('用例 4/4：真实 Claude 请求超时回退 + expired 确认')
   const session = startClaude(
     'work-timeout',
     randomUUID(),
@@ -618,13 +675,19 @@ async function main() {
   probeAuth()
 
   const started = Date.now()
+  if (shouldRun('bypass')) await runBypassCase()
   if (shouldRun('multi')) await runMultiSessionCase()
   if (shouldRun('resolved')) await runResolvedCase()
   if (shouldRun('timeout')) await runTimeoutCase()
 
-  const state = await getState()
-  assert(state.pending.length === 0, `测试结束仍有 ${state.pending.length} 条待审批`)
-  assert(state.expired.length === 0, `测试结束仍有 ${state.expired.length} 条 expired`)
+  if (cdp) {
+    const state = await getState()
+    assert(state.pending.length === 0, `测试结束仍有 ${state.pending.length} 条待审批`)
+    assert(state.expired.length === 0, `测试结束仍有 ${state.expired.length} 条 expired`)
+  } else {
+    const pending = readJson(pendingFile, [])
+    assert(pending.length === 0, `测试结束仍有 ${pending.length} 条待审批`)
+  }
 
   console.log(
     `\nE2E PASS · ${requestedCases.has('all') ? 'all' : [...requestedCases].join(',')} · ` +

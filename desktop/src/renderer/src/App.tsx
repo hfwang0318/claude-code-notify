@@ -215,6 +215,18 @@ export default function App(): React.JSX.Element {
         </div>
       ) : null}
 
+      {state.deploy.hookStale ? (
+        <div className="banner warn">
+          <div>
+            <b>本机 Hook 需要更新</b>
+            <span>旧版 Hook 不会跳过 bypass 审批，Bash 和文件工具可能误弹窗。</span>
+          </div>
+          <button className="btn compact" disabled={localBusy} onClick={() => void connectLocal()}>
+            {localBusy ? '更新中…' : '立即更新'}
+          </button>
+        </div>
+      ) : null}
+
       {!state.onboarding.done ? (
         <section className="onboarding">
           <div className="onboarding-head">

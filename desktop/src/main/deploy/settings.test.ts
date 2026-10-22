@@ -130,8 +130,8 @@ describe('stripSettingsJson', () => {
 
 describe('installedHookVersion', () => {
   it('reads the version from the deployed config', async () => {
-    const { installedHookVersion, HOOK_VERSION_KEY } = await import('./settings')
-    expect(installedHookVersion({ [HOOK_VERSION_KEY]: '2' })).toBe('2')
+    const { installedHookVersion, HOOK_VERSION, HOOK_VERSION_KEY } = await import('./settings')
+    expect(installedHookVersion({ [HOOK_VERSION_KEY]: HOOK_VERSION })).toBe(HOOK_VERSION)
     expect(installedHookVersion({ hook_version: '1' })).toBe('1')
     expect(installedHookVersion(null)).toBe('')
   })

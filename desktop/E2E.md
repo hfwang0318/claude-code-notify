@@ -12,7 +12,7 @@ pnpm e2e:claude
 正常输出：
 
 ```text
-E2E PASS · all · 42.7s
+E2E PASS · all · 105.2s
 ```
 
 脚本：`scripts/e2e-claude.mjs`
@@ -23,17 +23,21 @@ E2E PASS · all · 42.7s
 
 | 用例 | 触发方式 | 关键断言 |
 |---|---|---|
+| `bypass` | 真实 Claude 分别用 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions` 启动，强制调用 Bash / Write / Edit | 全程 pending=0；三个工具都真实执行；history 没有审批记录 |
 | `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
 | `resolved` | 一路真实 Claude 请求权限，然后模拟终端侧已处理 | 调用 `/claude-approval-resolved` 返回 `resolved`；pending 清空；history 为 `cancelled/terminal` |
 | `timeout` | 一路真实 Claude 请求权限，使用 15s hook 超时（服务端 5s） | 不做决定时 pending 清空；`expired` 出现；history 为 `timeout/timeout`；调用确认后 `expired` 清空 |
 
 测试还会校验 `pending.json`、`history.jsonl`、`sessions.json` 的真实落盘内容。
 
+`bypass` 用例的回归背景：旧版 `claude_approval_hook.py` 没有读取 `permission_mode`，在 bypass 下仍会把 Bash/文件工具转发到桌面。当前 hook 会跳过 `bypassPermissions` / `dontAsk`；应用启动时若检测到本机 hook 版本过期，会自动备份并更新。
+
 ### 明确不覆盖
 
 - 交互式 TUI 中的真实按键/终端焦点（E2E 使用 `claude -p` 非交互模式）
 - 真实 `AskUserQuestion`（由 self-test/离屏截图覆盖）
-- Windows 与真实远程服务器 SSH（需要对应环境）
+- Windows 上的真实 Claude Claude 进程（本脚本在 macOS/Linux 跑真实 Claude；Windows 的 hook 写入/exec form 由单测覆盖，真机仍需人工验收）
+- 真实远程服务器 SSH（需要对应环境）
 - 签名、安装包、系统通知点击、窗口拖拽等平台交互
 
 这些由 `pnpm test`、`pnpm self-test`、`pnpm capture` 和真机验收覆盖。
@@ -72,7 +76,7 @@ E2E_ALLOW_NO_KEY_HELPER=1 pnpm e2e:claude
 pnpm e2e:claude
 
 # 只跑某几个
-E2E_CASES=multi pnpm e2e:claude
+E2E_CASES=bypass pnpm e2e:claude
 E2E_CASES=multi,timeout pnpm e2e:claude
 
 # 复用已有 out/，不重新构建
@@ -89,7 +93,7 @@ E2E_REQUIRE_CLAUDE=1 pnpm e2e:claude
 
 | 变量 | 作用 |
 |---|---|
-| `E2E_CASES` | `all` 或 `multi,resolved,timeout` |
+| `E2E_CASES` | `all` 或 `bypass,multi,resolved,timeout` |
 | `E2E_CLAUDE_SETTINGS` | 提供 apiKeyHelper/env/model 的 Claude 设置文件 |
 | `E2E_SKIP_BUILD=1` | 跳过 `pnpm build` |
 | `E2E_KEEP=1` | 保留临时目录，失败时默认保留 |
@@ -192,6 +196,6 @@ E2E 需要显示窗口。Linux 无头环境用 `xvfb-run -a pnpm e2e:claude`；m
 - 真实多会话收件箱：[preview/real-multi-session-inbox.png](preview/real-multi-session-inbox.png)
 - 真实运行日志：[preview/real-multi-session-evidence.txt](preview/real-multi-session-evidence.txt)
 
-已验证环境：Claude Code **2.1.295**，两路真实 `-p` 会话并发；先批准第二路，弹窗自动切回第一路；两路均输出 `DONE` 并生成 `result.txt`；history 中记录 `allow/popup`，session 标签/颜色/来源正确。
+已验证环境：Claude Code **2.1.295**。`bypass` 下 Bash / Write / Edit 均执行且 pending=0；`multi` 下两路真实 `-p` 会话并发，先批准第二路，弹窗自动切回第一路；两路均输出 `DONE` 并生成 `result.txt`；history 中记录 `allow/popup`，session 标签/颜色/来源正确。
 
-自动 E2E 三个用例当前均通过，耗时约 **30–45s**。
+自动 E2E 四个用例当前均通过，耗时约 **90–110s**。`bypass` 同时覆盖 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions`。

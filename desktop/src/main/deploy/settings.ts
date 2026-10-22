@@ -2,7 +2,7 @@ export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
 export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
-export const HOOK_VERSION = '2'
+export const HOOK_VERSION = '3'
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
 
 export const ENV_MARK_BEGIN = '# >>> claude-notify >>>'
