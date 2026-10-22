@@ -3,6 +3,8 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
+当前版本 **0.1.2**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.1.2)。
+
 ## 运行
 
 ```bash
@@ -10,7 +12,7 @@ cd desktop
 pnpm install
 pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
-pnpm capture    # 离屏截图：main / popup / popup-question
+pnpm capture    # 离屏截图：main / popup-question / popup-expired
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
 pnpm test       # HTTP 集成 + settings/env + 本机接入（25 个）
 ```
@@ -34,6 +36,7 @@ pnpm test       # HTTP 集成 + settings/env + 本机接入（25 个）
 - AskUserQuestion：单选、多选、多问题、自由输入，返回 `answers: [{question, selected, text}]`
 - 队列计数、倒计时、超时回退、Enter / Esc、动态高度、置顶与跨 Space
 - 超时后弹窗保留“已回退终端”提示，需点“我知道了”或按 Enter/Esc 关闭
+- `bypassPermissions` / `dontAsk` 下钩子直接跳过，不产生幽灵审批
 
 ### 部署与凭证
 
@@ -56,21 +59,34 @@ pnpm test       # HTTP 集成 + settings/env + 本机接入（25 个）
 - 日志同时写 `~/.claude-notify/claude-notify.log`
 - macOS `vibrancy: 'hud'`；Windows 11 22H2+ `backgroundMaterial: 'acrylic'` + 隐藏标题栏
 - Windows 托盘使用 `resources/app.ico`；已设置 AppUserModelID
+- 0.1.2 起全局字体 +2px；主窗口高度 800
+
+## 下载、安装与升级
+
+- Windows 免安装：Release 里的 `Claude-Notify-0.1.2-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.1.2.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.1.2-arm64.dmg`（未签名/未公证）
+
+Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
+上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
+
+**升级已部署的服务器**：安装/解压新版本后，在应用里重新执行部署即可
+（本机按钮或远端「部署并验证」）。部署会重新上传随包的钩子并幂等合并
+`settings.json`，不需要手动替换服务器文件。
 
 ## 验证
 
 - `pnpm test`：25 个测试（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved，settings 合并，本机接入，Windows exec form）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404
 - Docker Alpine sshd e2e：密码认证、私钥 + passphrase 认证、popup 部署、notify 重部署、反向 `/health`、幂等 bash 环境变量块
-- 打包后的 `.app` 也跑通了同一套 SSH e2e
 - macOS 全屏覆盖：`NSPanel` 弹窗在主窗口全屏时仍可见，点击与 Esc 均正常
 - 超时：返回 `timeout`，主进程状态进入 expired，弹窗显示“已回退终端”
-- Windows NSIS 安装包已解包检查，包含 `resources/hooks`、`app.asar`、`app.ico`、托盘图标
+- Windows CI 构建 0.1.2 安装包，并解包检查 hooks / asar / 图标
+- Windows 安装包由 windows-latest 原生构建，不再使用 macOS 交叉构建
 
 ## 尚未完成
 
 - Windows 真机安装/运行验证（Acrylic、标题栏 overlay、焦点窗口定位）
-- Windows NSIS 安装包已在 macOS 构建，但尚未在 Windows 上安装验证
 - macOS Developer ID 签名 / 公证；Windows 代码签名
 - 远端 SSH 部署已在 Docker sshd 上 e2e；真实服务器/防火墙场景待测
 - 非全屏的多 Space 切换人工验证（全屏覆盖已用 NSPanel 验证通过）
@@ -95,9 +111,10 @@ resources/hooks/          随包分发的服务器端钩子
 ## 打包
 
 ```bash
-pnpm pack:mac   # release/mac-arm64/Claude Notify.app（已验证可启动）
+pnpm pack:mac   # release/mac-arm64/Claude Notify.app（未签名，macOS 26/27 不能直接启动）
 pnpm dist:mac   # dmg
-pnpm dist:win   # NSIS（在 Windows 上构建；arm64 macOS 无 Rosetta 时 makensis 会失败）
+pnpm dist:win   # NSIS（在 Windows / CI 上构建；本地 arm64 macOS 需原生 makensis）
+pnpm local-app  # macOS 本机双击启动器（依赖 node_modules，不可分发）
 ```
 
 `electron-builder.yml` 已包含 `extraResources`（hooks、tray icon、app.ico）、
@@ -106,10 +123,10 @@ macOS entitlements、Windows NSIS 配置，以及可选公证钩子 `scripts/not
 - 公证：设置 `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID`；
   未设置时自动跳过（本地构建用 `SKIP_NOTARIZE=1`）。
 - Windows 签名：在 CI 里提供代码签名证书（`CSC_LINK` / `CSC_KEY_PASSWORD`）。
-- Windows x64 unpacked 已在本机验证打包内容（`release/win-unpacked`），
-  NSIS x64 安装包已生成：`release/Claude Notify Setup 0.1.0.exe`（108MB，未签名）
-- arm64 macOS 构建 NSIS 需要原生 `makensis`（Homebrew）绕过 x86 版 makensis；
-  正式发布仍建议使用 `.github/workflows/desktop-release.yml` 的 windows-latest 构建
+- Windows 安装包由 `.github/workflows/desktop-release.yml` 在 windows-latest 构建；
+  tag 触发后会直接把 `release/*Setup*.exe` 上传到对应 Release（Release 需先存在）
+- 本地 arm64 macOS 构建 NSIS 需要原生 `makensis`（Homebrew）绕过 x86 版；
+  正式发布使用 CI，不依赖本机 makensis
 
 发布流程见 [RELEASE.md](RELEASE.md)。
 
