@@ -70,6 +70,7 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import sys
 import threading
@@ -116,6 +117,32 @@ RESOLUTION_URL = cfg(
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
+HOOK_VERSION = "2"
+
+
+def session_environment() -> dict:
+    """尽量在不依赖外部命令的情况下识别终端，便于多会话区分。"""
+    term = os.environ.get("TERM", "")
+    if term.lower() in ("dumb", "unknown"):
+        term = ""
+    terminal = (
+        os.environ.get("TERM_PROGRAM")
+        or ("Windows Terminal" if os.environ.get("WT_SESSION") else "")
+        or ("tmux" if os.environ.get("TMUX") else "")
+        or term
+    )
+    tty = (
+        os.environ.get("TTY")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("TMUX_PANE")
+        or os.environ.get("TERM_SESSION_ID")
+        or os.environ.get("WT_SESSION")
+        or ""
+    )
+    if tty and tty.startswith("/dev/"):
+        tty = tty[5:]
+    origin = cfg("CLAUDE_NOTIFY_ORIGIN") or socket.gethostname() or "远程"
+    return {"origin": origin, "terminal": terminal, "tty": tty}
 
 MATCHER_RAW = cfg("CLAUDE_APPROVAL_MATCHER")
 MATCHED_TOOLS = {
@@ -691,6 +718,7 @@ def main() -> None:
                 "本次审批保留原超时回退行为"
             )
 
+    session_env = session_environment()
     payload = {
         "request_id": correlation["request_id"],
         "session_id": hook_input.get("session_id"),
@@ -703,6 +731,11 @@ def main() -> None:
         "options": build_options(tool_name),
         "timeout_seconds": TIMEOUT - 10,
         "kind": kind,
+        "origin": session_env["origin"],
+        "terminal": session_env["terminal"],
+        "tty": session_env["tty"],
+        "hook_version": HOOK_VERSION,
+        "correlation": "exact" if correlation["tool_use_id"] else "unmatched",
         # 不透明转发：弹窗展示标签，选中后由本脚本原样 echo
         "suggestions": suggestions,
         "questions": questions,

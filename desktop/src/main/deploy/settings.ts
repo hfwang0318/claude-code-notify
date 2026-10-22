@@ -2,6 +2,8 @@ export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
 export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
+export const HOOK_VERSION = '2'
+export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
 
 export const ENV_MARK_BEGIN = '# >>> claude-notify >>>'
 export const ENV_MARK_END = '# <<< claude-notify <<<'
@@ -103,6 +105,48 @@ export function mergeSettingsJson(
   }
 
   return `${JSON.stringify(settings, null, 2)}\n`
+}
+
+export function settingsHaveOurHooks(existingText: string): boolean {
+  if (!existingText.trim()) return false
+  return ALL_HOOK_SCRIPTS.some((script) => existingText.includes(script))
+}
+
+export function stripSettingsJson(existingText: string): {
+  text: string
+  removed: number
+  changed: boolean
+} {
+  if (!existingText.trim()) return { text: '', removed: 0, changed: false }
+  const settings = JSON.parse(existingText) as Record<string, unknown>
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    throw new Error('settings.json 根节点必须是对象')
+  }
+  const hooks =
+    settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+      ? (settings.hooks as Record<string, unknown>)
+      : null
+  if (!hooks) return { text: existingText, removed: 0, changed: false }
+  let removed = 0
+  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification']) {
+    const entries = hooks[sectionName]
+    if (!Array.isArray(entries)) continue
+    const cleaned = entries.filter((entry) => {
+      const ours = isOurs(entry)
+      if (ours) removed += 1
+      return !ours
+    })
+    if (cleaned.length > 0) hooks[sectionName] = cleaned
+    else delete hooks[sectionName]
+  }
+  const text = `${JSON.stringify(settings, null, 2)}\n`
+  return { text, removed, changed: removed > 0 }
+}
+
+export function installedHookVersion(config: Record<string, unknown> | null): string {
+  if (!config) return ''
+  const value = config[HOOK_VERSION_KEY] || config.hook_version
+  return typeof value === 'string' ? value : ''
 }
 
 export function buildEnvBlock(shell: string, token: string): string {

@@ -3,16 +3,53 @@ import type { AppState } from '../../shared/types'
 const now = Date.now()
 
 export const mockState: AppState = {
-  app: { version: '0.1.0-spike', platform: 'darwin' },
+  app: { version: '0.2.0', platform: 'darwin' },
   server: {
     listening: true,
     port: 18765,
     token: 'cn_live_9f4c2b7a8e1d6f3a5c0b9e8d7a6f5c4b3a2e1d0c',
     localIp: '192.168.1.20',
-    notified: 18
+    localIps: ['192.168.1.20', '10.8.0.4'],
+    notified: 18,
+    bindMode: 'all',
+    error: ''
   },
+  sessions: [
+    {
+      key: '本机:session-front',
+      sessionId: 'session-front',
+      origin: '本机',
+      label: '前端 · iTerm2 · ttys004',
+      project: 'claude-code-notify',
+      cwd: '~/workspace/claude-code-notify',
+      tty: 'ttys004',
+      terminal: 'iTerm2',
+      lastSeen: now - 5000,
+      waiting: 1,
+      state: 'waiting',
+      color: '#e07a5a',
+      mutedUntil: null
+    },
+    {
+      key: '本机:session-api',
+      sessionId: 'session-api',
+      origin: '本机',
+      label: '后端 · VS Code · ttys007',
+      project: 'backend-api',
+      cwd: '~/workspace/backend-api',
+      tty: 'ttys007',
+      terminal: 'VS Code',
+      lastSeen: now - 120000,
+      waiting: 0,
+      state: 'idle',
+      color: '#8fd1ae',
+      mutedUntil: null
+    }
+  ],
   pending: [],
-  expired: null,
+  expired: [],
+  history: [],
+  rules: [],
   logs: [
     {
       id: 'l1',
@@ -30,31 +67,80 @@ export const mockState: AppState = {
       id: 'l3',
       ts: now - 96000,
       level: 'notify',
-      text: '通知 · 会话 7f3a · 等待输入 · 已推送系统通知'
+      text: '通知 · 前端 · 等待输入 · 已推送系统通知'
     },
     {
       id: 'l4',
       ts: now - 43000,
       level: 'allow',
-      text: 'Bash · git status · 弹窗允许 · 2.6s'
+      text: '前端 · 本机 · Bash · git status · 允许'
     },
     {
       id: 'l5',
       ts: now - 21000,
       level: 'deny',
-      text: 'Edit · src/app.py · 拒绝并附原因 · 焦点回到终端'
+      text: '后端 · prod-api · Edit · src/app.py · 拒绝'
     }
   ],
   deploy: {
     status: 'deployed',
     host: 'deploy@192.168.1.20:22',
     hooks: 2,
-    message: '上次成功 16:15'
+    message: '上次成功 16:15',
+    localMode: 'popup',
+    localHooks: 2,
+    hookVersion: '2',
+    hookStale: false,
+    modeMismatch: false,
+    profiles: [
+      {
+        id: 'deploy@192.168.1.20:22',
+        name: 'prod-api',
+        origin: 'prod-api',
+        host: '192.168.1.20',
+        sshPort: 22,
+        username: 'deploy',
+        authMethod: 'key',
+        mode: 'popup',
+        callbackIp: '192.168.1.20',
+        callbackPort: 18765,
+        hookTimeout: 300,
+        toolMatcher: '',
+        lastDeployAt: now - 3600000,
+        status: 'deployed',
+        hooks: 2,
+        hookVersion: '2'
+      }
+    ]
+  },
+  network: {
+    addresses: [
+      { address: '192.168.1.20', iface: 'en0', preferred: true },
+      { address: '10.8.0.4', iface: 'utun3', preferred: false }
+    ],
+    port: 18765,
+    bindMode: 'all',
+    conflict: false,
+    error: ''
   },
   prefs: {
     position: 'cursor',
     mode: 'popup',
-    timeoutSec: 240
+    timeoutSec: 240,
+    theme: 'system',
+    fontStyle: 'system',
+    fontSize: 'normal',
+    focusPolicy: 'first',
+    sound: true,
+    systemNotifications: true,
+    enterConfirmsHighRisk: true,
+    bindMode: 'all',
+    port: 18765,
+    localIp: '192.168.1.20',
+    admissionControl: true,
+    maxPending: 8
   },
+  onboarding: { done: true },
+  update: { status: 'idle' },
   toast: null
 }

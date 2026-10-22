@@ -20,6 +20,7 @@ Claude Code Notification 钩子：把通知单向 POST 到 Windows 托盘应用�
 
 import json
 import os
+import socket
 import sys
 import urllib.request
 
@@ -40,6 +41,7 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
+HOOK_VERSION = "2"
 
 
 def cfg(name: str, default: str = "") -> str:
@@ -77,8 +79,29 @@ def main() -> None:
         )
         sys.exit(0)
 
+    term = os.environ.get("TERM", "")
+    if term.lower() in ("dumb", "unknown"):
+        term = ""
+    terminal = (
+        os.environ.get("TERM_PROGRAM")
+        or ("Windows Terminal" if os.environ.get("WT_SESSION") else "")
+        or ("tmux" if os.environ.get("TMUX") else "")
+        or term
+    )
+    tty = (
+        os.environ.get("TTY")
+        or os.environ.get("SSH_TTY")
+        or os.environ.get("TMUX_PANE")
+        or os.environ.get("TERM_SESSION_ID")
+        or os.environ.get("WT_SESSION")
+        or ""
+    )
     payload = {
         "session_id": hook_input.get("session_id"),
+        "origin": (os.environ.get("CLAUDE_NOTIFY_ORIGIN") or CONFIG.get("CLAUDE_NOTIFY_ORIGIN") or socket.gethostname() or "远程"),
+        "terminal": terminal,
+        "tty": tty[5:] if tty.startswith("/dev/") else tty,
+        "hook_version": HOOK_VERSION,
         "cwd": hook_input.get("cwd"),
         "message": hook_input.get("message"),
         "notification_type": (

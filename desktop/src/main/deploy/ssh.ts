@@ -1,19 +1,20 @@
-import { app } from 'electron'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { hooksDirectory, quoteShell as shellQuote, timestamp } from './paths'
-import { Client, type SFTPWrapper } from 'ssh2'
+import { Client, type ConnectConfig, type SFTPWrapper } from 'ssh2'
 import type { LogLevel } from '../../shared/types'
+import { hooksDirectory, quoteShell as shellQuote, timestamp } from './paths'
 import {
   APPROVAL_SCRIPT_NAME,
+  HOOK_VERSION,
+  HOOK_VERSION_KEY,
   NOTIFY_SCRIPT_NAME,
-  ENV_MARK_BEGIN,
-  ENV_MARK_END,
   SHELL_RC_FILES,
   buildEnvBlock,
   buildHookCommand,
   mergeSettingsJson,
   removeEnvBlock,
+  stripSettingsJson,
   type DeployMode
 } from './settings'
 
@@ -31,12 +32,46 @@ export interface DeployConfig {
   hookTimeout: number
   approvalTimeout: number
   toolMatcher?: string
+  origin?: string
+  envImport?: boolean
   envShells: string[]
   token: string
+  hostFingerprint?: string
+  trustHost?: boolean
 }
 
 export interface DeployProgress {
   (level: LogLevel, message: string): void
+}
+
+export interface FingerprintError extends Error {
+  code?: 'HOST_KEY_UNKNOWN' | 'HOST_KEY_MISMATCH'
+  fingerprint?: string
+}
+
+function fingerprintOf(key: Buffer): string {
+  return `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`
+}
+
+export function humanizeSshError(error: unknown): string {
+  const code = (error as { code?: string })?.code
+  const message = error instanceof Error ? error.message : String(error)
+  if (code === 'ENOTFOUND') return '找不到这台服务器，请检查主机名或 DNS'
+  if (code === 'ECONNREFUSED') return 'SSH 端口拒绝连接，请检查端口与服务器 sshd 状态'
+  if (code === 'ETIMEDOUT' || /timed out/i.test(message)) return '连接超时，请检查网络或防火墙'
+  if (code === 'EHOSTUNREACH') return '服务器不可达，请检查网络'
+  if (/All configured authentication methods failed/i.test(message)) {
+    return 'SSH 认证失败，请检查用户名、密码或私钥'
+  }
+  if (/Cannot parse privateKey|no start line/i.test(message)) {
+    return '无法解析私钥文件，请确认格式（OpenSSH / PEM）'
+  }
+  if (/Encrypted private OpenSSH key detected/i.test(message)) {
+    return '私钥已加密，请填写私钥密码'
+  }
+  if (code === 'HOST_KEY_UNKNOWN') return '首次连接，需要确认服务器主机指纹'
+  if (code === 'HOST_KEY_MISMATCH') return '主机指纹与已记录的指纹不一致，已中止连接'
+  return message || 'SSH 连接失败'
 }
 
 function execCommand(
@@ -91,14 +126,21 @@ function sftpRead(sftp: SFTPWrapper, remotePath: string): Promise<string | null>
   })
 }
 
-function connectOptions(config: DeployConfig): Record<string, unknown> {
-  const options: Record<string, unknown> = {
+interface ConnectState {
+  fingerprint: string
+}
+
+function connectOptions(config: DeployConfig, state: ConnectState): ConnectConfig {
+  const options: ConnectConfig = {
     host: config.host,
     port: config.sshPort,
     username: config.username,
     readyTimeout: 15000,
-    // 与 Paramiko AutoAddPolicy 行为一致；后续可换成首次信任 + 指纹固定。
-    hostVerifier: () => true
+    hostVerifier: (key: Buffer): boolean => {
+      state.fingerprint = fingerprintOf(key)
+      if (config.trustHost) return true
+      return Boolean(config.hostFingerprint) && state.fingerprint === config.hostFingerprint
+    }
   }
   if (config.authMethod === 'password') {
     options.password = config.password
@@ -109,35 +151,92 @@ function connectOptions(config: DeployConfig): Record<string, unknown> {
   return options
 }
 
-async function openClient(config: DeployConfig): Promise<Client> {
+async function openClient(
+  config: DeployConfig
+): Promise<{ client: Client; fingerprint: string }> {
   const client = new Client()
-  await new Promise<void>((resolve, reject) => {
-    client.once('ready', () => resolve())
-    client.once('error', (error) => reject(error))
-    client.connect(connectOptions(config))
-  })
+  const state: ConnectState = { fingerprint: '' }
+  try {
+    await new Promise<void>((resolve, reject) => {
+      client.once('ready', () => resolve())
+      client.once('error', (error) => reject(error))
+      client.connect(connectOptions(config, state))
+    })
+  } catch (error) {
+    const mismatch =
+      Boolean(config.hostFingerprint) && state.fingerprint !== config.hostFingerprint
+    const failure = new Error(humanizeSshError(error)) as FingerprintError
+    if (!config.trustHost) {
+      if (mismatch) failure.code = 'HOST_KEY_MISMATCH'
+      else if (!config.hostFingerprint && state.fingerprint) failure.code = 'HOST_KEY_UNKNOWN'
+    }
+    failure.fingerprint = state.fingerprint
+    throw failure
+  }
   client.on('error', (error) => console.error('[ssh]', error))
-  return client
+  return { client, fingerprint: state.fingerprint }
 }
 
-export async function testSshConnection(
-  config: DeployConfig
-): Promise<{ ok: boolean; message: string; home?: string }> {
+function connectivityCommand(config: DeployConfig): string {
+  const healthUrl = `http://${config.callbackIp}:${config.callbackPort}/health`
+  return `curl -s -m 5 ${shellQuote(healthUrl)} || wget -q -T 5 -O- ${shellQuote(healthUrl)}`
+}
+
+export async function testSshConnection(config: DeployConfig): Promise<{
+  ok: boolean
+  message: string
+  home?: string
+  connectivity?: boolean
+  connectivityMessage?: string
+  fingerprint?: string
+  knownFingerprint?: boolean
+  code?: string
+}> {
   let client: Client
+  let fingerprint = ''
   try {
-    client = await openClient(config)
+    const opened = await openClient(config)
+    client = opened.client
+    fingerprint = opened.fingerprint
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    const failure = error as FingerprintError
+    return {
+      ok: false,
+      message: humanizeSshError(error),
+      fingerprint: failure.fingerprint,
+      knownFingerprint: false,
+      code: failure.code
+    }
   }
   try {
     const result = await execCommand(client, 'echo $HOME')
     const home = result.stdout.trim()
     if (result.code !== 0 || !home) {
-      return { ok: false, message: 'SSH 已连接，但无法读取服务器 $HOME' }
+      return { ok: false, message: 'SSH 已连接，但无法读取服务器 $HOME', fingerprint }
     }
-    return { ok: true, message: 'SSH 连接成功', home }
+    let connectivity = false
+    let connectivityMessage = ''
+    try {
+      const check = await execCommand(client, connectivityCommand(config), 20000)
+      connectivity =
+        check.stdout.includes('"status": "ok"') || check.stdout.includes('"status":"ok"')
+      connectivityMessage = connectivity
+        ? '服务器可以访问本机回调地址'
+        : `服务器无法访问 http://${config.callbackIp}:${config.callbackPort}/health，请检查防火墙和回调 IP`
+    } catch (error) {
+      connectivityMessage = humanizeSshError(error)
+    }
+    return {
+      ok: true,
+      message: 'SSH 连接成功',
+      home,
+      connectivity,
+      connectivityMessage,
+      fingerprint,
+      knownFingerprint: true
+    }
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+    return { ok: false, message: humanizeSshError(error), fingerprint }
   } finally {
     client.end()
   }
@@ -146,12 +245,12 @@ export async function testSshConnection(
 export async function deployToServer(
   config: DeployConfig,
   onProgress: DeployProgress
-): Promise<{ success: boolean; summary: string; connectivity: boolean }> {
+): Promise<{ success: boolean; summary: string; connectivity: boolean; fingerprint: string }> {
   const log = (message: string, level: LogLevel = 'info'): void =>
     onProgress(level, message)
 
   log(`连接服务器 ${config.username}@${config.host}:${config.sshPort} …`)
-  const client = await openClient(config)
+  const { client, fingerprint } = await openClient(config)
   log('SSH 连接成功')
 
   try {
@@ -193,11 +292,15 @@ export async function deployToServer(
               CLAUDE_NOTIFY_TOKEN: config.token,
               CLAUDE_APPROVAL_URL: `${baseUrl}/claude-approval`,
               CLAUDE_APPROVAL_TIMEOUT: config.approvalTimeout,
-              CLAUDE_ASKUSER_CHANNEL: 'pretooluse'
+              CLAUDE_ASKUSER_CHANNEL: 'pretooluse',
+              CLAUDE_NOTIFY_ORIGIN: config.origin || config.host,
+              [HOOK_VERSION_KEY]: HOOK_VERSION
             }
           : {
               CLAUDE_NOTIFY_TOKEN: config.token,
-              CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`
+              CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`,
+              CLAUDE_NOTIFY_ORIGIN: config.origin || config.host,
+              [HOOK_VERSION_KEY]: HOOK_VERSION
             }
       if (config.mode === 'popup' && config.toolMatcher) {
         envPairs.CLAUDE_APPROVAL_MATCHER = config.toolMatcher
@@ -214,7 +317,7 @@ export async function deployToServer(
       await sftpWrite(sftp, settingsPath, merged)
       log(`已写入 ${settingsPath}`)
 
-      if (config.envShells.length > 0) {
+      if (config.envImport && config.envShells.length > 0) {
         for (const shell of config.envShells) {
           const info = SHELL_RC_FILES[shell]
           if (!info) continue
@@ -246,18 +349,15 @@ export async function deployToServer(
 
     const healthUrl = `http://${config.callbackIp}:${config.callbackPort}/health`
     log(`测试服务器到本机的连通性 ${healthUrl} …`)
-    const check = await execCommand(
-      client,
-      `curl -s -m 5 ${shellQuote(healthUrl)} || wget -q -T 5 -O- ${shellQuote(healthUrl)}`,
-      20000
-    )
+    const check = await execCommand(client, connectivityCommand(config), 20000)
     const connectivity = check.stdout.includes('"status": "ok"') || check.stdout.includes('"status":"ok"')
     if (connectivity) {
       log('连通性测试通过 ✓', 'notify')
       return {
         success: true,
         connectivity: true,
-        summary: '部署完成！Claude Code 的权限审批将推送到本机。'
+        summary: '部署完成！Claude Code 的权限审批将推送到本机。',
+        fingerprint
       }
     }
     log(
@@ -267,7 +367,105 @@ export async function deployToServer(
     return {
       success: true,
       connectivity: false,
-      summary: '部署已写入，但连通性测试未通过，请检查防火墙。'
+      summary: '部署已写入，但连通性测试未通过，请检查防火墙。',
+      fingerprint
+    }
+  } finally {
+    client.end()
+  }
+}
+
+export async function removeDeployFromServer(
+  config: DeployConfig,
+  onProgress: DeployProgress
+): Promise<{ success: boolean; summary: string; removedHooks: number }> {
+  const log = (message: string, level: LogLevel = 'info'): void => onProgress(level, message)
+  log(`连接服务器 ${config.username}@${config.host}:${config.sshPort} …`)
+  const { client } = await openClient(config)
+  try {
+    const homeResult = await execCommand(client, 'echo $HOME')
+    const home = homeResult.stdout.trim()
+    if (homeResult.code !== 0 || !home) throw new Error('无法获取服务器上的 $HOME')
+    const claudeDir = `${home}/.claude`
+    const settingsPath = `${claudeDir}/settings.json`
+    const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
+      client.sftp((error, value) => (error ? reject(error) : resolve(value)))
+    })
+    let removedHooks = 0
+    try {
+      const existing = await sftpRead(sftp, settingsPath)
+      if (existing && existing.trim()) {
+        const backupPath = `${settingsPath}.bak.${timestamp()}`
+        await execCommand(client, `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`)
+        log(`已备份现有配置 → ${backupPath}`)
+        const stripped = stripSettingsJson(existing)
+        removedHooks = stripped.removed
+        if (stripped.changed) {
+          await sftpWrite(sftp, settingsPath, stripped.text)
+          log(`已从 settings.json 移除 ${removedHooks} 个钩子条目`)
+        }
+      }
+      for (const script of [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME, 'claude_notify_config.json']) {
+        await execCommand(client, `rm -f ${shellQuote(`${claudeDir}/${script}`)}`)
+      }
+      log('已删除服务器上的钩子脚本')
+      if (config.envImport && config.envShells.length > 0) {
+        for (const shell of config.envShells) {
+          const info = SHELL_RC_FILES[shell]
+          if (!info) continue
+          const rcFile = `${home}/${info.rc}`
+          const current = await sftpRead(sftp, rcFile)
+          if (!current) continue
+          const next = removeEnvBlock(current)
+          if (next !== current) {
+            await sftpWrite(sftp, rcFile, `${next}\n`)
+            log(`已从 ${info.label} 配置移除 Token 环境变量`)
+          }
+        }
+      }
+    } finally {
+      sftp.end()
+    }
+    log('服务器接入已断开', 'notify')
+    return {
+      success: true,
+      removedHooks,
+      summary: '服务器钩子已移除，Claude Code 将回到终端审批。'
+    }
+  } finally {
+    client.end()
+  }
+}
+
+export async function restoreDeployBackup(
+  config: DeployConfig,
+  onProgress: DeployProgress
+): Promise<{ success: boolean; summary: string; restoredFrom: string }> {
+  const log = (message: string, level: LogLevel = 'info'): void => onProgress(level, message)
+  log(`连接服务器 ${config.username}@${config.host}:${config.sshPort} …`)
+  const { client } = await openClient(config)
+  try {
+    const homeResult = await execCommand(client, 'echo $HOME')
+    const home = homeResult.stdout.trim()
+    if (homeResult.code !== 0 || !home) throw new Error('无法获取服务器上的 $HOME')
+    const settingsPath = `${home}/.claude/settings.json`
+    const listed = await execCommand(
+      client,
+      `ls -1t ${shellQuote(settingsPath)}.bak.* 2>/dev/null | head -n 1`
+    )
+    const restoredFrom = listed.stdout.trim().split('\n')[0]
+    if (!restoredFrom) throw new Error('服务器上没有找到 settings.json 备份')
+    const safety = `${settingsPath}.pre-restore.${timestamp()}`
+    await execCommand(client, `cp ${shellQuote(settingsPath)} ${shellQuote(safety)}`)
+    await execCommand(
+      client,
+      `cp ${shellQuote(restoredFrom)} ${shellQuote(settingsPath)}`
+    )
+    log(`已恢复 ${settingsPath} ← ${restoredFrom}`, 'notify')
+    return {
+      success: true,
+      summary: `已恢复服务器配置 ← ${restoredFrom}`,
+      restoredFrom
     }
   } finally {
     client.end()

@@ -1,11 +1,18 @@
-import { useEffect, useState } from 'react'
-import type { DeployFormConfig, DeployResult, LogLevel, SecurityInfo } from '../../shared/types'
+import { useEffect, useRef, useState } from 'react'
+import type {
+  AppState,
+  DeployFormConfig,
+  DeployResult,
+  DeployTestResult,
+  LogLevel,
+  SecurityInfo
+} from '../../shared/types'
 import { api } from './api'
+import { formatRelative } from './format'
 
 interface Props {
   open: boolean
-  localIp: string
-  port: number
+  state: AppState
   onClose: () => void
 }
 
@@ -29,9 +36,11 @@ const EMPTY_FORM: DeployFormConfig = {
   callbackPort: 18765,
   hookTimeout: 300,
   toolMatcher: '',
+  origin: '',
   rememberPassword: false,
   envImport: false,
-  envShells: ['bash']
+  envShells: ['bash'],
+  hostFingerprint: ''
 }
 
 interface LogLine {
@@ -39,28 +48,56 @@ interface LogLine {
   message: string
 }
 
-export default function DeployDialog({ open, localIp, port, onClose }: Props): React.JSX.Element | null {
-  const [form, setForm] = useState<DeployFormConfig>({ ...EMPTY_FORM, callbackIp: localIp, callbackPort: port })
+export default function DeployDialog({ open, state, onClose }: Props): React.JSX.Element | null {
+  const [form, setForm] = useState<DeployFormConfig>({
+    ...EMPTY_FORM,
+    callbackIp: state.server.localIp,
+    callbackPort: state.network.port
+  })
   const [security, setSecurity] = useState<SecurityInfo>({ available: false, label: '安全存储' })
   const [logs, setLogs] = useState<LogLine[]>([])
   const [error, setError] = useState('')
   const [running, setRunning] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [removing, setRemoving] = useState(false)
+  const [confirmRemove, setConfirmRemove] = useState(false)
+  const [confirmRestore, setConfirmRestore] = useState(false)
   const [result, setResult] = useState<DeployResult | null>(null)
+  const [testResult, setTestResult] = useState<DeployTestResult | null>(null)
+  const initialized = useRef(false)
 
   useEffect(() => {
-    if (!open) return
-    setForm((current) => ({ ...current, callbackIp: current.callbackIp || localIp, callbackPort: current.callbackPort || port }))
+    if (!open) {
+      initialized.current = false
+      return
+    }
+    if (initialized.current) return
+    initialized.current = true
+    setLogs([])
+    setError('')
+    setResult(null)
+    setTestResult(null)
+    setConfirmRemove(false)
+    setConfirmRestore(false)
+    setForm({
+      ...EMPTY_FORM,
+      callbackIp: state.server.localIp,
+      callbackPort: state.network.port,
+      mode: state.prefs.mode
+    })
     void api.getSecurityInfo().then(setSecurity)
     void api.getDeployCache().then((cache) => {
       setForm((current) => ({
         ...current,
         ...Object.fromEntries(
-          Object.entries(cache).filter(([, value]) => value !== undefined && value !== null && value !== '')
+          Object.entries(cache).filter(
+            ([, value]) => value !== undefined && value !== null && value !== ''
+          )
         ),
         password: cache.password || '',
-        callbackIp: cache.callbackIp || current.callbackIp || localIp,
-        callbackPort: cache.callbackPort || current.callbackPort || port
+        callbackIp: cache.callbackIp || current.callbackIp || state.server.localIp,
+        callbackPort: cache.callbackPort || current.callbackPort || state.network.port,
+        origin: cache.origin || cache.host || ''
       }))
     })
     const off = api.onDeployProgress((progress) => {
@@ -68,12 +105,38 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
       setError('')
     })
     return off
-  }, [open, localIp, port])
+  }, [open, state.server.localIp, state.network.port, state.prefs.mode])
+
+  useEffect(() => {
+    if (!open) return
+    const handler = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && !running && !testing && !removing) {
+        event.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [open, running, testing, removing, onClose])
 
   if (!open) return null
 
   const update = <K extends keyof DeployFormConfig>(key: K, value: DeployFormConfig[K]): void => {
-    setForm((current) => ({ ...current, [key]: value }))
+    if (
+      key === 'host' ||
+      key === 'sshPort' ||
+      key === 'username' ||
+      key === 'authMethod' ||
+      key === 'callbackIp' ||
+      key === 'callbackPort'
+    ) {
+      setTestResult(null)
+    }
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === 'host' || key === 'sshPort' ? { hostFingerprint: '' } : {})
+    }))
   }
 
   const toggleShell = (id: string): void => {
@@ -96,6 +159,10 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
     if (!Number.isFinite(Number(form.sshPort)) || !Number.isFinite(Number(form.callbackPort))) {
       return '端口必须是数字'
     }
+    if (Number(form.sshPort) < 1 || Number(form.sshPort) > 65535) return 'SSH 端口无效'
+    if (Number(form.callbackPort) < 1024 || Number(form.callbackPort) > 65535) {
+      return '回调端口需在 1024–65535 之间'
+    }
     if (Number(form.hookTimeout) < 70) return '钩子超时建议不小于 70 秒'
     if (!form.callbackIp.trim()) return '请填写回调 IP'
     if (form.authMethod === 'password' && !form.password) return '请输入 SSH 密码'
@@ -103,7 +170,20 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
     return ''
   }
 
-  const testConnection = async (): Promise<void> => {
+  const normalized = (): DeployFormConfig => ({
+    ...form,
+    host: form.host.trim(),
+    username: form.username.trim(),
+    sshPort: Number(form.sshPort),
+    callbackIp: form.callbackIp.trim(),
+    callbackPort: Number(form.callbackPort),
+    hookTimeout: Number(form.hookTimeout),
+    toolMatcher: form.toolMatcher?.trim() || '',
+    origin: form.origin?.trim() || form.host.trim(),
+    envShells: form.envImport ? form.envShells : []
+  })
+
+  const testConnection = async (override?: Partial<DeployFormConfig>): Promise<void> => {
     const message = validate()
     if (message) {
       setError(message)
@@ -112,29 +192,37 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
     setTesting(true)
     setError('')
     try {
-      const response = await api.testDeploy({
-        ...form,
-        host: form.host.trim(),
-        username: form.username.trim(),
-        sshPort: Number(form.sshPort),
-        callbackIp: form.callbackIp.trim(),
-        callbackPort: Number(form.callbackPort),
-        hookTimeout: Number(form.hookTimeout)
-      })
+      const response = await api.testDeploy({ ...normalized(), ...override })
+      setTestResult(response)
       setLogs((current) => [
         ...current,
         { level: response.ok ? 'notify' : 'error', message: `连接测试：${response.message}` }
       ])
+      if (response.connectivityMessage) {
+        setLogs((current) => [
+          ...current,
+          {
+            level: response.connectivity ? 'info' : 'warn',
+            message: `回调预检：${response.connectivityMessage}`
+          }
+        ])
+      }
       if (!response.ok) setError(response.message)
       else if (response.home) {
         setLogs((current) => [...current, { level: 'info', message: `服务器 HOME=${response.home}` }])
       }
     } catch (caught) {
-      const text = caught instanceof Error ? caught.message : String(caught)
-      setError(text)
+      setError(caught instanceof Error ? caught.message : String(caught))
     } finally {
       setTesting(false)
     }
+  }
+
+  const trustFingerprint = async (): Promise<void> => {
+    const fingerprint = testResult?.fingerprint
+    if (!fingerprint) return
+    update('hostFingerprint', fingerprint)
+    await testConnection({ hostFingerprint: fingerprint })
   }
 
   const start = async (): Promise<void> => {
@@ -143,21 +231,16 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
       setError(message)
       return
     }
+    if (!testResult?.ok && !form.hostFingerprint) {
+      setError('请先“测试连接”并确认主机指纹，再执行部署')
+      return
+    }
     setRunning(true)
     setError('')
     setResult(null)
     setLogs([])
     try {
-      const response = await api.startDeploy({
-        ...form,
-        host: form.host.trim(),
-        username: form.username.trim(),
-        sshPort: Number(form.sshPort),
-        callbackIp: form.callbackIp.trim(),
-        callbackPort: Number(form.callbackPort),
-        hookTimeout: Number(form.hookTimeout),
-        toolMatcher: form.toolMatcher?.trim() || ''
-      })
+      const response = await api.startDeploy(normalized())
       setResult(response)
       if (!response.success) setError(response.summary)
     } catch (caught) {
@@ -169,21 +252,117 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
     }
   }
 
+  const remove = async (): Promise<void> => {
+    const message = validate()
+    if (message) {
+      setError(message)
+      return
+    }
+    if (!testResult?.ok && !form.hostFingerprint) {
+      setError('请先测试连接并确认主机指纹')
+      return
+    }
+    setRemoving(true)
+    setError('')
+    setResult(null)
+    setLogs([])
+    try {
+      const response = await api.removeDeploy(normalized())
+      setResult(response)
+      if (!response.success) setError(response.summary)
+      else setConfirmRemove(false)
+    } catch (caught) {
+      const text = caught instanceof Error ? caught.message : String(caught)
+      setError(text)
+    } finally {
+      setRemoving(false)
+    }
+  }
+
+  const restore = async (): Promise<void> => {
+    const message = validate()
+    if (message) {
+      setError(message)
+      return
+    }
+    if (!testResult?.ok && !form.hostFingerprint) {
+      setError('请先测试连接并确认主机指纹')
+      return
+    }
+    setRemoving(true)
+    setError('')
+    setResult(null)
+    setLogs([])
+    try {
+      const response = await api.restoreDeploy(normalized())
+      setResult(response)
+      if (!response.success) setError(response.summary)
+      else setConfirmRestore(false)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setRemoving(false)
+    }
+  }
+
+  const profiles = state.deploy.profiles
+
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="deploy-modal" role="dialog" aria-modal="true" aria-labelledby="deploy-title">
         <header className="modal-head">
           <div>
-            <div className="modal-kicker">REMOTE DEPLOY</div>
+            <div className="modal-kicker">服务器接入</div>
             <h2 id="deploy-title">部署审批服务到服务器</h2>
-            <p>通过 SSH 写入钩子脚本、合并 settings.json，并从服务器反向验证本机连通性。</p>
+            <p>通过 SSH 写入钩子、合并 settings.json，并从服务器反向验证本机连通性。</p>
           </div>
-          <button className="modal-close" onClick={onClose} aria-label="关闭">
+          <button className="modal-close" onClick={onClose} aria-label="关闭" disabled={running || removing}>
             ×
           </button>
         </header>
 
         <div className="deploy-modal-body">
+          {profiles.length > 0 ? (
+            <div className="form-section">
+              <div className="form-section-title">最近目标</div>
+              <div className="profile-list">
+                {profiles.slice(0, 5).map((profile) => (
+                  <button
+                    className="profile-row"
+                    key={profile.id}
+                    onClick={() => {
+                      setForm((current) => ({
+                        ...current,
+                        host: profile.host,
+                        sshPort: profile.sshPort,
+                        username: profile.username,
+                        authMethod: profile.authMethod,
+                        mode: profile.mode,
+                        callbackIp: profile.callbackIp,
+                        callbackPort: profile.callbackPort,
+                        hookTimeout: profile.hookTimeout,
+                        toolMatcher: profile.toolMatcher,
+                        origin: profile.origin
+                      }))
+                      setTestResult(null)
+                      setError('')
+                    }}
+                  >
+                    <span className={`deploy-dot ${profile.status === 'deployed' ? 'ok' : 'idle'}`} />
+                    <b>{profile.origin || profile.name}</b>
+                    <span>
+                      {profile.username}@{profile.host}:{profile.sshPort}
+                    </span>
+                    <em>{profile.mode === 'popup' ? '弹窗' : '通知'}</em>
+                    <time>
+                      {profile.lastDeployAt ? formatRelative(profile.lastDeployAt) : '未部署'}
+                    </time>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <div className="form-section">
             <div className="form-section-title">连接</div>
             <div className="segment-row">
@@ -201,7 +380,7 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
               </button>
             </div>
             <div className="form-grid two">
-              <label className="field wide">
+              <label className="field">
                 <span>服务器地址</span>
                 <input
                   value={form.host}
@@ -223,6 +402,14 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
                   value={form.username}
                   placeholder="SSH 登录用户名"
                   onChange={(event) => update('username', event.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>来源标签</span>
+                <input
+                  value={form.origin || ''}
+                  placeholder="显示在弹窗上，如 prod-api"
+                  onChange={(event) => update('origin', event.target.value)}
                 />
               </label>
             </div>
@@ -287,8 +474,16 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
                 <span>回调 IP</span>
                 <input
                   value={form.callbackIp}
+                  list="callback-ips"
                   onChange={(event) => update('callbackIp', event.target.value)}
                 />
+                <datalist id="callback-ips">
+                  {state.network.addresses.map((address) => (
+                    <option key={address.address} value={address.address}>
+                      {address.iface}
+                    </option>
+                  ))}
+                </datalist>
               </label>
               <label className="field">
                 <span>回调端口</span>
@@ -315,7 +510,9 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
                 />
               </label>
             </div>
-            <div className="form-note">审批等待时间会自动取钩子超时减 60 秒。</div>
+            <div className="form-note">
+              审批等待时间自动取钩子超时减 60 秒。多会话建议把钩子超时调到 600 秒，给队列留出余量。
+            </div>
           </div>
 
           <div className="form-section">
@@ -355,6 +552,58 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
             ) : null}
           </div>
 
+          {testResult ? (
+            <div className={`preflight ${testResult.ok ? 'ok' : 'fail'}`}>
+              <div>
+                <b>{testResult.ok ? 'SSH 预检通过' : '预检未通过'}</b>
+                <span>{testResult.message}</span>
+              </div>
+              {testResult.fingerprint ? (
+                <div className="fingerprint-row">
+                  <span>主机指纹</span>
+                  <code>{testResult.fingerprint}</code>
+                  {!testResult.ok && testResult.code === 'HOST_KEY_UNKNOWN' ? (
+                    <button className="btn compact" onClick={() => void trustFingerprint()}>
+                      信任并重试
+                    </button>
+                  ) : null}
+                  {testResult.code === 'HOST_KEY_MISMATCH' ? (
+                    <span className="fingerprint-warning">指纹与已记录的不一致，请检查服务器是否被更换或遭到中间人攻击。</span>
+                  ) : null}
+                </div>
+              ) : null}
+              {testResult.ok ? (
+                <div className={`preflight-line ${testResult.connectivity ? 'ok' : 'warn'}`}>
+                  回调连通性：{testResult.connectivity ? '通过' : '未通过'}
+                  {testResult.connectivityMessage ? ` · ${testResult.connectivityMessage}` : ''}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="form-section maintenance-row">
+            <div className="form-section-title">维护</div>
+            <div className="row">
+              <button
+                className="btn subtle"
+                onClick={() => setConfirmRestore(true)}
+                disabled={running || testing || removing}
+              >
+                恢复服务器上一个备份
+              </button>
+              <button
+                className="btn danger"
+                onClick={() => setConfirmRemove(true)}
+                disabled={running || testing || removing}
+              >
+                移除服务器钩子
+              </button>
+            </div>
+            <div className="form-note">
+              恢复会先给当前 settings.json 另存一份 .pre-restore 备份；移除只清理本工具的钩子，保留第三方配置。
+            </div>
+          </div>
+
           {logs.length > 0 ? (
             <div className="deploy-log">
               {logs.map((line, index) => (
@@ -365,28 +614,53 @@ export default function DeployDialog({ open, localIp, port, onClose }: Props): R
               ))}
             </div>
           ) : null}
-
         </div>
 
         {error ? <div className="form-error modal-status">{error}</div> : null}
         {result?.success ? (
-          <div className="form-success modal-status">{result.summary}</div>
+          <div className="form-success modal-status">
+            {result.summary}
+            {result.connectivity ? ' · 连通性通过' : ' · 连通性未通过'}
+          </div>
         ) : null}
 
         <footer className="modal-actions">
-          <button className="btn" onClick={onClose} disabled={running || testing}>
+          <button className="btn" onClick={onClose} disabled={running || testing || removing}>
             {result?.success ? '完成' : '取消'}
           </button>
-          <button className="btn" onClick={() => void testConnection()} disabled={running || testing}>
-            {testing ? '连接中…' : '测试连接'}
-          </button>
-          <button
-            className="btn primary"
-            onClick={() => void start()}
-            disabled={running || testing}
-          >
-            {running ? '部署中…' : '部署并验证'}
-          </button>
+          {confirmRemove ? (
+            <>
+              <button className="btn danger" onClick={() => void remove()} disabled={removing}>
+                {removing ? '移除中…' : '确认移除服务器钩子'}
+              </button>
+              <button className="btn subtle" onClick={() => setConfirmRemove(false)}>
+                取消
+              </button>
+            </>
+          ) : confirmRestore ? (
+            <>
+              <button className="btn primary" onClick={() => void restore()} disabled={removing}>
+                {removing ? '恢复中…' : '确认恢复上一个备份'}
+              </button>
+              <button className="btn subtle" onClick={() => setConfirmRestore(false)}>
+                取消
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="btn" onClick={() => void testConnection()} disabled={running || testing}>
+                {testing ? '连接中…' : '测试连接'}
+              </button>
+              <button
+                className="btn primary"
+                onClick={() => void start()}
+                disabled={running || testing || removing || (!testResult?.ok && !form.hostFingerprint)}
+                title={!testResult?.ok && !form.hostFingerprint ? '请先测试连接并确认主机指纹' : undefined}
+              >
+                {running ? '部署中…' : '部署并验证'}
+              </button>
+            </>
+          )}
         </footer>
       </section>
     </div>

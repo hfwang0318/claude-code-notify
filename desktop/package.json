@@ -1,6 +1,6 @@
 {
   "name": "claude-notify-desktop",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "description": "Claude Code approval notifications and remote deployment desktop app",
   "main": "./out/main/index.js",
@@ -13,6 +13,8 @@
     "self-test": "electron-vite build && electron . --self-test",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
+    "e2e:claude": "node scripts/e2e-claude.mjs",
+    "test:all": "pnpm test && pnpm e2e:claude",
     "dist:mac": "electron-vite build && electron-builder --mac",
     "dist:win": "electron-vite build && electron-builder --win",
     "pack:mac": "electron-vite build && electron-builder --mac dir",

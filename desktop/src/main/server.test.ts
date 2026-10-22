@@ -247,4 +247,23 @@ describe('NotifyServer', () => {
     expect(await (await first).json()).toMatchObject({ decision: 'allow' })
     expect(await (await second).json()).toMatchObject({ decision: 'deny' })
   })
+
+  it('resolves and notifies pending approvals when the server stops', async () => {
+    const promise = fetch(`http://127.0.0.1:${port}/claude-approval`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        request_id: 'req_stop',
+        session_id: 'session-stop',
+        tool_name: 'Bash',
+        cwd: '/tmp/project',
+        message: 'stop test',
+        timeout_seconds: 120
+      })
+    })
+    const item = await waitFor(() => approvals[0] || null)
+    await server.stop()
+    expect(await (await promise).json()).toMatchObject({ decision: 'cancelled' })
+    expect(resolutions.find((entry) => entry.id === item.id)?.decision).toBe('cancelled')
+  })
 })

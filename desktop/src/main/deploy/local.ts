@@ -15,11 +15,15 @@ import type { LogLevel } from '../../shared/types'
 import {
   APPROVAL_SCRIPT_NAME,
   HOOK_CONFIG_NAME,
+  HOOK_VERSION,
+  HOOK_VERSION_KEY,
   NOTIFY_SCRIPT_NAME,
   SHELL_RC_FILES,
   buildEnvBlock,
+  installedHookVersion,
   mergeSettingsJson,
   removeEnvBlock,
+  stripSettingsJson,
   type DeployMode,
   type HookEntry
 } from './settings'
@@ -32,6 +36,7 @@ export interface LocalDeployConfig {
   timeoutSec?: number
   writeEnv: boolean
   envShells: string[]
+  origin?: string
   claudeDir?: string
   hooksDir?: string
   pythonPath?: string
@@ -192,11 +197,15 @@ export function deployLocal(
           CLAUDE_NOTIFY_TOKEN: config.token,
           CLAUDE_APPROVAL_URL: `${baseUrl}/claude-approval`,
           CLAUDE_APPROVAL_TIMEOUT: config.timeoutSec ?? 240,
-          CLAUDE_ASKUSER_CHANNEL: 'pretooluse'
+          CLAUDE_ASKUSER_CHANNEL: 'pretooluse',
+          CLAUDE_NOTIFY_ORIGIN: config.origin || '本机',
+          [HOOK_VERSION_KEY]: HOOK_VERSION
         }
       : {
           CLAUDE_NOTIFY_TOKEN: config.token,
-          CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`
+          CLAUDE_NOTIFY_URL: `${baseUrl}/claude-notify`,
+          CLAUDE_NOTIFY_ORIGIN: config.origin || '本机',
+          [HOOK_VERSION_KEY]: HOOK_VERSION
         }
 
   const pythonPath =
@@ -260,4 +269,126 @@ export function deployLocal(
 
   onProgress('notify', '本机接入完成 ✓ 钩子读取配置文件，无需重启 Claude Code 即可生效')
   return { mode: config.mode, settingsPath, scriptPath, configPath, hookEntry }
+}
+
+export interface LocalInstallState {
+  mode: DeployMode | null
+  version: string
+  stale: boolean
+  configPath: string
+  settingsPath: string
+  latestBackup: string | null
+}
+
+function latestBackup(settingsPath: string): string | null {
+  const directory = dirname(settingsPath)
+  if (!existsSync(directory)) return null
+  try {
+    const backups = readdirSync(directory)
+      .filter((name) => name.startsWith('settings.json.bak.'))
+      .sort()
+      .reverse()
+    return backups.length > 0 ? join(directory, backups[0]) : null
+  } catch {
+    return null
+  }
+}
+
+export function detectLocalState(claudeDir = localClaudeDir()): LocalInstallState {
+  const settingsPath = join(claudeDir, 'settings.json')
+  const configPath = join(claudeDir, HOOK_CONFIG_NAME)
+  const mode = detectLocalDeploy(claudeDir)
+  let config: Record<string, unknown> | null = null
+  try {
+    if (existsSync(configPath)) {
+      config = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>
+    }
+  } catch {
+    config = null
+  }
+  const version = installedHookVersion(config)
+  return {
+    mode,
+    version,
+    stale: Boolean(mode) && version !== HOOK_VERSION,
+    configPath,
+    settingsPath,
+    latestBackup: latestBackup(settingsPath)
+  }
+}
+
+export interface LocalRemoveResult {
+  ok: boolean
+  removedHooks: number
+  backupPath: string
+  settingsPath: string
+  removedScripts: number
+}
+
+export function removeLocalDeploy(
+  config: {
+    claudeDir?: string
+    writeEnv?: boolean
+    envShells?: string[]
+  } = {},
+  onProgress: (level: LogLevel, message: string) => void = () => undefined
+): LocalRemoveResult {
+  const claudeDir = config.claudeDir || localClaudeDir()
+  const settingsPath = join(claudeDir, 'settings.json')
+  let removedHooks = 0
+  let backupPath = ''
+  if (existsSync(settingsPath)) {
+    const existing = readFileSync(settingsPath, 'utf-8')
+    backupPath = `${settingsPath}.bak.${timestamp()}`
+    writeFileSync(backupPath, existing, 'utf-8')
+    const stripped = stripSettingsJson(existing)
+    removedHooks = stripped.removed
+    if (stripped.changed) {
+      writeFileSync(settingsPath, stripped.text, 'utf-8')
+      onProgress('info', `已从本机 settings.json 移除 ${removedHooks} 个钩子条目`)
+    }
+  }
+  let removedScripts = 0
+  for (const script of [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME, HOOK_CONFIG_NAME]) {
+    const path = join(claudeDir, script)
+    if (existsSync(path)) {
+      unlinkSync(path)
+      removedScripts += 1
+    }
+  }
+  onProgress('info', `已删除本机钩子文件 ${removedScripts} 个`)
+  if (config.writeEnv && config.envShells) {
+    for (const shell of config.envShells) {
+      const info = SHELL_RC_FILES[shell]
+      if (!info) continue
+      const rcPath = join(homedir(), info.rc)
+      if (!existsSync(rcPath)) continue
+      const current = readFileSync(rcPath, 'utf-8')
+      const cleaned = removeEnvBlock(current)
+      if (cleaned !== current) {
+        writeFileSync(rcPath, `${cleaned}\n`, 'utf-8')
+        onProgress('info', `已从 ${info.label} 配置移除 Token 环境变量`)
+      }
+    }
+  }
+  onProgress('notify', '本机接入已断开，Claude Code 将回到终端审批')
+  return { ok: true, removedHooks, backupPath, settingsPath, removedScripts }
+}
+
+export function restoreLocalBackup(
+  claudeDir = localClaudeDir(),
+  onProgress: (level: LogLevel, message: string) => void = () => undefined
+): { ok: boolean; restoredFrom: string; backupOfCurrent: string } {
+  const settingsPath = join(claudeDir, 'settings.json')
+  const backup = latestBackup(settingsPath)
+  if (!backup) throw new Error('没有找到可恢复的 settings.json 备份')
+  const backupOfCurrent = existsSync(settingsPath)
+    ? `${settingsPath}.pre-restore.${timestamp()}`
+    : ''
+  if (backupOfCurrent) {
+    writeFileSync(backupOfCurrent, readFileSync(settingsPath, 'utf-8'), 'utf-8')
+  }
+  writeFileSync(settingsPath, readFileSync(backup, 'utf-8'), 'utf-8')
+  onProgress('notify', `已恢复 settings.json ← ${backup}`)
+  return { ok: true, restoredFrom: backup, backupOfCurrent }
 }

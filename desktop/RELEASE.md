@@ -4,7 +4,8 @@
 
 - 更新 `desktop/package.json` 的 `version`
 - `pnpm typecheck`
-- `pnpm test`（当前 25 个测试）
+- `pnpm test`（当前 49 个测试）
+- `pnpm e2e:claude`（真实 Claude Code：双会话 / resolved / timeout；没有 Claude 认证的 CI 会自动跳过）
 - `pnpm self-test`
 - `pnpm build`
 
@@ -55,13 +56,17 @@ pnpm dist:win
 
 产物：`release/Claude Notify Setup <version>.exe`（NSIS，x64）。
 
-### 发布顺序（重要）
+### 发布顺序
 
-1. 先创建 GitHub Release（例如 `desktop-v0.1.2`）
-2. 推送同名 tag，或对 tag ref 手动 dispatch workflow
-3. Windows job 构建完成后会把 `release/*Setup*.exe` 直接上传到该 Release
+1. 确认版本号已更新，提交并推送 `feat/electron-desktop`
+2. 创建并推送 annotated tag `desktop-v0.2.0`
+3. workflow 会在 tag 上自动创建 GitHub Release（如果不存在），随后上传：
+   - macOS `*.dmg` + `SHA256SUMS-macos.txt`
+   - Windows `*Setup*.exe`、portable zip、`SHA256SUMS-windows.txt`
+4. 如果 Release 已手动创建，workflow 会复用并 `--clobber` 上传产物
 
-如果 Release 不存在，CI 的 `gh release upload` 会失败。
+> GitHub 的 `gh` 命令在 workflow 内使用 `${{ github.token }}`；本地发布不需要登录 `gh`。
+> 推送 tag 需要本机 GitHub SSH 或 HTTPS 凭据。
 
 ### 代码签名
 
@@ -95,5 +100,6 @@ pnpm dist:win
 - macOS：`release/Claude Notify-<version>-arm64.dmg`
 - Windows：`release/Claude Notify Setup <version>.exe`
 - Windows 免安装：`Claude-Notify-<version>-win-x64-portable.zip`
-- 校验：`SHA256SUMS-<version>.txt`
+- 校验：`SHA256SUMS-macos.txt` / `SHA256SUMS-windows.txt`
+- 以上产物由 `.github/workflows/desktop-release.yml` 自动上传到对应 Release
 - 不要提交 `release/`、`out/`、`node_modules/`

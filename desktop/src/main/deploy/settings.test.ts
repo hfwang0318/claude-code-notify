@@ -102,3 +102,37 @@ describe('buildEnvBlock', () => {
     expect(block).toContain('# <<< claude-notify <<<')
   })
 })
+
+describe('stripSettingsJson', () => {
+  it('removes only our hooks and preserves third-party entries', async () => {
+    const { stripSettingsJson } = await import('./settings')
+    const existing = JSON.stringify({
+      hooks: {
+        PermissionRequest: [
+          { matcher: '', hooks: [{ type: 'command', command: 'echo third-party' }] },
+          { matcher: '', hooks: [{ type: 'command', command: 'python3 ~/.claude/claude_approval_hook.py' }] }
+        ],
+        PreToolUse: [
+          { matcher: '', hooks: [{ type: 'command', command: 'python3 ~/.claude/claude_approval_hook.py' }] }
+        ]
+      },
+      other: { keep: true }
+    })
+    const result = stripSettingsJson(existing)
+    expect(result.removed).toBe(2)
+    expect(result.changed).toBe(true)
+    const parsed = JSON.parse(result.text)
+    expect(parsed.other.keep).toBe(true)
+    expect(parsed.hooks.PermissionRequest).toHaveLength(1)
+    expect(parsed.hooks.PreToolUse).toBeUndefined()
+  })
+})
+
+describe('installedHookVersion', () => {
+  it('reads the version from the deployed config', async () => {
+    const { installedHookVersion, HOOK_VERSION_KEY } = await import('./settings')
+    expect(installedHookVersion({ [HOOK_VERSION_KEY]: '2' })).toBe('2')
+    expect(installedHookVersion({ hook_version: '1' })).toBe('1')
+    expect(installedHookVersion(null)).toBe('')
+  })
+})

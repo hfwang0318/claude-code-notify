@@ -36,7 +36,7 @@ interface PendingRequest {
 export interface ServerCallbacks {
   onApproval: (item: ApprovalItem) => void
   onResolved: (itemId: string, decision: string) => void
-  onNotify: (title: string, body: string) => void
+  onNotify: (title: string, body: string, payload: Record<string, unknown>) => void
   onLog?: (level: LogLevel, message: string) => void
 }
 
@@ -46,6 +46,7 @@ export class NotifyServer {
   private readonly notifications = new Map<string, number>()
   private listening = false
   private actualPort = 0
+  private host = '0.0.0.0'
 
   constructor(
     public readonly port: number,
@@ -65,8 +66,9 @@ export class NotifyServer {
     this.token = token
   }
 
-  start(): Promise<void> {
+  start(host = this.host): Promise<void> {
     if (this.server) return Promise.resolve()
+    this.host = host
     return new Promise((resolve, reject) => {
       const server = createServer((request, response) => {
         this.handle(request, response).catch((error) => {
@@ -78,7 +80,7 @@ export class NotifyServer {
         this.server = null
         reject(error)
       })
-      server.listen(this.port, '0.0.0.0', () => {
+      server.listen(this.port, this.host, () => {
         this.server = server
         this.listening = true
         const address = server.address()
@@ -92,10 +94,8 @@ export class NotifyServer {
     const server = this.server
     this.server = null
     this.listening = false
-    for (const pending of this.pending.values()) {
-      clearTimeout(pending.timer)
-      pending.finished = true
-      pending.resolve({ status: 'ok', decision: 'cancelled' })
+    for (const pending of [...this.pending.values()]) {
+      this.finish(pending, { status: 'ok', decision: 'cancelled' })
     }
     this.pending.clear()
     if (!server) return Promise.resolve()
@@ -167,7 +167,8 @@ export class NotifyServer {
       sendJson(response, 200, {
         status: 'ok',
         service: 'claude-notify',
-        port: this.getPort()
+        port: this.getPort(),
+        bind: this.host
       })
       return
     }
@@ -186,7 +187,7 @@ export class NotifyServer {
       this.log('info', `收到通知：type=${type}, session=${session.slice(0, 16)}`)
       if (this.shouldNotify(body)) {
         const { title, body: text } = buildNotification(body)
-        this.callbacks.onNotify(title, text)
+        this.callbacks.onNotify(title, text, body)
       } else {
         this.log('info', '忽略短时间内重复通知')
       }

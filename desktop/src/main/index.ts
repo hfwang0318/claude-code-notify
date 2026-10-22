@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   Notification,
   screen,
   shell,
@@ -13,42 +14,96 @@ import {
 } from 'electron'
 import { spawnSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir, networkInterfaces, release } from 'node:os'
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
+import { release } from 'node:os'
 import { join } from 'node:path'
 import type {
+  AppState,
   ApprovalExtra,
   ApprovalItem,
-  AppState,
-  DeployCacheView,
+  ApprovalRecord,
+  ApprovalRule,
+  BindMode,
+  DecisionSource,
   DeployFormConfig,
+  DeployProfile,
   DeployResult,
+  DeployTestResult,
   LogLevel,
   PopupPosition,
+  Prefs,
+  RuleScope,
   SecurityInfo
 } from '../shared/types'
+import {
+  approvalCommand,
+  assessRisk,
+  projectName,
+  riskLabel,
+  sortByDeadline
+} from '../shared/session'
+import { buildRuleFromItem, matchingRule, validateRule } from '../shared/rules'
 import {
   appDataDir,
   decryptSecret,
   encryptSecret,
+  ensureDataDir,
   loadDeployCache,
+  loadDeployProfiles,
+  loadKnownHosts,
   loadOrCreateToken,
+  loadRules,
   loadUiConfig,
+  readJsonFile,
+  writeJsonFile,
   saveDeployCache,
-  saveUiConfig,
+  saveDeployProfiles,
+  saveKnownHosts,
+  saveRules,
   saveToken,
+  saveUiConfig,
   secureStorageAvailable,
-  secureStorageLabel
+  secureStorageLabel,
+  type KnownHostMap,
+  type UiConfig
 } from './config'
-import { deployLocal, detectLocalDeploy } from './deploy/local'
-import { deployToServer, testSshConnection } from './deploy/ssh'
+import {
+  deployLocal,
+  detectLocalState,
+  removeLocalDeploy,
+  restoreLocalBackup
+} from './deploy/local'
+import { HOOK_VERSION } from './deploy/settings'
+import {
+  deployToServer,
+  humanizeSshError,
+  removeDeployFromServer,
+  restoreDeployBackup,
+  testSshConnection
+} from './deploy/ssh'
+import { HistoryStore } from './history'
+import { listAddresses, preferredAddress } from './net'
+import { approvalFromPayload } from './protocol'
 import { NotifyServer } from './server'
+import { SessionRegistry } from './sessions'
 import { Store } from './store'
+import { checkLatestVersion } from './update'
 
 const APP_NAME = 'Claude Notify'
-const PORT = 18765
-const POPUP_WIDTH = 540
-const POPUP_HEIGHT = 470
+const DEFAULT_PORT = 18765
+const POPUP_WIDTH = 560
+const POPUP_HEIGHT = 540
+const LOG_MAX_BYTES = 5 * 1024 * 1024
 
 const isCapture = process.argv.includes('--capture')
 const isSelfTest = process.argv.includes('--self-test')
@@ -66,32 +121,86 @@ if (!hasSingleInstanceLock) {
   app.on('second-instance', () => showMainWindow())
 }
 
-
 let store: Store
 let server: NotifyServer
 let tray: Tray | null = null
 let mainWindow: BrowserWindow | null = null
 let popupWindow: BrowserWindow | null = null
 let popupReady = false
-const localApprovals = new Map<string, (decision: string) => void>()
+let popupCustomPosition: { x: number; y: number } | null = null
+let suppressMoveSave = false
+let serverPort = DEFAULT_PORT
+let serverBindMode: BindMode = 'all'
+let currentTheme: 'dark' | 'light' = 'dark'
 let logFile = ''
+let pendingSnapshotPath = ''
+let logWrites = 0
+let lastBadgeCount = -1
+let lastBeepAt = 0
+let lastTraySignature = ''
+let trayRefreshTimer: NodeJS.Timeout | null = null
+let notificationQueue: ApprovalItem[] = []
+let notificationTimer: NodeJS.Timeout | null = null
 
-function localIp(): string {
-  const interfaces = networkInterfaces()
-  for (const entries of Object.values(interfaces)) {
-    for (const entry of entries || []) {
-      if (entry.family === 'IPv4' && !entry.internal) return entry.address
-    }
+const localApprovals = new Map<string, (decision: string) => void>()
+const decisionSources = new Map<string, DecisionSource>()
+const itemCache = new Map<string, ApprovalItem>()
+const settledIds = new Set<string>()
+
+let sessions: SessionRegistry
+let history: HistoryStore
+let rules: ApprovalRule[] = []
+let profiles: DeployProfile[] = []
+let knownHosts: KnownHostMap = {}
+
+// ---------------------------------------------------------------------------
+// logging
+// ---------------------------------------------------------------------------
+
+function rotateLogIfNeeded(force = false): void {
+  if (!logFile) return
+  try {
+    if (!existsSync(logFile)) return
+    if (!force && statSync(logFile).size <= LOG_MAX_BYTES) return
+    const previous = `${logFile}.1`
+    if (existsSync(previous)) unlinkSync(previous)
+    renameSync(logFile, previous)
+  } catch {
+    // rotation is best-effort
   }
-  return '127.0.0.1'
 }
 
 function log(level: LogLevel, message: string): void {
   store.log(level, message)
   try {
-    if (logFile) appendFileSync(logFile, `${new Date().toISOString()} ${level} ${message}\n`)
+    if (!logFile) return
+    logWrites += 1
+    if (logWrites % 50 === 0) rotateLogIfNeeded()
+    appendFileSync(logFile, `${new Date().toISOString()} ${level} ${message}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600
+    })
   } catch {
     // logging must never break the app
+  }
+}
+
+function persistPendingSnapshot(): void {
+  if (!pendingSnapshotPath || !store) return
+  try {
+    writeJsonFile(
+      pendingSnapshotPath,
+      store.get().pending.map((item) => ({
+        id: item.id,
+        sessionLabel: item.sessionLabel,
+        origin: item.origin,
+        tool: item.tool,
+        project: item.project,
+        createdAt: item.createdAt
+      }))
+    )
+  } catch {
+    // snapshot is best-effort
   }
 }
 
@@ -99,7 +208,29 @@ function broadcast(state: AppState): void {
   for (const window of [mainWindow, popupWindow]) {
     if (window && !window.isDestroyed()) window.webContents.send('state:update', state)
   }
+  updateBadge()
+  scheduleTrayRefresh()
 }
+
+function sendToMain(channel: string, ...args: unknown[]): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args)
+  }
+}
+
+function sendUiCommand(command: 'prefs' | 'about' | 'inbox'): void {
+  showMainWindow()
+  sendToMain('ui:command', command)
+}
+
+function focusSession(key: string): void {
+  showMainWindow()
+  sendToMain('focus:session', key)
+}
+
+// ---------------------------------------------------------------------------
+// windows
+// ---------------------------------------------------------------------------
 
 function preloadPath(): string {
   return join(__dirname, '../preload/index.js')
@@ -116,37 +247,47 @@ function windowsBuild(): number {
   return Number(release().split('.')[2] || 0)
 }
 
+function resolveTheme(): 'dark' | 'light' {
+  const theme = store?.get().prefs.theme || 'system'
+  if (theme === 'system') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+  return theme
+}
+
+function applyWindowTheme(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    if (process.platform === 'darwin') {
+      mainWindow.setVibrancy(currentTheme === 'dark' ? 'hud' : null)
+    }
+    mainWindow.setBackgroundColor(currentTheme === 'dark' ? '#0a0a0c' : '#f3f2ee')
+  } catch {
+    // material changes are best-effort
+  }
+}
+
 function createMainWindow(): BrowserWindow {
   const area = screen.getPrimaryDisplay().workArea
-  const width = Math.min(1120, area.width - 40)
-  const height = Math.min(800, area.height - 40)
+  const width = Math.min(1220, area.width - 40)
+  const height = Math.min(840, area.height - 40)
   const isMac = process.platform === 'darwin'
   const isWindows = process.platform === 'win32'
-  // Windows 11 22H2+ supports the system Acrylic material. Older builds fall
-  // back to an opaque charcoal window so the layout stays readable.
   const forceOpaque = process.env.CLAUDE_NOTIFY_OPAQUE === '1'
   const useAcrylic = isWindows && !forceOpaque && windowsBuild() >= 22621
-  const useGlass = !forceOpaque && (isMac || useAcrylic)
-  console.log('[window] material', {
-    platform: process.platform,
-    build: windowsBuild(),
-    acrylic: useAcrylic,
-    glass: useGlass
-  })
+  const useGlass = currentTheme === 'dark' && !forceOpaque && (isMac || useAcrylic)
   const window = new BrowserWindow({
     width,
     height,
     x: Math.round(area.x + (area.width - width) / 2),
     y: Math.round(area.y + (area.height - height) / 2),
-    minWidth: 1000,
-    minHeight: 700,
+    minWidth: 1040,
+    minHeight: 720,
     show: false,
     title: APP_NAME,
-    backgroundColor: useGlass ? '#00000000' : '#0a0a0c',
+    backgroundColor: useGlass ? '#00000000' : currentTheme === 'dark' ? '#0a0a0c' : '#f3f2ee',
     transparent: useGlass,
-    vibrancy: isMac ? 'hud' : undefined,
+    vibrancy: isMac && useGlass ? 'hud' : undefined,
     visualEffectState: 'active',
-    backgroundMaterial: useAcrylic ? 'acrylic' : undefined,
+    backgroundMaterial: useAcrylic && useGlass ? 'acrylic' : undefined,
     titleBarStyle: isMac ? 'hiddenInset' : isWindows ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 18, y: 21 } : undefined,
     titleBarOverlay: isWindows
@@ -166,8 +307,23 @@ function createMainWindow(): BrowserWindow {
   window.on('closed', () => {
     mainWindow = null
   })
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
   void loadRenderer(window, 'main')
   return window
+}
+
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow()
+    return
+  }
+  mainWindow.show()
+  mainWindow.focus()
+  if (process.platform === 'darwin') app.focus({ steal: true })
+  sendToMain('state:update', store.get())
 }
 
 let focusBoundsCache: { at: number; bounds: Electron.Rectangle | null } = {
@@ -226,13 +382,41 @@ function popupDisplay(): Electron.Display {
   return screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
 }
 
+function intersects(display: Electron.Display, x: number, y: number): boolean {
+  const area = display.workArea
+  return (
+    x + 160 > area.x &&
+    x < area.x + area.width - 40 &&
+    y + 120 > area.y &&
+    y < area.y + area.height - 40
+  )
+}
+
 function popupBounds(): { x: number; y: number } {
+  if (popupCustomPosition) {
+    const onScreen = screen
+      .getAllDisplays()
+      .some((display) => intersects(display, popupCustomPosition!.x, popupCustomPosition!.y))
+    if (onScreen) return popupCustomPosition
+  }
   const display = popupDisplay()
   const area = display.workArea
   return {
     x: Math.round(area.x + area.width - POPUP_WIDTH - 22),
     y: Math.round(area.y + area.height - POPUP_HEIGHT - 22)
   }
+}
+
+let popupResizeTimer: NodeJS.Timeout | null = null
+
+function savePopupPosition(): void {
+  if (!popupWindow || popupWindow.isDestroyed() || suppressMoveSave) return
+  const bounds = popupWindow.getBounds()
+  popupCustomPosition = { x: bounds.x, y: bounds.y }
+  if (popupResizeTimer) clearTimeout(popupResizeTimer)
+  popupResizeTimer = setTimeout(() => {
+    saveUiConfig({ popupPosition: popupCustomPosition })
+  }, 250)
 }
 
 function createPopupWindow(): BrowserWindow {
@@ -253,9 +437,6 @@ function createPopupWindow(): BrowserWindow {
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
-    // macOS: a plain window does not appear above fullscreen Spaces even with
-    // visibleOnFullScreen; NSPanel (type: 'panel') is required. Verified over
-    // a fullscreen Electron window, click-through and Esc both work.
     type: process.platform === 'darwin' ? 'panel' : undefined,
     webPreferences: {
       preload: preloadPath(),
@@ -271,9 +452,9 @@ function createPopupWindow(): BrowserWindow {
   popupReady = false
   const reveal = (): void => {
     popupReady = true
-    if (!headless && store.get().pending.length > 0 && !window.isVisible()) {
-      window.show()
-      window.focus()
+    if (headless) return
+    if (store.get().pending.length > 0 || store.get().expired.length > 0) {
+      window.showInactive()
     }
   }
   window.once('ready-to-show', reveal)
@@ -286,79 +467,177 @@ function createPopupWindow(): BrowserWindow {
     popupReady = false
   })
   window.on('blur', () => {
-    // A permission prompt must not disappear just because focus moved.
     if (store.get().pending.length > 0) window.setAlwaysOnTop(true, 'screen-saver')
   })
+  window.on('moved', savePopupPosition)
   void loadRenderer(window, 'popup')
   return window
 }
 
-function syncPopup(forceShow = true): void {
+function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   const state = store.get()
-  const hasPending = state.pending.length > 0 || state.expired !== null
+  const hasPending = state.pending.length > 0 || state.expired.length > 0
   if (!hasPending) {
     if (popupWindow && !popupWindow.isDestroyed()) popupWindow.hide()
     return
   }
-  if (!popupWindow || popupWindow.isDestroyed()) popupWindow = createPopupWindow()
+  if (!popupWindow || popupWindow.isDestroyed()) {
+    if (headless && !isCapture) return
+    popupWindow = createPopupWindow()
+  }
   const bounds = popupBounds()
-  popupWindow.setPosition(bounds.x, bounds.y)
-  if (!headless && forceShow) {
+  if (headless) return
+
+  suppressMoveSave = true
+  const current = popupWindow.getBounds()
+  if (current.x !== bounds.x || current.y !== bounds.y) {
+    popupWindow.setPosition(bounds.x, bounds.y)
+  }
+  setTimeout(() => {
+    suppressMoveSave = false
+  }, 120)
+
+  popupWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+  popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  const wasVisible = popupWindow.isVisible()
+  const muted = state.pending[0] ? sessions.isMuted(state.pending[0].sessionKey) : false
+  const policy = state.prefs.focusPolicy
+  let shouldFocus =
+    focusMode === 'manual'
+      ? true
+      : policy === 'always'
+        ? true
+        : policy === 'first'
+          ? !wasVisible
+          : false
+  if (muted && focusMode !== 'manual') shouldFocus = false
+
+  if (shouldFocus) {
     popupWindow.show()
-    popupWindow.setAlwaysOnTop(true, 'screen-saver')
-    popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-    popupWindow.moveTop()
     popupWindow.focus()
     if (process.platform === 'darwin') app.focus({ steal: true })
-    // Re-assert after the first frame: macOS sometimes parks a freshly
-    // created panel on the Space that was active at creation time.
+  } else {
+    popupWindow.showInactive()
+  }
+  popupWindow.moveTop()
+  if (shouldFocus) {
     setTimeout(() => {
       if (!popupWindow || popupWindow.isDestroyed()) return
-      if (store.get().pending.length === 0) return
-      popupWindow.show()
+      if (store.get().pending.length === 0 && store.get().expired.length === 0) return
       popupWindow.moveTop()
-      popupWindow.focus()
-      if (process.platform === 'darwin') app.focus({ steal: true })
     }, 160)
   }
 }
 
-function logDecision(item: ApprovalItem, decision: string): void {
-  const level: LogLevel =
-    decision === 'allow' ? 'allow' : decision === 'deny' ? 'deny' : 'timeout'
-  log(level, `${item.tool} · ${firstLine(item.detail) || item.message} · ${decisionLabel(decision)}`)
-}
+// ---------------------------------------------------------------------------
+// badge, tray, menu
+// ---------------------------------------------------------------------------
 
-function respond(itemId: string, decision: string, extra?: ApprovalExtra): void {
-  const item = store.get().pending.find((entry) => entry.id === itemId)
-  const handledByServer = server.respond(itemId, decision, extra)
-  if (handledByServer) return
-
-  const resolve = localApprovals.get(itemId)
-  if (resolve) {
-    localApprovals.delete(itemId)
-    resolve(decision)
+function updateBadge(): void {
+  if (!store) return
+  const count = store.get().pending.length
+  const waitingSessions = new Set(store.get().pending.map((item) => item.sessionKey)).size
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setBadge(count > 0 ? String(count) : '')
   }
-  if (item) {
-    store.removePending(itemId)
-    logDecision(item, decision)
-    if (decision === 'timeout' && store.get().pending.length === 0) store.setExpired(item)
+  if (tray) {
+    tray.setToolTip(
+      count > 0
+        ? `${APP_NAME} · ${count} 条待审批 · ${waitingSessions} 个会话`
+        : `${APP_NAME} · 暂无待审批`
+    )
+    if (process.platform === 'darwin') {
+      tray.setTitle(count > 0 ? String(count) : '')
+    }
   }
-  syncPopup()
+  if (count !== lastBadgeCount) {
+    lastBadgeCount = count
+    refreshTrayMenu(true)
+  }
 }
 
-function firstLine(value: string): string {
-  return value.split('\n').map((line) => line.trim()).find(Boolean) || ''
+function copyConnectCommand(): void {
+  const state = store.get()
+  const address = `http://${state.server.localIp}:${state.server.port}`
+  clipboard.writeText(
+    `curl -X POST ${address}/claude-notify \\\n` +
+      `  -H "Authorization: Bearer ${state.server.token}" \\\n` +
+      `  -H "Content-Type: application/json" \\\n` +
+      `  -d '{"message":"hello"}'`
+  )
+  store.setToast('接入命令已复制')
 }
 
-function decisionLabel(decision: string): string {
-  if (decision === 'allow') return '弹窗允许'
-  if (decision === 'deny') return '弹窗拒绝'
-  if (decision === 'timeout') return '超时交给终端'
-  if (decision === 'cancelled') return '终端已处理'
-  if (decision === 'suggestion') return '已应用权限建议'
-  if (decision === 'answer') return '已从桌面回答'
-  return '交给终端'
+function buildTrayMenu(): Menu {
+  const state = store.get()
+  const pending = state.pending.length
+  const waitingSessions = new Set(state.pending.map((item) => item.sessionKey)).size
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label:
+        pending > 0
+          ? `${pending} 条待审批 · ${waitingSessions} 个会话`
+          : '暂无待审批',
+      enabled: false
+    },
+    { label: '打开待审批', click: () => sendUiCommand('inbox') },
+    { label: '显示主窗口', click: () => showMainWindow() },
+    { type: 'separator' },
+    {
+      label: state.server.listening ? '暂停服务' : '启动服务',
+      click: () => void toggleServer()
+    },
+    {
+      label: '复制 Token',
+      click: () => {
+        clipboard.writeText(store.get().server.token)
+        store.setToast('Token 已复制')
+      }
+    },
+    { label: '复制接入命令', click: copyConnectCommand },
+    { type: 'separator' },
+    { label: '测试通知', click: () => void testNotify() },
+    { label: '测试审批弹窗', click: () => void testApproval() },
+    { label: '设置…', click: () => sendUiCommand('prefs') },
+    { label: '关于', click: () => showAbout() },
+    { type: 'separator' }
+  ]
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    template.push({
+      label: '开机自启',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item: Electron.MenuItem): void => {
+        app.setLoginItemSettings({ openAtLogin: Boolean(item.checked) })
+        store.setToast(item.checked ? '已开启开机自启' : '已关闭开机自启')
+      }
+    })
+  }
+  template.push({ type: 'separator' }, { label: '退出', role: 'quit' })
+  return Menu.buildFromTemplate(template)
+}
+
+function refreshTrayMenu(force = false): void {
+  if (!tray) return
+  const state = store.get()
+  const signature = [
+    state.pending.length,
+    state.server.listening,
+    state.prefs.mode,
+    state.deploy.localMode,
+    state.deploy.profiles.length
+  ].join('|')
+  if (!force && signature === lastTraySignature) return
+  lastTraySignature = signature
+  tray.setContextMenu(buildTrayMenu())
+}
+
+function scheduleTrayRefresh(): void {
+  if (trayRefreshTimer) return
+  trayRefreshTimer = setTimeout(() => {
+    trayRefreshTimer = null
+    refreshTrayMenu()
+  }, 200)
 }
 
 function createTray(): void {
@@ -371,88 +650,386 @@ function createTray(): void {
   tray = new Tray(icon)
   tray.setToolTip(APP_NAME)
   tray.on('click', () => showMainWindow())
-  const menu = Menu.buildFromTemplate([
-    { label: '显示主窗口', click: () => showMainWindow() },
-    { type: 'separator' },
-    {
-      label: '复制 Token',
-      click: () => {
-        clipboard.writeText(store.get().server.token)
-        store.setToast('Token 已复制')
-      }
-    },
-    {
-      label: '复制配置命令',
-      click: () => {
-        const state = store.get()
-        const address = `http://${state.server.localIp}:${state.server.port}`
-        clipboard.writeText(
-          `curl -X POST ${address}/claude-notify \\\n` +
-            `  -H "Authorization: Bearer ${state.server.token}" \\\n` +
-            `  -H "Content-Type: application/json" \\\n` +
-            `  -d '{"message":"hello"}'`
-        )
-        store.setToast('配置命令已复制')
-      }
-    },
-    {
-      label: '测试通知',
-      click: () => {
-        void testNotify()
-      }
-    },
-    {
-      label: '测试审批弹窗',
-      click: () => {
-        void testApproval()
-      }
-    },
-    ...(process.platform === 'darwin' || process.platform === 'win32'
-      ? [
-          { type: 'separator' as const },
-          {
-            label: '开机自启',
-            type: 'checkbox' as const,
-            checked: app.getLoginItemSettings().openAtLogin,
-            click: (item: Electron.MenuItem): void => {
-              app.setLoginItemSettings({ openAtLogin: Boolean(item.checked) })
-            }
-          }
-        ]
-      : []),
-    { type: 'separator' },
-    { label: '退出', role: 'quit' }
-  ])
-  tray.setContextMenu(menu)
+  refreshTrayMenu(true)
 }
 
-function showMainWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    mainWindow = createMainWindow()
+function showAbout(): void {
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    applicationVersion: app.getVersion(),
+    version: `Electron ${process.versions.electron} · Chromium ${process.versions.chrome}`,
+    copyright: 'Claude Code Notify'
+  })
+  if (process.platform === 'darwin') {
+    app.showAboutPanel()
     return
   }
-  mainWindow.show()
-  mainWindow.focus()
-  if (process.platform === 'darwin') app.focus({ steal: true })
+  void dialog.showMessageBox({
+    type: 'info',
+    title: `关于 ${APP_NAME}`,
+    message: `${APP_NAME} ${app.getVersion()}`,
+    detail:
+      '远程 Claude Code 审批中转。\n\n' +
+      `HTTP 端口：${store.get().server.port}\n` +
+      `钩子版本：${HOOK_VERSION}\n` +
+      `本机地址：${store.get().server.localIp}`,
+    buttons: ['好']
+  })
 }
 
-async function toggleServer(): Promise<void> {
-  if (server.isListening()) {
-    await server.stop()
-    store.setListening(false)
-    log('warn', 'HTTP 服务已停止，审批请求将回退到终端')
+function createAppMenu(): void {
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null)
     return
   }
-  try {
-    await server.start()
-    store.setListening(true)
-    log('info', `HTTP 服务已启动 · 0.0.0.0:${PORT}`)
-  } catch (error) {
-    const message = (error as NodeJS.ErrnoException).code === 'EADDRINUSE'
-      ? `端口 ${PORT} 已被占用`
-      : String(error)
-    log('error', `HTTP 服务启动失败：${message}`)
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        {
+          label: '设置…',
+          accelerator: 'CmdOrCtrl+,',
+          click: () => sendUiCommand('prefs')
+        },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+// ---------------------------------------------------------------------------
+// sessions & history
+// ---------------------------------------------------------------------------
+
+function refreshSessions(): void {
+  if (!store) return
+  const next = sessions.list(store.get().pending, store.get().history)
+  store.setSessions(next)
+}
+
+function computeModeMismatch(): boolean {
+  const state = store.get()
+  const localMismatch = Boolean(
+    state.deploy.localMode && state.deploy.localMode !== state.prefs.mode
+  )
+  const remoteMismatch = state.deploy.profiles.some(
+    (profile) => profile.status === 'deployed' && profile.mode !== state.prefs.mode
+  )
+  return localMismatch || remoteMismatch
+}
+
+function decisionLabel(decision: string): string {
+  if (decision === 'allow') return '允许'
+  if (decision === 'deny') return '拒绝'
+  if (decision === 'timeout') return '超时回退终端'
+  if (decision === 'cancelled') return '终端已处理'
+  if (decision === 'suggestion') return '应用权限建议'
+  if (decision === 'answer') return '桌面代答'
+  if (decision === 'ask') return '回退终端'
+  return decision
+}
+
+function decisionLevel(decision: string, source: DecisionSource): LogLevel {
+  if (source === 'rule') return 'rule'
+  if (decision === 'allow') return 'allow'
+  if (decision === 'deny') return 'deny'
+  if (decision === 'timeout') return 'timeout'
+  if (decision === 'cancelled') return 'cancelled'
+  if (decision === 'suggestion') return 'suggestion'
+  if (decision === 'answer') return 'answer'
+  if (decision === 'ask') return 'ask'
+  return 'info'
+}
+
+function finishItem(item: ApprovalItem, decision: string, source: DecisionSource): void {
+  if (settledIds.has(item.id)) return
+  settledIds.add(item.id)
+  if (settledIds.size > 1000) settledIds.clear()
+
+  const preview = (approvalCommand(item) || item.message).replace(/\s+/g, ' ').slice(0, 120)
+  const sourceSuffix =
+    source === 'rule'
+      ? ' · 规则命中'
+      : source === 'admission'
+        ? ' · 队列准入回退'
+        : source === 'server-stop'
+          ? ' · 服务停止'
+          : ''
+  log(
+    decisionLevel(decision, source),
+    `${item.sessionLabel} · ${item.origin} · ${item.tool} · ${preview} · ${decisionLabel(decision)}${sourceSuffix}`
+  )
+  if (decision === 'timeout') {
+    store.addExpired(item)
+    notifyTimeout(item)
+  } else if (decision === 'cancelled') {
+    log('cancelled', `${item.sessionLabel} · 终端侧已处理，弹窗同步关闭`)
   }
+  const record: ApprovalRecord = {
+    id: randomUUID(),
+    ts: Date.now(),
+    sessionKey: item.sessionKey,
+    sessionLabel: item.sessionLabel,
+    origin: item.origin,
+    project: item.project,
+    tool: item.tool,
+    message: item.message.slice(0, 300),
+    command: (approvalCommand(item) || '').slice(0, 500),
+    decision,
+    source,
+    latencyMs: Math.max(0, Date.now() - item.createdAt),
+    risk: item.risk.level
+  }
+  history.append(record)
+  store.addHistory(record)
+  persistPendingSnapshot()
+  refreshSessions()
+  updateBadge()
+  syncPopup('none')
+}
+
+function handleResolved(itemId: string, decision: string): void {
+  const item =
+    store.get().pending.find((entry) => entry.id === itemId) || itemCache.get(itemId) || null
+  const source =
+    decisionSources.get(itemId) ||
+    (decision === 'timeout'
+      ? 'timeout'
+      : decision === 'cancelled'
+        ? 'terminal'
+        : 'popup')
+  decisionSources.delete(itemId)
+  itemCache.delete(itemId)
+  if (!item) return
+  store.removePending(itemId)
+  finishItem(item, decision, source)
+}
+
+function respond(
+  itemId: string,
+  decision: string,
+  extra?: ApprovalExtra,
+  source: DecisionSource = 'popup'
+): void {
+  const item =
+    store.get().pending.find((entry) => entry.id === itemId) || itemCache.get(itemId) || null
+  if (item) {
+    itemCache.set(item.id, item)
+    decisionSources.set(item.id, source)
+  }
+  const handledByServer = server.respond(itemId, decision, extra)
+  if (handledByServer) return
+  const resolve = localApprovals.get(itemId)
+  if (resolve) {
+    localApprovals.delete(itemId)
+    resolve(decision)
+  }
+  if (item) {
+    store.removePending(itemId)
+    finishItem(item, decision, source)
+  }
+  syncPopup()
+}
+
+function acknowledgeExpired(id?: string): void {
+  store.clearExpired(id)
+  log('info', id ? '已确认一条回退提示' : '已确认全部回退提示')
+  updateBadge()
+  syncPopup()
+}
+
+// ---------------------------------------------------------------------------
+// notifications
+// ---------------------------------------------------------------------------
+
+function muted(key: string): boolean {
+  return sessions.isMuted(key)
+}
+
+function flushApprovalNotifications(): void {
+  notificationTimer = null
+  const items = notificationQueue
+  notificationQueue = []
+  if (items.length === 0 || !Notification.isSupported() || headless) return
+  const uniqueSessions = new Set(items.map((item) => item.sessionKey))
+  const title =
+    items.length === 1
+      ? `${items[0].sessionLabel} 等待审批`
+      : `${uniqueSessions.size} 个会话 · ${items.length} 条待审批`
+  const body = items
+    .slice(0, 4)
+    .map((item) => `${item.sessionLabel} · ${item.tool}：${(approvalCommand(item) || item.message).slice(0, 80)}`)
+    .join('\n')
+  const notification = new Notification({
+    title,
+    body,
+    silent: true,
+    urgency: items.some((item) => item.risk.level === 'high') ? 'critical' : 'normal'
+  })
+  notification.on('click', () => focusSession(items[0].sessionKey))
+  notification.show()
+}
+
+function notifyApproval(item: ApprovalItem): void {
+  if (muted(item.sessionKey)) {
+    log('info', `${item.sessionLabel} 已静音提醒；审批仍在队列中`)
+    return
+  }
+  if (!headless && store.get().prefs.sound && Date.now() - lastBeepAt > 1200) {
+    lastBeepAt = Date.now()
+    shell.beep()
+  }
+  if (!store.get().prefs.systemNotifications || headless) return
+  if (popupWindow?.isFocused()) return
+  notificationQueue.push(item)
+  if (notificationTimer) return
+  notificationTimer = setTimeout(flushApprovalNotifications, 1200)
+}
+
+function notifyTimeout(item: ApprovalItem): void {
+  if (headless || !store.get().prefs.systemNotifications) return
+  if (muted(item.sessionKey)) return
+  if (popupWindow?.isVisible()) return
+  if (!Notification.isSupported()) return
+  const notification = new Notification({
+    title: '审批已回退终端',
+    body: `${item.sessionLabel} · ${item.tool} 未在 ${item.timeoutSec}s 内处理`,
+    silent: true
+  })
+  notification.on('click', () => sendUiCommand('inbox'))
+  notification.show()
+}
+
+// ---------------------------------------------------------------------------
+// approval handling
+// ---------------------------------------------------------------------------
+
+function handleApproval(item: ApprovalItem): void {
+  itemCache.set(item.id, item)
+  sessions.observe(item)
+  refreshSessions()
+  const state = store.get()
+  const rule = matchingRule(state.rules, item)
+  if (rule && item.risk.level !== 'high') {
+    decisionSources.set(item.id, 'rule')
+    log('rule', `规则命中：${item.sessionLabel} · ${item.tool} · ${rule.pattern}`)
+    server.respond(item.id, 'allow')
+    return
+  }
+  if (rule && item.risk.level === 'high') {
+    log('warn', `高风险操作不自动应用规则：${item.sessionLabel} · ${item.tool}`)
+  }
+
+  if (state.prefs.admissionControl) {
+    const pending = state.pending
+    const estimate = pending.length * 18
+    const overloaded = pending.length >= state.prefs.maxPending
+    const willExpire = pending.length > 0 && item.timeoutSec <= estimate + 10
+    if (overloaded || willExpire) {
+      decisionSources.set(item.id, 'admission')
+      log(
+        'warn',
+        `队列无法及时处理（${pending.length} 条排队），直接回退终端 · ${item.sessionLabel} · ${item.tool}`
+      )
+      server.respond(item.id, 'ask')
+      return
+    }
+  }
+
+  store.addPending(item)
+  persistPendingSnapshot()
+  refreshSessions()
+  log(
+    'notify',
+    `收到审批 · ${item.sessionLabel} · ${item.origin} · ${item.tool} · ${riskLabel(item.risk.level)} · ${item.timeoutSec}s`
+  )
+  syncPopup('new')
+  updateBadge()
+  notifyApproval(item)
+}
+
+function scheduleLocalTimeout(id: string, seconds: number): void {
+  setTimeout(() => {
+    if (store.get().pending.some((entry) => entry.id === id)) respond(id, 'timeout', undefined, 'timeout')
+  }, seconds * 1000)
+}
+
+function localApprovalItem(mode: 'approval' | 'question'): ApprovalItem {
+  const id = `local_${randomUUID()}`
+  const question = {
+    question: '这次要部署到哪个环境？',
+    multiSelect: false,
+    options: [
+      { label: 'Staging', description: '预发布环境，可随时回滚' },
+      { label: 'Production', description: '生产环境，需要二次确认' }
+    ]
+  }
+  const toolInput =
+    mode === 'approval'
+      ? { command: 'git push origin feature/approval-popup --force-with-lease' }
+      : { questions: [question] }
+  const tool = mode === 'approval' ? 'Bash' : 'AskUserQuestion'
+  return {
+    id,
+    requestId: id,
+    sessionId: 'local-demo',
+    sessionKey: '本机:local-demo',
+    sessionLabel: 'claude-code-notify · 本机',
+    origin: '本机',
+    promptId: '',
+    toolUseId: '',
+    transcriptPath: '',
+    kind: mode === 'approval' ? 'permission' : 'question',
+    tool,
+    project: 'claude-code-notify',
+    cwd: '~/workspace/claude-code-notify',
+    tty: '',
+    terminal: '',
+    message: mode === 'approval' ? 'Claude 请求执行权限' : 'Claude 想问你一个问题',
+    detail: JSON.stringify(toolInput, null, 2),
+    toolInput,
+    options: [
+      { id: 'allow', label: '允许' },
+      { id: 'deny', label: '拒绝' }
+    ],
+    suggestions: [],
+    questions: mode === 'question' ? [question] : [],
+    risk: assessRisk(tool, toolInput),
+    correlation: 'exact',
+    createdAt: Date.now(),
+    timeoutAt: Date.now() + 50 * 1000,
+    timeoutSec: 50
+  }
+}
+
+async function testApproval(): Promise<void> {
+  const item = localApprovalItem('approval')
+  const result = new Promise<string>((resolve) => {
+    localApprovals.set(item.id, resolve)
+  })
+  itemCache.set(item.id, item)
+  sessions.observe(item)
+  store.addPending(item)
+  refreshSessions()
+  scheduleLocalTimeout(item.id, item.timeoutSec)
+  log('notify', `测试审批 · ${item.sessionLabel} · ${item.tool} · 等待桌面选择`)
+  syncPopup('new')
+  updateBadge()
+  notifyApproval(item)
+  await result
 }
 
 async function testNotify(): Promise<void> {
@@ -461,65 +1038,609 @@ async function testNotify(): Promise<void> {
   })
   log('notify', '测试通知 · 已将系统通知推送到通知中心')
   if (Notification.isSupported()) {
-    new Notification({
+    const notification = new Notification({
       title: 'Claude Code',
       body: 'Claude 正在等待你的输入',
-      silent: false
-    }).show()
+      silent: !store.get().prefs.sound
+    })
+    notification.on('click', () => showMainWindow())
+    notification.show()
   }
 }
 
-function scheduleLocalTimeout(id: string, seconds: number): void {
-  setTimeout(() => {
-    if (store.get().pending.some((entry) => entry.id === id)) respond(id, 'timeout')
-  }, seconds * 1000)
-}
+// ---------------------------------------------------------------------------
+// server lifecycle
+// ---------------------------------------------------------------------------
 
-async function testApproval(): Promise<void> {
-  const id = `local_${randomUUID()}`
-  const item: ApprovalItem = {
-    id,
-    requestId: id,
-    sessionId: '',
-    toolUseId: '',
-    transcriptPath: '',
-    kind: 'permission',
-    tool: 'Bash',
-    project: 'claude-code-notify',
-    cwd: '~/workspace/claude-code-notify',
-    message: 'Claude 请求执行权限',
-    detail: 'git push origin feature/approval-popup --force-with-lease',
-    options: [
-      { id: 'allow', label: '允许' },
-      { id: 'deny', label: '拒绝' }
-    ],
-    suggestions: [],
-    questions: [],
-    createdAt: Date.now(),
-    timeoutAt: Date.now() + 50 * 1000,
-    timeoutSec: 50
-  }
-  const result = new Promise<string>((resolve) => {
-    localApprovals.set(id, resolve)
+function createNotifyServer(): NotifyServer {
+  return new NotifyServer(serverPort, store.get().server.token, {
+    onApproval: handleApproval,
+    onResolved: handleResolved,
+    onNotify: (title, body, payload) => {
+      const sessionId = typeof payload.session_id === 'string' ? payload.session_id : ''
+      const cwd = typeof payload.cwd === 'string' ? payload.cwd : ''
+      const origin = typeof payload.origin === 'string' ? payload.origin : '本机'
+      const key = sessions.observeSimple({
+        sessionId,
+        origin,
+        cwd,
+        project: projectName(cwd),
+        tty: typeof payload.tty === 'string' ? payload.tty : '',
+        terminal: typeof payload.terminal === 'string' ? payload.terminal : ''
+      })
+      store.patch((draft) => {
+        draft.server.notified += 1
+      })
+      log('notify', `通知 · ${projectName(cwd) || '未知项目'}${key ? '' : ''} · ${title}`)
+      refreshSessions()
+      if (Notification.isSupported() && !headless) {
+        const notification = new Notification({
+          title,
+          body,
+          silent: !store.get().prefs.sound
+        })
+        notification.on('click', () => {
+          if (key) focusSession(key)
+          else showMainWindow()
+        })
+        notification.show()
+      }
+    },
+    onLog: (level, message) => log(level, message)
   })
-  store.addPending(item)
-  scheduleLocalTimeout(id, item.timeoutSec)
-  log('notify', `测试审批 · ${item.tool} · 等待桌面选择`)
-  syncPopup()
-  const decision = await result
-  void decision
 }
 
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+function bindHost(): string {
+  return serverBindMode === 'loopback' ? '127.0.0.1' : '0.0.0.0'
+}
+
+async function startServer(): Promise<boolean> {
+  try {
+    await server.start(bindHost())
+    store.setListening(true)
+    store.setServerError('')
+    store.setNetwork({
+      port: server.getPort(),
+      bindMode: serverBindMode,
+      conflict: false,
+      error: '',
+      addresses: listAddresses()
+    })
+    log(
+      'info',
+      `HTTP 服务已启动 · ${bindHost()}:${server.getPort()} · Bearer Token 校验开启`
+    )
+    return true
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    const message = code === 'EADDRINUSE' ? `端口 ${serverPort} 已被占用` : String(error)
+    store.setListening(false)
+    store.setServerError(message)
+    store.setNetwork({
+      port: serverPort,
+      bindMode: serverBindMode,
+      conflict: code === 'EADDRINUSE',
+      error: message,
+      addresses: listAddresses()
+    })
+    log('error', `HTTP 服务启动失败：${message}`)
+    return false
+  }
+}
+
+async function stopServer(reason: 'manual' | 'restart' = 'manual'): Promise<void> {
+  for (const item of store.get().pending) {
+    decisionSources.set(item.id, reason === 'manual' ? 'server-stop' : 'server-stop')
+  }
+  await server.stop()
+  store.setListening(false)
+  log('warn', 'HTTP 服务已停止，后续审批将回退到终端')
+  updateBadge()
+}
+
+async function toggleServer(): Promise<void> {
+  if (server.isListening()) {
+    const pending = store.get().pending.length
+    if (pending > 0) {
+      const confirmed = await confirm({
+        type: 'warning',
+        title: '停止服务',
+        message: `将停止 HTTP 服务，并取消 ${pending} 条待审批`,
+        detail: '所有等待中的会话会回退到终端继续；可以再次点击“启动服务”恢复。',
+        buttons: ['停止服务', '取消'],
+        defaultId: 1,
+        cancelId: 1
+      })
+      if (!confirmed) return
+    }
+    await stopServer('manual')
+    return
+  }
+  await startServer()
+}
+
+async function applyNetwork(port: number, bindMode: BindMode): Promise<{ ok: boolean; message: string }> {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    return { ok: false, message: '端口需在 1024–65535 之间' }
+  }
+  if (port === serverPort && bindMode === serverBindMode && server.isListening()) {
+    return { ok: true, message: '服务配置未变化' }
+  }
+  const pending = store.get().pending.length
+  if (pending > 0) {
+    const confirmed = await confirm({
+      type: 'warning',
+      title: '应用网络设置',
+      message: `修改端口/监听范围需要重启服务，将取消 ${pending} 条待审批`,
+      buttons: ['应用并重启', '取消'],
+      defaultId: 1,
+      cancelId: 1
+    })
+    if (!confirmed) return { ok: false, message: '已取消' }
+  }
+  await stopServer('restart')
+  serverPort = port
+  serverBindMode = bindMode
+  server = createNotifyServer()
+  const ok = await startServer()
+  if (!ok) {
+    return {
+      ok: false,
+      message: `端口 ${port} 启动失败，请换一个端口`
+    }
+  }
+  store.setPrefs({ port, bindMode })
+  saveUiConfig({ port, bindMode })
+  log('info', `监听配置已更新 · ${bindHost()}:${port}`)
+  if (store.get().deploy.localMode || profiles.some((profile) => profile.status === 'deployed')) {
+    store.setToast('端口已变更，需要重新接入或部署')
+  }
+  return { ok: true, message: `服务已监听 ${bindHost()}:${port}` }
+}
+
+// ---------------------------------------------------------------------------
+// local deployment
+// ---------------------------------------------------------------------------
+
+function localDeployOptions(mode: 'popup' | 'notify') {
+  return {
+    mode,
+    token: store.get().server.token,
+    port: store.get().server.port,
+    timeoutSec: store.get().prefs.timeoutSec,
+    writeEnv: false,
+    envShells: [] as string[],
+    origin: '本机'
+  }
+}
+
+function applyLocalDeploy(mode: 'popup' | 'notify'): { ok: boolean; message: string } {
+  try {
+    const result = deployLocal(localDeployOptions(mode), (level, message) => log(level, message))
+    store.setDeploy({
+      status: 'deployed',
+      host: '本机 · 127.0.0.1',
+      hooks: mode === 'popup' ? 2 : 1,
+      message: `本机已接入 · ${result.settingsPath}`,
+      localMode: mode,
+      localHooks: mode === 'popup' ? 2 : 1,
+      hookVersion: HOOK_VERSION,
+      hookStale: false,
+      modeMismatch: mode !== store.get().prefs.mode
+    })
+    store.setToast('本机接入完成')
+    refreshSessions()
+    return { ok: true, message: '本机接入完成' }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log('error', `本机接入失败：${message}`)
+    store.setToast('本机接入失败，见日志')
+    return { ok: false, message }
+  }
+}
+
+async function localDeployWithConfirm(mode: 'popup' | 'notify'): Promise<{ ok: boolean; canceled?: boolean; message: string }> {
+  const confirmed = await confirm({
+    type: 'question',
+    title: '接入本机',
+    message: '将钩子写入本机 Claude Code 配置？',
+    detail:
+      `目标：~/.claude/settings.json\n` +
+      `模式：${mode === 'popup' ? '置顶弹窗' : '系统通知'}\n` +
+      '会先备份现有 settings.json，并保留第三方 hooks。',
+    buttons: ['接入本机', '取消'],
+    defaultId: 0,
+    cancelId: 1
+  })
+  if (!confirmed) return { ok: false, canceled: true, message: '已取消' }
+  return applyLocalDeploy(mode)
+}
+
+async function localRemoveWithConfirm(): Promise<{ ok: boolean; message: string }> {
+  const state = detectLocalState()
+  if (!state.mode) return { ok: false, message: '本机尚未接入' }
+  const confirmed = await confirm({
+    type: 'warning',
+    title: '断开本机接入',
+    message: '将从本机 settings.json 移除 Claude Notify 钩子',
+    detail:
+      `模式：${state.mode === 'popup' ? '置顶弹窗' : '系统通知'}\n` +
+      `备份：${state.latestBackup || '无'}\n` +
+      '第三方 hooks 会保留；本机钩子脚本与配置会被删除。',
+    buttons: ['断开本机', '取消'],
+    defaultId: 1,
+    cancelId: 1
+  })
+  if (!confirmed) return { ok: false, message: '已取消' }
+  try {
+    const result = removeLocalDeploy(
+      { writeEnv: true, envShells: ['bash', 'zsh', 'csh', 'fish'] },
+      (level, message) => log(level, message)
+    )
+    store.setDeploy({
+      status: profiles.some((profile) => profile.status === 'deployed') ? 'deployed' : 'idle',
+      host: '',
+      hooks: 0,
+      message: `本机已断开 · 移除 ${result.removedHooks} 个钩子`,
+      localMode: null,
+      localHooks: 0,
+      hookStale: false,
+      modeMismatch: computeModeMismatch()
+    })
+    store.setToast('本机接入已断开')
+    return { ok: true, message: '本机接入已断开' }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log('error', `断开本机失败：${message}`)
+    return { ok: false, message }
+  }
+}
+
+async function localRestoreWithConfirm(): Promise<{ ok: boolean; message: string }> {
+  const state = detectLocalState()
+  if (!state.latestBackup) return { ok: false, message: '没有可恢复的备份' }
+  const confirmed = await confirm({
+    type: 'warning',
+    title: '恢复本机配置',
+    message: '恢复最近一次备份的 settings.json？',
+    detail: `备份：${state.latestBackup}\n当前文件会另存为 .pre-restore.时间戳。`,
+    buttons: ['恢复备份', '取消'],
+    defaultId: 1,
+    cancelId: 1
+  })
+  if (!confirmed) return { ok: false, message: '已取消' }
+  try {
+    const result = restoreLocalBackup(undefined, (level, message) => log(level, message))
+    const next = detectLocalState()
+    store.setDeploy({
+      localMode: next.mode,
+      localHooks: next.mode ? (next.mode === 'popup' ? 2 : 1) : 0,
+      hookVersion: next.version,
+      hookStale: next.stale,
+      message: `已恢复设置 · ${result.restoredFrom}`,
+      modeMismatch: computeModeMismatch()
+    })
+    store.setToast('已恢复本机配置')
+    return { ok: true, message: '已恢复本机配置' }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log('error', `恢复本机配置失败：${message}`)
+    return { ok: false, message }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// remote deployment
+// ---------------------------------------------------------------------------
+
+function knownFingerprintFor(host: string, port: number): string {
+  return knownHosts[`${host}:${port}`]?.fingerprint || ''
+}
+
+function rememberFingerprint(host: string, port: number, fingerprint: string): void {
+  if (!fingerprint) return
+  knownHosts[`${host}:${port}`] = { fingerprint, addedAt: Date.now() }
+  saveKnownHosts(knownHosts)
+}
+
+function toDeployConfig(form: DeployFormConfig, trustHost = false) {
+  return {
+    ...form,
+    host: form.host.trim(),
+    username: form.username.trim(),
+    sshPort: Number(form.sshPort),
+    callbackIp: form.callbackIp.trim(),
+    callbackPort: Number(form.callbackPort),
+    hookTimeout: Number(form.hookTimeout),
+    token: store.get().server.token,
+    approvalTimeout: Math.max(5, Number(form.hookTimeout) - 60),
+    origin: form.origin?.trim() || form.host,
+    envImport: Boolean(form.envImport),
+    envShells: form.envImport ? form.envShells : [],
+    hostFingerprint:
+      form.hostFingerprint || knownFingerprintFor(form.host.trim(), Number(form.sshPort)),
+    trustHost
+  }
+}
+
+function profileId(form: DeployFormConfig): string {
+  return `${form.username.trim()}@${form.host.trim()}:${Number(form.sshPort)}`
+}
+
+function upsertProfile(form: DeployFormConfig, result: DeployResult): DeployProfile {
+  const id = profileId(form)
+  const profile: DeployProfile = {
+    id,
+    name: form.origin?.trim() || form.host.trim(),
+    origin: form.origin?.trim() || form.host.trim(),
+    host: form.host.trim(),
+    sshPort: Number(form.sshPort),
+    username: form.username.trim(),
+    authMethod: form.authMethod,
+    mode: form.mode,
+    callbackIp: form.callbackIp.trim(),
+    callbackPort: Number(form.callbackPort),
+    hookTimeout: Number(form.hookTimeout),
+    toolMatcher: form.toolMatcher?.trim() || '',
+    lastDeployAt: Date.now(),
+    status: result.success ? 'deployed' : 'failed',
+    hooks: result.success ? (form.mode === 'popup' ? 2 : 1) : 0,
+    hookVersion: HOOK_VERSION
+  }
+  profiles = [profile, ...profiles.filter((entry) => entry.id !== id)].slice(0, 20)
+  saveDeployProfiles(profiles)
+  store.setDeploy({ profiles })
+  return profile
+}
+
+function saveDeployFormCache(form: DeployFormConfig): void {
+  const cache = {
+    mode: form.mode,
+    host: form.host,
+    sshPort: form.sshPort,
+    username: form.username,
+    authMethod: form.authMethod,
+    keyPath: form.keyPath,
+    callbackIp: form.callbackIp,
+    callbackPort: form.callbackPort,
+    hookTimeout: form.hookTimeout,
+    toolMatcher: form.toolMatcher,
+    origin: form.origin,
+    rememberPassword: form.rememberPassword,
+    envImport: form.envImport,
+    envShells: form.envShells
+  }
+  if (form.rememberPassword && form.password) {
+    const encrypted = encryptSecret(form.password)
+    if (encrypted) {
+      ;(cache as Record<string, unknown>).passwordEncrypted = encrypted
+    } else {
+      cache.rememberPassword = false
+    }
+  }
+  saveDeployCache(cache)
+}
+
+async function deployStart(
+  form: DeployFormConfig,
+  progress: (level: LogLevel, message: string) => void
+): Promise<DeployResult> {
+  saveDeployFormCache(form)
+  const config = toDeployConfig(form)
+  if (!config.hostFingerprint) {
+    const probe = await testSshConnection({
+      ...config,
+      hostFingerprint: undefined,
+      trustHost: false
+    })
+    if (probe.fingerprint) {
+      return {
+        success: false,
+        summary: `首次连接需要确认主机指纹 ${probe.fingerprint}；请先“测试连接”并确认。`,
+        connectivity: false
+      }
+    }
+    return {
+      success: false,
+      summary: probe.message || '无法建立 SSH 连接',
+      connectivity: false
+    }
+  }
+
+  store.setDeploy({
+    status: 'running',
+    host: profileId(form),
+    hooks: 0,
+    message: '正在连接…'
+  })
+  log('deploy', `开始部署 · ${profileId(form)} · ${form.mode === 'popup' ? '弹窗' : '通知'}`)
+  try {
+    const result = await deployToServer(config, progress)
+    const profile = upsertProfile(form, result)
+    rememberFingerprint(form.host.trim(), Number(form.sshPort), result.fingerprint)
+    const deployMismatch =
+      form.mode !== store.get().prefs.mode ||
+      profiles.some((entry) => entry.status === 'deployed' && entry.mode !== store.get().prefs.mode)
+    store.setDeploy({
+      status: 'deployed',
+      host: `${profile.username}@${profile.host}:${profile.sshPort}`,
+      hooks: profile.hooks,
+      message: result.connectivity
+        ? `上次成功 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+        : '已写入，连通性未通过',
+      modeMismatch: deployMismatch
+    })
+    if (result.connectivity) store.setToast('部署完成 · 钩子已生效')
+    else store.setToast('已写入，但回调连通性未通过')
+    return {
+      success: result.success,
+      summary: result.summary,
+      connectivity: result.connectivity
+    }
+  } catch (error) {
+    const message = humanizeSshError(error)
+    log('error', `部署失败：${message}`)
+    upsertProfile(form, { success: false, summary: message, connectivity: false })
+    store.setDeploy({ status: 'error', host: profileId(form), hooks: 0, message: '部署失败' })
+    return { success: false, summary: message, connectivity: false }
+  }
+}
+
+async function deployRemove(
+  form: DeployFormConfig,
+  progress: (level: LogLevel, message: string) => void
+): Promise<DeployResult> {
+  const config = toDeployConfig(form)
+  if (!config.hostFingerprint) {
+    const probe = await testSshConnection({ ...config, hostFingerprint: undefined })
+    if (probe.fingerprint) {
+      return {
+        success: false,
+        summary: `需要先确认主机指纹 ${probe.fingerprint}`,
+        connectivity: false
+      }
+    }
+    return { success: false, summary: probe.message, connectivity: false }
+  }
+  try {
+    const result = await removeDeployFromServer(config, progress)
+    const id = profileId(form)
+    profiles = profiles.map((profile) =>
+      profile.id === id ? { ...profile, status: 'unknown', hooks: 0 } : profile
+    )
+    saveDeployProfiles(profiles)
+    store.setDeploy({
+      profiles,
+      status: profiles.some((profile) => profile.status === 'deployed') ? 'deployed' : 'idle',
+      message: '服务器钩子已移除',
+      modeMismatch: computeModeMismatch()
+    })
+    store.setToast('服务器接入已断开')
+    return { success: true, summary: result.summary, connectivity: false }
+  } catch (error) {
+    const message = humanizeSshError(error)
+    log('error', `移除服务器钩子失败：${message}`)
+    return { success: false, summary: message, connectivity: false }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// misc actions
+// ---------------------------------------------------------------------------
+
+async function confirm(options: Electron.MessageBoxOptions): Promise<boolean> {
+  const result =
+    mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options)
+  return result.response === 0
+}
+
+async function regenerateToken(): Promise<void> {
+  const deployed =
+    Boolean(store.get().deploy.localMode) ||
+    profiles.some((profile) => profile.status === 'deployed')
+  const confirmed = await confirm({
+    type: 'warning',
+    title: '重新生成 Token',
+    message: '旧 Token 会立即失效',
+    detail: deployed
+      ? '本机接入和服务器钩子会继续使用旧 Token；生成后需要重新接入/部署。'
+      : '当前没有检测到已部署的钩子。',
+    buttons: ['重新生成', '取消'],
+    defaultId: 1,
+    cancelId: 1
+  })
+  if (!confirmed) return
+  const token = randomBytes(24).toString('hex')
+  store.setToken(token)
+  server.setToken(token)
+  try {
+    saveToken(token)
+  } catch (error) {
+    log('error', `Token 写入失败：${String(error)}`)
+  }
+  log('warn', 'Token 已重新生成，旧 Token 立即失效；请重新部署服务器钩子')
+  store.setToast('Token 已更新，需重新部署')
+  if (!deployed) return
+  const options: Electron.MessageBoxOptions = {
+    type: 'warning',
+    title: 'Token 已更新',
+    message: '旧的部署已失效，需要重新接入或部署',
+    detail: store.get().deploy.localMode
+      ? '本机接入会继续使用旧 Token；可以立即重新接入本机。远程服务器需要重新部署。'
+      : '服务器钩子会继续使用旧 Token；请重新执行“部署并验证”。',
+    buttons: store.get().deploy.localMode ? ['知道了', '立即重新接入本机'] : ['知道了'],
+    defaultId: 0,
+    cancelId: 0
+  }
+  const result =
+    mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options)
+  if (result.response === 1 && store.get().deploy.localMode) {
+    applyLocalDeploy(store.get().prefs.mode)
+  }
+}
+
+function applyPrefs(incoming: Partial<Prefs>): void {
+  const patch: Partial<Prefs> = { ...incoming }
+  if (typeof patch.timeoutSec === 'number') {
+    patch.timeoutSec = Math.max(15, Math.min(600, Math.round(patch.timeoutSec)))
+  }
+  if (typeof patch.maxPending === 'number') {
+    patch.maxPending = Math.max(1, Math.min(30, Math.round(patch.maxPending)))
+  }
+  delete patch.port
+  delete patch.bindMode
+  store.setPrefs(patch)
+  saveUiConfig(patch as Partial<UiConfig>)
+  if (patch.theme) {
+    const previous = currentTheme
+    nativeTheme.themeSource = patch.theme
+    currentTheme = resolveTheme()
+    if (previous !== currentTheme) applyWindowTheme()
+  }
+  if (patch.position) {
+    popupCustomPosition = null
+    saveUiConfig({ popupPosition: null })
+    syncPopup('none')
+  }
+  if (patch.localIp) {
+    store.setNetwork({
+      addresses: listAddresses().map((address) => ({
+        ...address,
+        preferred: address.address === patch.localIp
+      }))
+    })
+  }
+  if (patch.mode) {
+    store.setDeploy({ modeMismatch: computeModeMismatch() })
+  }
+  log('info', `偏好已更新 · 位置=${store.get().prefs.position} · 模式=${store.get().prefs.mode}`)
+}
+
+// ---------------------------------------------------------------------------
+// IPC
+// ---------------------------------------------------------------------------
 
 function registerIpc(): void {
   ipcMain.handle('state:get', () => store.get())
   ipcMain.handle(
     'approval:respond',
     (_event, id: string, decision: string, extra?: ApprovalExtra) => {
-      respond(id, decision, extra)
+      respond(id, decision, extra, 'popup')
     }
   )
+  ipcMain.handle('approval:acknowledge', (_event, id?: string) => {
+    acknowledgeExpired(id)
+  })
+  ipcMain.handle('approval:select', (_event, id: string) => {
+    if (popupWindow && !popupWindow.isDestroyed()) {
+      syncPopup('manual')
+      popupWindow.webContents.send('popup:select', id)
+    }
+  })
   ipcMain.handle('server:toggle', () => toggleServer())
   ipcMain.handle('test:notify', () => testNotify())
   ipcMain.handle('test:approval', () => testApproval())
@@ -527,38 +1648,10 @@ function registerIpc(): void {
     clipboard.writeText(text)
     store.setToast('已复制到剪贴板')
   })
-  ipcMain.handle('token:regenerate', () => {
-    const token = randomBytes(24).toString('hex')
-    store.setToken(token)
-    server.setToken(token)
-    try {
-      saveToken(token)
-    } catch (error) {
-      log('error', `Token 写入失败：${String(error)}`)
-    }
-    log('warn', 'Token 已重新生成，旧 Token 立即失效；请重新部署服务器钩子')
-    store.setToast('Token 已更新，需重新部署')
-    const hasRemote = Object.keys(loadDeployCache()).length > 0
-    const local = detectLocalDeploy()
-    if (hasRemote || local) {
-      setTimeout(() => {
-        const options = {
-          type: 'warning' as const,
-          buttons: ['知道了'],
-          title: 'Token 已更新',
-          message: '旧的部署已失效，需要重新部署',
-          detail: local
-            ? '本机接入和服务器钩子都会继续使用旧 Token；请重新执行「接入本机」或「部署并验证」。'
-            : '服务器钩子会继续使用旧 Token；请重新执行「部署并验证」。'
-        }
-        if (mainWindow) void dialog.showMessageBox(mainWindow, options)
-        else void dialog.showMessageBox(options)
-      }, 200)
-    }
-  })
-  ipcMain.handle('deploy:cache', (): DeployCacheView => {
+  ipcMain.handle('token:regenerate', () => regenerateToken())
+  ipcMain.handle('deploy:cache', (): DeployFormConfig & { password?: string } => {
     const cache = loadDeployCache()
-    return { ...cache, password: decryptSecret(cache.passwordEncrypted) }
+    return { ...(cache as DeployFormConfig), password: decryptSecret(cache.passwordEncrypted) }
   })
   ipcMain.handle('security:info', (): SecurityInfo => ({
     available: secureStorageAvailable(),
@@ -568,179 +1661,201 @@ function registerIpc(): void {
     const result = await dialog.showOpenDialog({
       title: '选择私钥文件',
       properties: ['openFile'],
-      defaultPath: join(homedir(), '.ssh')
+      defaultPath: join(app.getPath('home'), '.ssh')
     })
     return result.canceled ? null : result.filePaths[0]
   })
-  ipcMain.handle('deploy:test', async (_event, form: DeployFormConfig) => {
-    const config = {
-      ...form,
-      token: store.get().server.token,
-      approvalTimeout: Math.max(5, form.hookTimeout - 60)
+  ipcMain.handle('deploy:test', async (_event, form: DeployFormConfig): Promise<DeployTestResult> => {
+    const config = toDeployConfig(form)
+    const result = await testSshConnection(config)
+    if (result.ok && result.fingerprint) {
+      rememberFingerprint(form.host.trim(), Number(form.sshPort), result.fingerprint)
     }
-    return testSshConnection(config)
-  })
-  ipcMain.handle('local:status', () => {
-    const mode = detectLocalDeploy()
-    return { deployed: Boolean(mode), mode }
-  })
-  ipcMain.handle('local:deploy', async (_event, mode: 'popup' | 'notify') => {
-    const options = {
-      type: 'question' as const,
-      buttons: ['接入本机', '取消'],
-      defaultId: 0,
-      cancelId: 1,
-      title: '接入本机',
-      message: '将钩子写入本机 Claude Code 配置？',
-      detail:
-        `目标：~/.claude/settings.json\n` +
-        `模式：${mode === 'popup' ? '置顶弹窗' : '系统通知'}\n` +
-        '会先备份现有 settings.json，并保留第三方 hooks。'
-    }
-    const confirmation = mainWindow
-      ? await dialog.showMessageBox(mainWindow, options)
-      : await dialog.showMessageBox(options)
-    if (confirmation.response !== 0) {
-      return { ok: false, canceled: true, message: '已取消' }
-    }
-    try {
-      const result = deployLocal(
-        {
-          mode,
-          token: store.get().server.token,
-          port: PORT,
-          timeoutSec: 240,
-          writeEnv: false,
-          envShells: []
-        },
-        (level, message) => log(level, message)
-      )
-      store.patch((draft) => {
-        draft.deploy = {
-          status: 'deployed',
-          host: '本机 · 127.0.0.1',
-          hooks: mode === 'popup' ? 2 : 1,
-          message: `本机已接入 · ${result.settingsPath}`
-        }
-      })
-      store.setToast('本机接入完成')
-      return { ok: true, message: '本机接入完成' }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      log('error', `本机接入失败：${message}`)
-      store.setToast('本机接入失败，见日志')
-      return { ok: false, message }
-    }
+    return result
   })
   ipcMain.handle('deploy:start', async (event, form: DeployFormConfig): Promise<DeployResult> => {
-    const token = store.get().server.token
-    const config = {
-      ...form,
-      token,
-      approvalTimeout: Math.max(5, form.hookTimeout - 60)
-    }
-
-    const cache = {
-      mode: form.mode,
-      host: form.host,
-      sshPort: form.sshPort,
-      username: form.username,
-      authMethod: form.authMethod,
-      keyPath: form.keyPath,
-      callbackIp: form.callbackIp,
-      callbackPort: form.callbackPort,
-      hookTimeout: form.hookTimeout,
-      toolMatcher: form.toolMatcher,
-      rememberPassword: form.rememberPassword,
-      envImport: form.envImport,
-      envShells: form.envShells
-    }
-    if (form.rememberPassword && form.password) {
-      const encrypted = encryptSecret(form.password)
-      if (encrypted) {
-        ;(cache as Record<string, unknown>).passwordEncrypted = encrypted
-      } else {
-        cache.rememberPassword = false
-      }
-    }
-    saveDeployCache(cache)
-
-    store.patch((draft) => {
-      draft.deploy = {
-        status: 'running',
-        host: `${form.username}@${form.host}:${form.sshPort}`,
-        hooks: 0,
-        message: '正在连接…'
-      }
-    })
-    log('deploy', `开始部署 · ${form.username}@${form.host}:${form.sshPort}`)
-
     const progress = (level: LogLevel, message: string): void => {
       log(level, message)
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('deploy:progress', { level, message })
-      }
+      if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', { level, message })
     }
-
+    return deployStart(form, progress)
+  })
+  ipcMain.handle('deploy:remove', async (event, form: DeployFormConfig): Promise<DeployResult> => {
+    const progress = (level: LogLevel, message: string): void => {
+      log(level, message)
+      if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', { level, message })
+    }
+    return deployRemove(form, progress)
+  })
+  ipcMain.handle('deploy:restore', async (event, form: DeployFormConfig): Promise<DeployResult> => {
+    const config = toDeployConfig(form)
+    if (!config.hostFingerprint) {
+      return { success: false, summary: '请先测试连接并确认主机指纹', connectivity: false }
+    }
+    const progress = (level: LogLevel, message: string): void => {
+      log(level, message)
+      if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', { level, message })
+    }
     try {
-      const result = await deployToServer(config, progress)
-      store.patch((draft) => {
-        draft.deploy = {
-          status: 'deployed',
-          host: `${form.username}@${form.host}:${form.sshPort}`,
-          hooks: form.mode === 'popup' ? 2 : 1,
-          message: result.connectivity
-            ? `上次成功 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
-            : '已写入，连通性未通过'
-        }
-      })
-      if (result.connectivity) store.setToast('部署完成 · 钩子已生效')
-      return result
+      const result = await restoreDeployBackup(config, progress)
+      store.setToast(result.summary)
+      return { success: result.success, summary: result.summary, connectivity: false }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      log('error', `部署失败：${message}`)
-      store.patch((draft) => {
-        draft.deploy = {
-          status: 'error',
-          host: `${form.username}@${form.host}:${form.sshPort}`,
-          hooks: 0,
-          message: '部署失败'
-        }
-      })
+      const message = humanizeSshError(error)
+      log('error', `恢复服务器备份失败：${message}`)
       return { success: false, summary: message, connectivity: false }
     }
   })
-  ipcMain.handle('pref:position', (_event, position: PopupPosition) => {
-    store.setPosition(position)
-    saveUiConfig({ ...loadUiConfig(), position })
-    if (store.get().pending.length > 0) syncPopup(false)
+  ipcMain.handle('local:status', () => {
+    const state = detectLocalState()
+    return { deployed: Boolean(state.mode), mode: state.mode, stale: state.stale, version: state.version }
   })
-  ipcMain.handle('pref:mode', (_event, mode: 'popup' | 'notify') => {
-    store.setMode(mode)
-    saveUiConfig({ ...loadUiConfig(), mode })
+  ipcMain.handle('local:deploy', (_event, mode: 'popup' | 'notify') => localDeployWithConfirm(mode))
+  ipcMain.handle('local:remove', () => localRemoveWithConfirm())
+  ipcMain.handle('local:restore', () => localRestoreWithConfirm())
+  ipcMain.handle('prefs:set', (_event, patch: Partial<Prefs>) => applyPrefs(patch))
+  ipcMain.handle('network:apply', (_event, config: { port: number; bindMode: BindMode }) =>
+    applyNetwork(config.port, config.bindMode)
+  )
+  ipcMain.handle('session:rename', (_event, key: string, label: string) => {
+    sessions.rename(key, label)
+    refreshSessions()
+    log('info', `会话已重命名：${label}`)
+  })
+  ipcMain.handle('session:mute', (_event, key: string, minutes: number) => {
+    sessions.mute(key, minutes)
+    refreshSessions()
+    const session = store.get().sessions.find((entry) => entry.key === key)
+    store.setToast(
+      minutes > 0
+        ? `${session?.label || '会话'} 已静音 ${minutes} 分钟`
+        : `${session?.label || '会话'} 已取消静音`
+    )
+  })
+  ipcMain.handle(
+    'rules:add',
+    (
+      _event,
+      input: {
+        scope: RuleScope
+        tool: string
+        pattern: string
+        project?: string
+        sessionKey?: string
+      }
+    ) => {
+      const message = validateRule(input)
+      if (message) throw new Error(message)
+      const rule: ApprovalRule = {
+        id: randomUUID(),
+        scope: input.scope,
+        tool: input.tool.trim(),
+        pattern: input.pattern.trim() || '*',
+        project: input.project,
+        sessionKey: input.sessionKey,
+        createdAt: Date.now(),
+        enabled: true
+      }
+      rules = [rule, ...rules].slice(0, 100)
+      saveRules(rules)
+      store.setRules(rules)
+      log('rule', `新增自动规则：${rule.tool} · ${rule.pattern}`)
+      store.setToast('规则已保存')
+    }
+  )
+  ipcMain.handle('rules:remove', (_event, id: string) => {
+    rules = rules.filter((rule) => rule.id !== id)
+    saveRules(rules)
+    store.setRules(rules)
+    store.setToast('规则已删除')
+  })
+  ipcMain.handle('rules:toggle', (_event, id: string) => {
+    rules = rules.map((rule) =>
+      rule.id === id ? { ...rule, enabled: !rule.enabled } : rule
+    )
+    saveRules(rules)
+    store.setRules(rules)
+  })
+  ipcMain.handle('history:export', async () => {
+    const result = await dialog.showSaveDialog({
+      title: '导出审批历史',
+      defaultPath: join(app.getPath('downloads'), 'claude-notify-history.csv'),
+      filters: [{ name: 'CSV', extensions: ['csv'] }]
+    })
+    if (result.canceled || !result.filePath) return { ok: false, message: '已取消' }
+    try {
+      const count = history.exportCsv(result.filePath)
+      return { ok: true, message: `已导出 ${count} 条记录` }
+    } catch (error) {
+      return { ok: false, message: `导出失败：${(error as Error).message}` }
+    }
+  })
+  ipcMain.handle('history:clear', async () => {
+    const confirmed = await confirm({
+      type: 'warning',
+      title: '清空审批历史',
+      message: '将删除本机保存的审批历史记录',
+      detail: '历史文件会被清空，此操作不可撤销。',
+      buttons: ['清空', '取消'],
+      defaultId: 1,
+      cancelId: 1
+    })
+    if (!confirmed) return
+    history.clear()
+    store.setHistory([])
+    refreshSessions()
+    store.setToast('审批历史已清空')
+  })
+  ipcMain.handle('logs:clear', () => {
+    store.clearLogs()
   })
   ipcMain.handle('logs:open', () => {
     if (logFile && existsSync(logFile)) shell.showItemInFolder(logFile)
+  })
+  ipcMain.handle('logs:open-file', async () => {
+    if (logFile && existsSync(logFile)) await shell.openPath(logFile)
+  })
+  ipcMain.handle('external:open', async (_event, url: string) => {
+    if (/^https?:\/\//i.test(url)) await shell.openExternal(url)
+  })
+  ipcMain.handle('update:check', async () => {
+    store.setUpdate({ status: 'checking' })
+    const result = await checkLatestVersion(app.getVersion())
+    store.setUpdate(result)
+    if (result.status === 'available') store.setToast(result.message || '发现新版本')
+    return result
+  })
+  ipcMain.handle('onboarding:finish', () => {
+    store.setOnboarding(true)
+    saveUiConfig({ onboardingDone: true })
   })
   ipcMain.handle('window:hide', () => mainWindow?.hide())
   ipcMain.on('popup:resize', (_event, height: number) => {
     if (!popupWindow || popupWindow.isDestroyed()) return
     const bounds = popupWindow.getBounds()
-    const nextHeight = Math.max(260, Math.min(640, Math.round(height)))
+    const nextHeight = Math.max(300, Math.min(820, Math.round(height)))
     if (Math.abs(nextHeight - bounds.height) < 2) return
+    suppressMoveSave = true
     popupWindow.setBounds({
       x: bounds.x,
       y: bounds.y + bounds.height - nextHeight,
       width: POPUP_WIDTH,
       height: nextHeight
     })
+    setTimeout(() => {
+      suppressMoveSave = false
+    }, 120)
   })
   ipcMain.handle('app:quit', () => app.quit())
 }
 
+// ---------------------------------------------------------------------------
+// self test / capture
+// ---------------------------------------------------------------------------
+
 async function runSelfTest(): Promise<void> {
   const results: Record<string, unknown> = {}
-  const base = `http://127.0.0.1:${PORT}`
+  const base = `http://127.0.0.1:${server.getPort()}`
   const token = store.get().server.token
   let latestApproval: ApprovalItem | null = null
 
@@ -763,6 +1878,8 @@ async function runSelfTest(): Promise<void> {
     },
     body: JSON.stringify({
       request_id: 'req_selftest',
+      session_id: 'selftest-session',
+      origin: 'self-test',
       tool_name: 'Bash',
       cwd: '/Users/hfwang/workspace/claude-code-notify',
       message: 'Claude 请求执行权限',
@@ -782,8 +1899,10 @@ async function runSelfTest(): Promise<void> {
   await delay(600)
   latestApproval = store.get().pending[0] || null
   results.approvalShown = Boolean(latestApproval)
-  results.pendingLabel = latestApproval ? `${latestApproval.tool}:${latestApproval.project}` : null
-  if (latestApproval) respond(latestApproval.id, 'allow')
+  results.pendingLabel = latestApproval
+    ? `${latestApproval.sessionLabel}:${latestApproval.tool}`
+    : null
+  if (latestApproval) respond(latestApproval.id, 'allow', undefined, 'popup')
   const approval = await approvalPromise
   results.approval = approval
   results.approvalHeldOpen = approval.elapsed >= 500
@@ -812,9 +1931,10 @@ async function runSelfTest(): Promise<void> {
     return { status: response.status, body: (await response.json()) as Record<string, unknown> }
   }
 
-  // question / answer
   const questionPayload = {
     request_id: 'req_question',
+    session_id: 'selftest-question',
+    origin: 'self-test',
     kind: 'question',
     tool_name: 'AskUserQuestion',
     cwd: '/Users/hfwang/workspace/claude-code-notify',
@@ -834,25 +1954,36 @@ async function runSelfTest(): Promise<void> {
         options: [{ label: 'Staging' }, { label: 'Production' }]
       }
     ],
-    options: [{ id: 'allow', label: '允许' }, { id: 'deny', label: '拒绝' }]
+    options: [
+      { id: 'allow', label: '允许' },
+      { id: 'deny', label: '拒绝' }
+    ]
   }
   const questionPromise = postApproval(questionPayload)
   const questionItem = await waitPending('req_question')
   results.questionShown = Boolean(questionItem)
   if (questionItem) {
-    respond(questionItem.id, 'answer', {
-      answers: [{ question: '选择部署环境', selected: ['Staging'], text: '' }]
-    })
+    respond(
+      questionItem.id,
+      'answer',
+      { answers: [{ question: '选择部署环境', selected: ['Staging'], text: '' }] },
+      'popup'
+    )
   }
   results.question = await questionPromise
 
-  // suggestion / index
   const suggestionPromise = postApproval({
     request_id: 'req_suggestion',
+    session_id: 'selftest-suggestion',
+    origin: 'self-test',
     tool_name: 'Bash',
     cwd: '/Users/hfwang/workspace/claude-code-notify',
     message: 'Claude 请求执行权限',
-    options: [{ id: 'allow', label: '允许' }, { id: 'deny', label: '拒绝' }],
+    tool_input: { command: 'git status' },
+    options: [
+      { id: 'allow', label: '允许' },
+      { id: 'deny', label: '拒绝' }
+    ],
     suggestions: [
       {
         type: 'addRules',
@@ -864,12 +1995,13 @@ async function runSelfTest(): Promise<void> {
   })
   const suggestionItem = await waitPending('req_suggestion')
   results.suggestionShown = Boolean(suggestionItem)
-  if (suggestionItem) respond(suggestionItem.id, 'suggestion', { index: 0 })
+  if (suggestionItem) respond(suggestionItem.id, 'suggestion', { index: 0 }, 'popup')
   results.suggestion = await suggestionPromise
 
-  // terminal resolved
   const resolvedPromise = postApproval({
     request_id: 'req_resolved',
+    session_id: 'selftest-terminal',
+    origin: 'self-test',
     tool_name: 'Edit',
     cwd: '/Users/hfwang/workspace/claude-code-notify',
     message: 'Claude 请求修改文件',
@@ -900,6 +2032,8 @@ async function runSelfTest(): Promise<void> {
   const timeoutStarted = Date.now()
   const timeoutResponse = await postApproval({
     request_id: 'req_timeout',
+    session_id: 'selftest-timeout',
+    origin: 'self-test',
     tool_name: 'Bash',
     cwd: '/Users/hfwang/workspace/claude-code-notify',
     message: 'timeout test',
@@ -911,8 +2045,12 @@ async function runSelfTest(): Promise<void> {
     body: timeoutResponse.body,
     elapsed: Date.now() - timeoutStarted
   }
-  results.expiredShown = Boolean(store.get().expired)
-  store.setExpired(null)
+  results.expiredShown = store.get().expired.length > 0
+  acknowledgeExpired()
+  results.expiredAcknowledged = store.get().expired.length === 0
+  results.historyCount = store.get().history.length
+  results.sessionCount = store.get().sessions.length
+  store.clearExpired()
 
   console.log(`SELFTEST_RESULT ${JSON.stringify(results)}`)
   await server.stop()
@@ -931,12 +2069,15 @@ async function runDeploySelfTest(): Promise<void> {
     keyPath: authMethod === 'key' ? process.env.DEPLOY_KEY_PATH : undefined,
     keyPassphrase: authMethod === 'key' ? process.env.DEPLOY_KEY_PASSPHRASE : undefined,
     callbackIp: process.env.DEPLOY_CALLBACK_IP || 'host.docker.internal',
-    callbackPort: Number(process.env.DEPLOY_CALLBACK_PORT || PORT),
+    callbackPort: Number(process.env.DEPLOY_CALLBACK_PORT || serverPort),
     hookTimeout: 300,
     approvalTimeout: 240,
     toolMatcher: '',
-    envShells: ['bash'],
-    token: store.get().server.token
+    origin: process.env.DEPLOY_ORIGIN || 'self-test',
+    envImport: false,
+    envShells: [] as string[],
+    token: store.get().server.token,
+    trustHost: true
   }
   try {
     const result = await deployToServer(config, (level, message) => {
@@ -958,101 +2099,257 @@ async function runDeploySelfTest(): Promise<void> {
   }
 }
 
-function handleApproval(item: ApprovalItem): void {
-  store.setExpired(null)
-  store.addPending(item)
-  syncPopup()
+function captureItem(
+  overrides: Partial<ApprovalItem> & Pick<ApprovalItem, 'id' | 'sessionId' | 'sessionKey' | 'sessionLabel'>
+): ApprovalItem {
+  const toolInput = overrides.toolInput || { command: 'git status' }
+  const tool = overrides.tool || 'Bash'
+  return {
+    requestId: `req_${overrides.id}`,
+    origin: '本机',
+    promptId: '',
+    toolUseId: '',
+    transcriptPath: '',
+    kind: 'permission',
+    tool,
+    project: 'claude-code-notify',
+    cwd: '~/workspace/claude-code-notify',
+    tty: '',
+    terminal: '',
+    message: 'Claude 请求执行权限',
+    detail: JSON.stringify(toolInput, null, 2),
+    toolInput,
+    options: [
+      { id: 'allow', label: '允许' },
+      { id: 'deny', label: '拒绝' }
+    ],
+    suggestions: [],
+    questions: [],
+    risk: assessRisk(tool, toolInput),
+    correlation: 'exact',
+    createdAt: Date.now(),
+    timeoutAt: Date.now() + 39000,
+    timeoutSec: 60,
+    ...overrides
+  }
 }
 
 async function runCapture(): Promise<void> {
+  const now = Date.now()
   store.patch((draft) => {
     draft.server.notified = 18
+    draft.onboarding = { done: false }
+    draft.prefs.position = 'cursor'
     draft.deploy = {
+      ...draft.deploy,
       status: 'deployed',
       host: 'deploy@192.168.1.20:22',
       hooks: 2,
-      message: '上次成功 16:15'
+      message: '上次成功 16:15',
+      localMode: 'popup',
+      localHooks: 2,
+      hookVersion: '2',
+      hookStale: false,
+      profiles: [
+        {
+          id: 'deploy@192.168.1.20:22',
+          name: 'prod-api',
+          origin: 'prod-api',
+          host: '192.168.1.20',
+          sshPort: 22,
+          username: 'deploy',
+          authMethod: 'key',
+          mode: 'popup',
+          callbackIp: '192.168.1.77',
+          callbackPort: 18765,
+          hookTimeout: 300,
+          toolMatcher: '',
+          lastDeployAt: now - 3600_000,
+          status: 'deployed',
+          hooks: 2,
+          hookVersion: '2'
+        }
+      ]
     }
   })
   log('deploy', 'settings.json 合并完成 · 旧 PreToolUse 残留已清理')
-  log('notify', '通知 · 会话 7f3a · 等待输入 · 已推送系统通知')
-  log('allow', 'Bash · git status · 弹窗允许 · 2.6s')
+  log('notify', '通知 · 前端 · 等待输入 · 已推送系统通知')
+  log('allow', '后端 · prod-api · Bash · git status · 允许 · 2.6s')
 
-  await delay(1200)
+  await delay(1000)
   if (!mainWindow) throw new Error('main window missing')
+  const onboardingImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'onboarding.png'), onboardingImage.toPNG())
+
+  store.setOnboarding(true)
+  await delay(500)
   const mainImage = await mainWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'main.png'), mainImage.toPNG())
 
-  const id = 'apr_capture'
-  store.addPending({
-    id,
-    requestId: 'req_capture',
-    sessionId: '',
-    toolUseId: '',
-    transcriptPath: '',
-    kind: 'permission',
-    cwd: '',
-    tool: 'Bash',
-    project: 'claude-code-notify',
-    message: 'Claude 请求执行权限',
+  const clickButton = async (label: string): Promise<boolean> =>
+    Boolean(
+      await mainWindow!.webContents.executeJavaScript(
+        `Array.from(document.querySelectorAll('button')).find((button) => button.textContent.trim() === ${JSON.stringify(label)})?.click() ?? true`
+      )
+    )
+
+  await clickButton('设置')
+  await delay(600)
+  const settingsImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'settings.png'), settingsImage.toPNG())
+  await mainWindow!.webContents.executeJavaScript(
+    `document.querySelector('.settings-modal .modal-close')?.click()`
+  )
+  await delay(300)
+
+  await clickButton('部署并验证')
+  await delay(600)
+  const deployImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'deploy-dialog.png'), deployImage.toPNG())
+  await mainWindow!.webContents.executeJavaScript(
+    `document.querySelector('.deploy-modal .modal-close')?.click()`
+  )
+  await delay(300)
+
+  const clickTab = async (label: string): Promise<void> => {
+    await mainWindow!.webContents.executeJavaScript(
+      `Array.from(document.querySelectorAll('.tabs button')).find((button) => button.textContent.includes(${JSON.stringify(label)}))?.click()`
+    )
+  }
+  store.setHistory([
+    {
+      id: 'demo-history-1',
+      ts: now - 62000,
+      sessionKey: '本机:session-front',
+      sessionLabel: '前端 · iTerm2 · ttys004',
+      origin: '本机',
+      project: 'claude-code-notify',
+      tool: 'Bash',
+      message: 'Claude 请求执行权限',
+      command: 'git status',
+      decision: 'allow',
+      source: 'popup',
+      latencyMs: 2600,
+      risk: 'low'
+    },
+    {
+      id: 'demo-history-2',
+      ts: now - 121000,
+      sessionKey: 'prod-api:session-infra',
+      sessionLabel: 'infra · prod-api',
+      origin: 'prod-api',
+      project: 'infra',
+      tool: 'Bash',
+      message: 'Claude 请求执行权限',
+      command: 'terraform destroy -auto-approve',
+      decision: 'deny',
+      source: 'popup',
+      latencyMs: 5400,
+      risk: 'high'
+    },
+    {
+      id: 'demo-history-3',
+      ts: now - 186000,
+      sessionKey: '本机:session-api',
+      sessionLabel: '后端 · VS Code · ttys007',
+      origin: '本机',
+      project: 'backend-api',
+      tool: 'Edit',
+      message: 'Claude 请求修改文件',
+      command: 'src/server/config.ts',
+      decision: 'timeout',
+      source: 'timeout',
+      latencyMs: 60000,
+      risk: 'medium'
+    }
+  ])
+  await clickTab('历史')
+  await delay(500)
+  const historyImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'history.png'), historyImage.toPNG())
+  await clickTab('日志')
+  await delay(500)
+  const logsImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'logs.png'), logsImage.toPNG())
+
+  const first = captureItem({
+    id: 'apr_capture',
+    sessionId: 'session-front',
+    sessionKey: '本机:session-front',
+    sessionLabel: '前端 · iTerm2 · ttys004',
+    tty: 'ttys004',
+    terminal: 'iTerm2',
+    toolInput: { command: 'git push origin feature/approval-popup --force-with-lease' },
     detail: 'git push origin feature/approval-popup --force-with-lease',
-    options: [
-      { id: 'allow', label: '允许' },
-      { id: 'deny', label: '拒绝' }
-    ],
-    suggestions: [],
-    questions: [],
-    createdAt: Date.now(),
-    timeoutAt: Date.now() + 39000,
+    message: 'Claude 请求执行权限',
+    createdAt: now - 5000,
+    timeoutAt: now + 47000,
     timeoutSec: 60
   })
-  store.addPending({
+  const second = captureItem({
     id: 'apr_capture_2',
-    requestId: 'req_capture_2',
-    sessionId: '',
-    toolUseId: '',
-    transcriptPath: '',
-    kind: 'permission',
-    cwd: '',
+    sessionId: 'session-api',
+    sessionKey: '本机:session-api',
+    sessionLabel: '后端 · VS Code · ttys007',
+    tty: 'ttys007',
+    terminal: 'VS Code',
+    project: 'backend-api',
+    cwd: '~/workspace/backend-api',
     tool: 'Edit',
-    project: 'claude-code-notify',
-    message: 'Claude 请求修改文件',
-    detail: 'src/renderer/src/App.tsx',
-    options: [
-      { id: 'allow', label: '允许' },
-      { id: 'deny', label: '拒绝' }
-    ],
-    suggestions: [],
-    questions: [],
-    createdAt: Date.now(),
-    timeoutAt: Date.now() + 240000,
-    timeoutSec: 240
+    toolInput: {
+      file_path: 'src/server/config.ts',
+      old_string: 'const port = 8080',
+      new_string: 'const port = 9090'
+    },
+    risk: assessRisk('Edit', { file_path: 'src/server/config.ts' }),
+    createdAt: now - 1000,
+    timeoutAt: now + 90000,
+    timeoutSec: 120
   })
-  syncPopup(false)
+  const third = captureItem({
+    id: 'apr_capture_3',
+    sessionId: 'session-infra',
+    sessionKey: 'prod-api:session-infra',
+    sessionLabel: 'infra · prod-api',
+    origin: 'prod-api',
+    project: 'infra',
+    toolInput: { command: 'terraform destroy -auto-approve' },
+    createdAt: now,
+    timeoutAt: now + 30000,
+    timeoutSec: 60
+  })
+  sessions.observe(first)
+  sessions.observe(second)
+  sessions.observe(third)
+  store.addPending(first)
+  store.addPending(second)
+  store.addPending(third)
+  refreshSessions()
+  syncPopup('none')
+  await clickTab('待审批')
+  await delay(700)
+  const inboxImage = await mainWindow!.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'inbox.png'), inboxImage.toPNG())
   if (!popupWindow) throw new Error('popup window missing')
   await delay(1200)
   const popupImage = await popupWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'popup.png'), popupImage.toPNG())
 
-  store.removePending('apr_capture')
-  store.removePending('apr_capture_2')
-  store.addPending({
+  store.setPending([third])
+  syncPopup('none')
+  await delay(1000)
+  const riskImage = await popupWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-risk.png'), riskImage.toPNG())
+
+  const question = captureItem({
     id: 'apr_question',
-    requestId: 'req_question',
-    sessionId: '',
-    toolUseId: '',
-    transcriptPath: '',
+    sessionId: 'session-front',
+    sessionKey: '本机:session-front',
+    sessionLabel: '前端 · iTerm2 · ttys004',
     kind: 'question',
     tool: 'AskUserQuestion',
-    project: 'claude-code-notify',
-    cwd: '',
     message: 'Claude 想问你一个问题',
-    detail: '选择部署环境',
-    options: [
-      { id: 'allow', label: '允许' },
-      { id: 'deny', label: '拒绝' }
-    ],
-    suggestions: [],
+    toolInput: { questions: [] },
     questions: [
       {
         question: '这次要部署到哪个环境？',
@@ -1063,36 +2360,18 @@ async function runCapture(): Promise<void> {
         ]
       }
     ],
-    createdAt: Date.now(),
-    timeoutAt: Date.now() + 39000,
-    timeoutSec: 60
+    timeoutAt: Date.now() + 39000
   })
-  syncPopup(false)
-  await delay(1200)
+  store.setPending([question])
+  syncPopup('none')
+  await delay(1000)
   const questionImage = await popupWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-question.png'), questionImage.toPNG())
 
-  store.removePending('apr_question')
-  store.setExpired({
-    id: 'apr_expired',
-    requestId: 'req_expired',
-    sessionId: '',
-    toolUseId: '',
-    transcriptPath: '',
-    kind: 'permission',
-    tool: 'Bash',
-    project: 'claude-code-notify',
-    cwd: '',
-    message: 'Claude 请求执行权限',
-    detail: 'git push origin feature/approval-popup --force-with-lease',
-    options: [],
-    suggestions: [],
-    questions: [],
-    createdAt: Date.now() - 60000,
-    timeoutAt: Date.now() - 1000,
-    timeoutSec: 60
-  })
-  syncPopup(false)
+  store.setPending([])
+  store.addExpired(first)
+  store.addExpired(second)
+  syncPopup('none')
   await delay(1000)
   const expiredImage = await popupWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-expired.png'), expiredImage.toPNG())
@@ -1101,66 +2380,162 @@ async function runCapture(): Promise<void> {
   app.exit(0)
 }
 
-app.whenReady().then(async () => {
-  const token = loadOrCreateToken()
+// ---------------------------------------------------------------------------
+// bootstrap
+// ---------------------------------------------------------------------------
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function bootstrap(): Promise<void> {
+  ensureDataDir()
   logFile = join(appDataDir(), 'claude-notify.log')
+  pendingSnapshotPath = join(appDataDir(), 'pending.json')
+  rotateLogIfNeeded()
+  try {
+    if (existsSync(logFile)) chmodSync(logFile, 0o600)
+  } catch {
+    // best-effort
+  }
+
+  const token = loadOrCreateToken()
+  const addresses = listAddresses()
+  const ui = loadUiConfig()
+  const envPort = Number(process.env.CLAUDE_NOTIFY_PORT)
+  const initialPort =
+    Number.isInteger(envPort) && envPort >= 1024 && envPort <= 65535
+      ? envPort
+      : typeof ui.port === 'number'
+        ? ui.port
+        : DEFAULT_PORT
+  const initialBind: BindMode = ui.bindMode === 'loopback' ? 'loopback' : 'all'
+  serverPort = initialPort
+  serverBindMode = initialBind
+  const preferred =
+    typeof ui.localIp === 'string' &&
+    ui.localIp &&
+    addresses.some((entry) => entry.address === ui.localIp)
+      ? ui.localIp
+      : addresses.find((entry) => entry.preferred)?.address || preferredAddress()
+  const prefs: Partial<Prefs> = {
+    position: ui.position || ui.popup_screen || 'cursor',
+    mode: ui.mode === 'notify' ? 'notify' : 'popup',
+    timeoutSec: typeof ui.timeoutSec === 'number' ? ui.timeoutSec : 240,
+    fontStyle: ui.fontStyle || 'system',
+    fontSize: ui.fontSize || 'normal',
+    theme:
+      process.env.CLAUDE_NOTIFY_THEME === 'light'
+        ? 'light'
+        : process.env.CLAUDE_NOTIFY_THEME === 'dark'
+          ? 'dark'
+          : ui.theme || 'system',
+    focusPolicy: ui.focusPolicy || 'first',
+    sound: ui.sound !== false,
+    systemNotifications: ui.systemNotifications !== false,
+    enterConfirmsHighRisk: ui.enterConfirmsHighRisk !== false,
+    bindMode: initialBind,
+    port: initialPort,
+    localIp: preferred,
+    admissionControl: ui.admissionControl !== false,
+    maxPending: typeof ui.maxPending === 'number' ? ui.maxPending : 8
+  }
+  popupCustomPosition = ui.popupPosition || null
+  nativeTheme.themeSource = prefs.theme || 'system'
+  currentTheme =
+    prefs.theme === 'system'
+      ? nativeTheme.shouldUseDarkColors
+        ? 'dark'
+        : 'light'
+      : prefs.theme === 'light'
+        ? 'light'
+        : 'dark'
+
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    applicationVersion: app.getVersion(),
+    version: `Electron ${process.versions.electron} · Chromium ${process.versions.chrome}`,
+    copyright: 'Claude Code Notify'
+  })
+
   store = new Store({
     token,
-    port: PORT,
-    localIp: localIp(),
+    port: initialPort,
+    localIp: preferred,
+    localIps: addresses.map((entry) => entry.address),
     version: app.getVersion(),
-    platform: process.platform
+    platform: process.platform,
+    bindMode: initialBind,
+    prefs
   })
+  sessions = new SessionRegistry()
+  history = new HistoryStore()
+  history.load()
+  rules = loadRules()
+  profiles = loadDeployProfiles()
+  knownHosts = loadKnownHosts()
+  store.setRules(rules)
+  store.setHistory(history.get())
+  store.setOnboarding(Boolean(ui.onboardingDone))
+
+  const pendingSnapshot = readJsonFile<Array<{ id: string; sessionLabel?: string }>>(
+    pendingSnapshotPath,
+    []
+  )
+  if (Array.isArray(pendingSnapshot) && pendingSnapshot.length > 0) {
+    log(
+      'warn',
+      `上次退出时还有 ${pendingSnapshot.length} 条审批未处理；这些请求已随进程结束回退终端`
+    )
+    store.setToast(`上次退出时有 ${pendingSnapshot.length} 条审批未处理`)
+    writeJsonFile(pendingSnapshotPath, [])
+  }
+
+  const local = detectLocalState()
+  const localMode = local.mode
+  const deployedProfiles = profiles
+    .filter((profile) => profile.status === 'deployed')
+    .sort((left, right) => (right.lastDeployAt || 0) - (left.lastDeployAt || 0))
+  const latestProfile = deployedProfiles[0] || null
+  const initialDeploy = {
+    status: (localMode ? 'deployed' : latestProfile ? 'deployed' : 'idle') as
+      | 'deployed'
+      | 'idle',
+    host: localMode
+      ? '本机 · 127.0.0.1'
+      : latestProfile
+        ? `${latestProfile.username}@${latestProfile.host}:${latestProfile.sshPort}`
+        : '',
+    hooks: localMode ? (localMode === 'popup' ? 2 : 1) : latestProfile?.hooks || 0,
+    message: localMode
+      ? `本机已接入 · ${localMode === 'popup' ? '置顶弹窗' : '系统通知'}`
+      : latestProfile
+        ? `上次成功 ${new Date(latestProfile.lastDeployAt || Date.now()).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
+        : '尚未部署',
+    localMode,
+    localHooks: localMode ? (localMode === 'popup' ? 2 : 1) : 0,
+    hookVersion: local.version,
+    hookStale: local.stale,
+    modeMismatch: false,
+    profiles
+  }
+  initialDeploy.modeMismatch =
+    Boolean(localMode && localMode !== prefs.mode) ||
+    deployedProfiles.some((profile) => profile.mode !== prefs.mode)
+  store.setDeploy(initialDeploy)
+  store.setNetwork({
+    addresses,
+    port: initialPort,
+    bindMode: initialBind,
+    conflict: false,
+    error: ''
+  })
+  refreshSessions()
   store.subscribe(broadcast)
-  if (!app.isPackaged && process.platform === 'darwin' && app.dock) {
-    app.dock.setIcon(join(app.getAppPath(), 'build', 'icon.png'))
-  }
-  const uiConfig = loadUiConfig()
-  const savedPosition = uiConfig.position || uiConfig.popup_screen
-  if (savedPosition) store.setPosition(savedPosition)
-  if (uiConfig.mode) store.setMode(uiConfig.mode)
-  if (typeof uiConfig.timeoutSec === 'number') {
-    store.patch((draft) => {
-      draft.prefs.timeoutSec = uiConfig.timeoutSec as number
-    })
-  }
 
-  server = new NotifyServer(PORT, token, {
-    onApproval: (item) => {
-      log('notify', `收到审批 · ${item.tool} · ${item.project}`)
-      handleApproval(item)
-    },
-    onResolved: (itemId, decision) => {
-      const item = store.get().pending.find((entry) => entry.id === itemId)
-      if (item) {
-        store.removePending(itemId)
-        logDecision(item, decision)
-        if (decision === 'timeout' && store.get().pending.length === 0) store.setExpired(item)
-        syncPopup()
-      }
-    },
-    onNotify: (title, body) => {
-      store.patch((draft) => {
-        draft.server.notified += 1
-      })
-      log('notify', `通知 · ${title}`)
-      if (Notification.isSupported()) {
-        new Notification({ title, body, silent: false }).show()
-      }
-    },
-    onLog: (level, message) => log(level, message)
-  })
-
-  try {
-    await server.start()
-    store.setListening(true)
-    log('info', `HTTP 服务已启动 · 0.0.0.0:${PORT} · Bearer Token 校验开启`)
-  } catch (error) {
-    log('error', `HTTP 服务启动失败：${String(error)}`)
-  }
-
+  server = createNotifyServer()
+  await startServer()
   registerIpc()
   mainWindow = createMainWindow()
+  createAppMenu()
 
   if (isSelfTest) {
     await runSelfTest()
@@ -1176,36 +2551,42 @@ app.whenReady().then(async () => {
   }
 
   createTray()
+  updateBadge()
+  nativeTheme.on('updated', () => {
+    if (store.get().prefs.theme !== 'system' || headless) return
+    const next = nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+    if (next === currentTheme) return
+    currentTheme = next
+    applyWindowTheme()
+  })
   if (!headless) showMainWindow()
+
+  if (local.stale) {
+    log('warn', `本机钩子版本 ${local.version || '未知'} 低于当前版本 ${HOOK_VERSION}，建议重新接入`)
+  }
+  if (store.get().deploy.modeMismatch) {
+    log('warn', '当前模式与已部署钩子不一致，需要重新接入或部署')
+  }
 
   if (isDemo) {
     await delay(900)
-    const item: ApprovalItem = {
+    const item = captureItem({
       id: 'local_demo',
-      requestId: 'req_demo',
-      sessionId: '',
-      toolUseId: '',
-      transcriptPath: '',
-      kind: 'permission',
-      cwd: '',
-      tool: 'Bash',
-      project: 'claude-code-notify',
-      message: 'Claude 请求执行权限',
-      detail: 'git push origin feature/approval-popup --force-with-lease',
-      options: [
-        { id: 'allow', label: '允许' },
-        { id: 'deny', label: '拒绝' }
-      ],
-      suggestions: [],
-      questions: [],
-      createdAt: Date.now(),
+      sessionId: 'session-demo',
+      sessionKey: '本机:session-demo',
+      sessionLabel: 'claude-code-notify · iTerm2',
+      toolInput: { command: 'git push origin feature/approval-popup --force-with-lease' },
       timeoutAt: Date.now() + 39000,
       timeoutSec: 60
-    }
+    })
     localApprovals.set(item.id, () => undefined)
+    itemCache.set(item.id, item)
+    sessions.observe(item)
     store.addPending(item)
+    refreshSessions()
     scheduleLocalTimeout(item.id, item.timeoutSec)
-    syncPopup()
+    syncPopup('new')
+    updateBadge()
     if (process.argv.includes('--fullscreen-demo')) {
       setTimeout(() => mainWindow?.setFullScreen(true), 1800)
     }
@@ -1215,6 +2596,12 @@ app.whenReady().then(async () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow()
     showMainWindow()
   })
+}
+
+app.whenReady().then(bootstrap).catch((error) => {
+  console.error('[bootstrap]', error)
+  dialog.showErrorBox('Claude Notify 启动失败', String(error))
+  app.exit(1)
 })
 
 app.on('window-all-closed', () => {

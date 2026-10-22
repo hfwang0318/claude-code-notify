@@ -1,4 +1,10 @@
 import { describeSuggestion, unknownSuggestionTypes } from '../shared/suggestions'
+import {
+  assessRisk,
+  deriveSessionLabel,
+  projectName,
+  sessionKeyOf
+} from '../shared/session'
 import type {
   ApprovalItem,
   ApprovalKind,
@@ -12,6 +18,7 @@ const MAX_OPTIONS = 6
 const MAX_SUGGESTIONS = 6
 const MAX_QUESTIONS = 4
 const MAX_QUESTION_OPTIONS = 8
+const MAX_DETAIL = 6000
 
 export function safeString(value: unknown, fallback = ''): string {
   if (typeof value === 'string') return value
@@ -25,12 +32,7 @@ export function asRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
-export function projectName(cwd: string): string {
-  const normalized = cwd.replace(/[\\/]+$/, '')
-  if (!normalized) return '未知项目'
-  const parts = normalized.split(/[\\/]/)
-  return parts[parts.length - 1] || normalized
-}
+export { projectName } from '../shared/session'
 
 export function normalizeOptions(raw: unknown): ApprovalOption[] {
   const options: ApprovalOption[] = []
@@ -111,28 +113,53 @@ export function approvalFromPayload(
 ): ApprovalItem {
   const tool = safeString(payload.tool_name) || '未知工具'
   const cwd = safeString(payload.cwd)
+  const project = projectName(cwd)
+  const sessionId = safeString(payload.session_id)
+  const origin = safeString(payload.origin) || '本机'
+  const tty = safeString(payload.tty)
+  const terminal = safeString(payload.terminal)
+  const promptId = safeString(payload.prompt_id)
+  const toolUseId = safeString(payload.tool_use_id)
+  const toolInput = asRecord(payload.tool_input)
   const message =
     safeString(payload.message) || `工具 ${tool} 请求权限审批`
-  const detail =
-    payload.tool_input == null
-      ? ''
-      : safeString(payload.tool_input, JSON.stringify(payload.tool_input)).slice(0, 2000)
+  const detail = JSON.stringify(toolInput, null, 2).slice(0, MAX_DETAIL)
+  const sessionKey = sessionKeyOf({ origin, sessionId, cwd, tty })
+  const sessionLabel =
+    safeString(payload.session_label) ||
+    deriveSessionLabel({ project, terminal, tty, sessionId })
+  const correlationField = safeString(payload.correlation)
+  const correlation: ApprovalItem['correlation'] =
+    correlationField === 'unmatched'
+      ? 'unmatched'
+      : correlationField === 'exact' || toolUseId
+        ? 'exact'
+        : 'unknown'
 
   return {
     id,
-    requestId: safeString(payload.request_id) || safeString(payload.tool_use_id) || id,
-    sessionId: safeString(payload.session_id),
-    toolUseId: safeString(payload.tool_use_id),
+    requestId: safeString(payload.request_id) || toolUseId || id,
+    sessionId,
+    sessionKey,
+    sessionLabel,
+    origin,
+    promptId,
+    toolUseId,
     transcriptPath: safeString(payload.transcript_path),
     kind: normalizeKind(payload.kind),
     tool,
-    project: projectName(cwd),
+    project,
     cwd,
+    tty,
+    terminal,
     message,
     detail,
+    toolInput,
     options: normalizeOptions(payload.options),
     suggestions: normalizeSuggestions(payload.suggestions),
     questions: normalizeQuestions(payload.questions, message),
+    risk: assessRisk(tool, toolInput),
+    correlation,
     createdAt: now,
     timeoutAt: now + timeoutSec * 1000,
     timeoutSec
@@ -144,15 +171,17 @@ export function buildNotification(
 ): { title: string; body: string } {
   const cwd = safeString(payload.cwd)
   const sessionId = safeString(payload.session_id)
+  const origin = safeString(payload.origin) || '本机'
+  const project = projectName(cwd)
   const message = safeString(payload.message)
   const notificationType = safeString(payload.notification_type)
-  const title = `Claude Code 等待权限审批 · ${projectName(cwd)}`
+  const title = `Claude Code 等待审批 · ${project}`
   const bodyParts = [
-    message || 'Claude Code 正在等待权限审批。'
+    message || 'Claude Code 正在等待权限审批。',
+    `来源：${origin}${cwd ? ` · ${cwd}` : ''}`
   ]
-  if (cwd) bodyParts.push(`目录：${cwd}`)
   if (notificationType) bodyParts.push(`类型：${notificationType}`)
-  if (sessionId) bodyParts.push(`会话：${sessionId.slice(0, 16)}`)
+  if (sessionId) bodyParts.push(`会话：${sessionId.slice(0, 8)}`)
   return { title, body: bodyParts.join('\n') }
 }
 

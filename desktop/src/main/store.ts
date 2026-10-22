@@ -1,23 +1,54 @@
 import { randomUUID } from 'node:crypto'
 import type {
   AppState,
+  AppUpdateInfo,
   ApprovalItem,
+  ApprovalRecord,
+  ApprovalRule,
+  BindMode,
+  DeployState,
   LogEntry,
   LogLevel,
-  PopupPosition
+  NetworkInfo,
+  PopupPosition,
+  Prefs,
+  SessionInfo
 } from '../shared/types'
+
+export interface StoreOptions {
+  token: string
+  port: number
+  localIp: string
+  localIps: string[]
+  version: string
+  platform: string
+  bindMode: BindMode
+  prefs?: Partial<Prefs>
+}
 
 export class Store {
   private state: AppState
   private listeners = new Set<(state: AppState) => void>()
 
-  constructor(options: {
-    token: string
-    port: number
-    localIp: string
-    version: string
-    platform: string
-  }) {
+  constructor(options: StoreOptions) {
+    const prefs: Prefs = {
+      position: 'cursor',
+      mode: 'popup',
+      timeoutSec: 240,
+      theme: 'system',
+      fontStyle: 'system',
+      fontSize: 'normal',
+      focusPolicy: 'first',
+      sound: true,
+      systemNotifications: true,
+      enterConfirmsHighRisk: true,
+      bindMode: options.bindMode,
+      port: options.port,
+      localIp: options.localIp,
+      admissionControl: true,
+      maxPending: 8,
+      ...options.prefs
+    }
     this.state = {
       app: { version: options.version, platform: options.platform },
       server: {
@@ -25,22 +56,43 @@ export class Store {
         port: options.port,
         token: options.token,
         localIp: options.localIp,
-        notified: 0
+        localIps: options.localIps,
+        notified: 0,
+        bindMode: options.bindMode,
+        error: ''
       },
+      sessions: [],
       pending: [],
-      expired: null,
+      expired: [],
+      history: [],
+      rules: [],
       logs: [],
       deploy: {
         status: 'idle',
         host: '',
         hooks: 0,
-        message: '尚未部署'
+        message: '尚未部署',
+        localMode: null,
+        localHooks: 0,
+        hookVersion: '',
+        hookStale: false,
+        modeMismatch: false,
+        profiles: []
       },
-      prefs: {
-        position: 'cursor',
-        mode: 'popup',
-        timeoutSec: 240
+      network: {
+        addresses: options.localIps.map((address) => ({
+          address,
+          iface: '',
+          preferred: address === options.localIp
+        })),
+        port: options.port,
+        bindMode: options.bindMode,
+        conflict: false,
+        error: ''
       },
+      prefs,
+      onboarding: { done: false },
+      update: { status: 'idle' },
       toast: null
     }
   }
@@ -70,7 +122,12 @@ export class Store {
       level,
       text
     }
-    this.state.logs = [...this.state.logs, entry].slice(-500)
+    this.state.logs = [...this.state.logs, entry].slice(-800)
+    this.emit()
+  }
+
+  clearLogs(): void {
+    this.state.logs = []
     this.emit()
   }
 
@@ -84,13 +141,64 @@ export class Store {
     this.emit()
   }
 
-  setExpired(item: ApprovalItem | null): void {
-    this.state.expired = item
+  setPending(items: ApprovalItem[]): void {
+    this.state.pending = items
+    this.emit()
+  }
+
+  addExpired(item: ApprovalItem): void {
+    this.state.expired = [item, ...this.state.expired.filter((entry) => entry.id !== item.id)].slice(
+      0,
+      20
+    )
+    this.emit()
+  }
+
+  clearExpired(id?: string): void {
+    this.state.expired = id
+      ? this.state.expired.filter((entry) => entry.id !== id)
+      : []
+    this.emit()
+  }
+
+  setSessions(sessions: SessionInfo[]): void {
+    this.state.sessions = sessions
+    this.emit()
+  }
+
+  setHistory(history: ApprovalRecord[]): void {
+    this.state.history = history
+    this.emit()
+  }
+
+  addHistory(record: ApprovalRecord): void {
+    this.state.history = [record, ...this.state.history].slice(0, 300)
+    this.emit()
+  }
+
+  setRules(rules: ApprovalRule[]): void {
+    this.state.rules = rules
     this.emit()
   }
 
   setListening(listening: boolean): void {
     this.state.server.listening = listening
+    this.emit()
+  }
+
+  setServerError(error: string): void {
+    this.state.server.error = error
+    this.state.network.error = error
+    this.emit()
+  }
+
+  setNetwork(network: Partial<NetworkInfo>): void {
+    this.state.network = { ...this.state.network, ...network }
+    this.state.server.port = this.state.network.port
+    this.state.prefs.port = this.state.network.port
+    this.state.server.bindMode = this.state.network.bindMode
+    this.state.prefs.bindMode = this.state.network.bindMode
+    this.state.server.error = this.state.network.error
     this.emit()
   }
 
@@ -109,6 +217,29 @@ export class Store {
     this.emit()
   }
 
+  setPrefs(patch: Partial<Prefs>): void {
+    this.state.prefs = { ...this.state.prefs, ...patch }
+    if (typeof patch.port === 'number') this.state.server.port = patch.port
+    if (patch.bindMode) this.state.server.bindMode = patch.bindMode
+    if (patch.localIp) this.state.server.localIp = patch.localIp
+    this.emit()
+  }
+
+  setDeploy(patch: Partial<DeployState>): void {
+    this.state.deploy = { ...this.state.deploy, ...patch }
+    this.emit()
+  }
+
+  setOnboarding(done: boolean): void {
+    this.state.onboarding = { done }
+    this.emit()
+  }
+
+  setUpdate(update: AppUpdateInfo): void {
+    this.state.update = update
+    this.emit()
+  }
+
   setToast(message: string | null): void {
     this.state.toast = message
     this.emit()
@@ -118,7 +249,7 @@ export class Store {
           this.state.toast = null
           this.emit()
         }
-      }, 2200)
+      }, 2400)
     }
   }
 
@@ -129,7 +260,7 @@ export class Store {
         id: randomUUID(),
         ts: now - 212000,
         level: 'info',
-        text: 'HTTP 服务已启动 · 0.0.0.0:18765 · 线程池就绪'
+        text: 'HTTP 服务已启动 · 0.0.0.0:18765 · Bearer Token 校验开启'
       },
       {
         id: randomUUID(),
@@ -158,6 +289,7 @@ export class Store {
     ]
     this.state.server.notified = 18
     this.state.deploy = {
+      ...this.state.deploy,
       status: 'deployed',
       host: 'deploy@192.168.1.20:22',
       hooks: 2,

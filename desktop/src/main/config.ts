@@ -1,13 +1,17 @@
 import { safeStorage } from 'electron'
 import { randomBytes } from 'node:crypto'
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync
-} from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type {
+  ApprovalRule,
+  BindMode,
+  DeployProfile,
+  FocusPolicy,
+  FontSize,
+  FontStyle,
+  ThemeMode
+} from '../shared/types'
 import type { DeployMode } from './deploy/settings'
 
 export interface DeployCache {
@@ -21,6 +25,7 @@ export interface DeployCache {
   callbackPort?: number
   hookTimeout?: number
   toolMatcher?: string
+  origin?: string
   rememberPassword?: boolean
   envImport?: boolean
   envShells?: string[]
@@ -31,12 +36,48 @@ export interface UiConfig {
   // Python 版使用的键名，保持兼容
   popup_screen?: 'primary' | 'cursor' | 'focus'
   position?: 'primary' | 'cursor' | 'focus'
-  mode?: 'popup' | 'notify'
+  mode?: DeployMode
   timeoutSec?: number
+  theme?: ThemeMode
+  fontStyle?: FontStyle
+  fontSize?: FontSize
+  focusPolicy?: FocusPolicy
+  sound?: boolean
+  systemNotifications?: boolean
+  enterConfirmsHighRisk?: boolean
+  bindMode?: BindMode
+  port?: number
+  localIp?: string
+  admissionControl?: boolean
+  maxPending?: number
+  onboardingDone?: boolean
+  popupPosition?: { x: number; y: number } | null
 }
 
+export interface SessionMeta {
+  label?: string
+  color?: string
+  mutedUntil?: number
+  lastSeen?: number
+  sessionId?: string
+  origin?: string
+  project?: string
+  cwd?: string
+  tty?: string
+  terminal?: string
+}
+
+export type SessionMetaMap = Record<string, SessionMeta>
+
+export interface KnownHost {
+  fingerprint: string
+  addedAt: number
+}
+
+export type KnownHostMap = Record<string, KnownHost>
+
 export function appDataDir(): string {
-  return join(homedir(), '.claude-notify')
+  return process.env.CLAUDE_NOTIFY_DATA_DIR || join(homedir(), '.claude-notify')
 }
 
 export function ensureDataDir(): void {
@@ -69,7 +110,7 @@ export function saveToken(token: string): void {
   writeFileSync(tokenFilePath(), `${token}\n`, { mode: 0o600 })
 }
 
-function readJson<T>(file: string, fallback: T): T {
+export function readJsonFile<T>(file: string, fallback: T): T {
   try {
     if (!existsSync(file)) return fallback
     const parsed = JSON.parse(readFileSync(file, 'utf-8'))
@@ -79,33 +120,79 @@ function readJson<T>(file: string, fallback: T): T {
   }
 }
 
-function writeJson(file: string, value: unknown): void {
+export function writeJsonFile(file: string, value: unknown): void {
   ensureDataDir()
-  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf-8' })
+  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: 'utf-8',
+    mode: 0o600
+  })
+  try {
+    chmodSync(file, 0o600)
+  } catch {
+    // Windows and some filesystems do not honor POSIX modes
+  }
 }
 
 export function loadDeployCache(): DeployCache {
-  return readJson<DeployCache>(join(appDataDir(), 'deploy_config.json'), {})
+  return readJsonFile<DeployCache>(join(appDataDir(), 'deploy_config.json'), {})
 }
 
 export function saveDeployCache(cache: DeployCache): void {
-  writeJson(join(appDataDir(), 'deploy_config.json'), cache)
+  writeJsonFile(join(appDataDir(), 'deploy_config.json'), cache)
 }
 
 export function loadUiConfig(): UiConfig {
-  return readJson<UiConfig>(join(appDataDir(), 'ui_config.json'), {})
+  return readJsonFile<UiConfig>(join(appDataDir(), 'ui_config.json'), {})
 }
 
-export function saveUiConfig(config: UiConfig): void {
+export function saveUiConfig(patch: Partial<UiConfig>): UiConfig {
   const current = loadUiConfig()
-  const next: UiConfig = { ...current }
-  if (config.position) {
-    next.popup_screen = config.position
+  const next: UiConfig = { ...current, ...patch }
+  if (patch.position) {
+    next.popup_screen = patch.position
     delete next.position
   }
-  if (config.mode) next.mode = config.mode
-  if (typeof config.timeoutSec === 'number') next.timeoutSec = config.timeoutSec
-  writeJson(join(appDataDir(), 'ui_config.json'), next)
+  writeJsonFile(join(appDataDir(), 'ui_config.json'), next)
+  return next
+}
+
+export function loadSessionMeta(): SessionMetaMap {
+  return readJsonFile<SessionMetaMap>(join(appDataDir(), 'sessions.json'), {})
+}
+
+export function saveSessionMeta(meta: SessionMetaMap): void {
+  writeJsonFile(join(appDataDir(), 'sessions.json'), meta)
+}
+
+export function loadRules(): ApprovalRule[] {
+  const rules = readJsonFile<ApprovalRule[]>(join(appDataDir(), 'rules.json'), [])
+  return Array.isArray(rules) ? rules.filter((rule) => rule && typeof rule.id === 'string') : []
+}
+
+export function saveRules(rules: ApprovalRule[]): void {
+  writeJsonFile(join(appDataDir(), 'rules.json'), rules)
+}
+
+export function loadDeployProfiles(): DeployProfile[] {
+  const profiles = readJsonFile<DeployProfile[]>(
+    join(appDataDir(), 'deploy_profiles.json'),
+    []
+  )
+  return Array.isArray(profiles)
+    ? profiles.filter((profile) => profile && typeof profile.id === 'string')
+    : []
+}
+
+export function saveDeployProfiles(profiles: DeployProfile[]): void {
+  writeJsonFile(join(appDataDir(), 'deploy_profiles.json'), profiles)
+}
+
+export function loadKnownHosts(): KnownHostMap {
+  return readJsonFile<KnownHostMap>(join(appDataDir(), 'known_hosts.json'), {})
+}
+
+export function saveKnownHosts(hosts: KnownHostMap): void {
+  writeJsonFile(join(appDataDir(), 'known_hosts.json'), hosts)
 }
 
 export function secureStorageLabel(): string {
