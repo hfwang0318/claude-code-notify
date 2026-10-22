@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.2 — 2026-10-22
+
+### 修复
+
+- 服务端硬性拦截重复的 `AskUserQuestion` PermissionRequest：PreToolUse 问答之后不再弹第二个窗
+- 兼容旧版/缺少 `CLAUDE_ASKUSER_CHANNEL` 的部署配置；重复请求直接回退终端
+- 本机部署继续要求写入 `CLAUDE_ASKUSER_CHANNEL=pretooluse`，0.2.1 的启动自愈会修复旧配置
+
+### 测试
+
+- 新增服务端重复问答守卫测试；hook 测试验证 PreToolUse 通道存在时 PermissionRequest 不发送请求
+- 当前 54 个测试通过
+
 ## 0.2.1 — 2026-10-22
 
 ### 修复

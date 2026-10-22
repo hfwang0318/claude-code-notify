@@ -216,6 +216,17 @@ export class NotifyServer {
         `收到审批请求：tool=${item.tool}, kind=${item.kind}, project=${item.project}, ` +
           `suggestions=${item.suggestions.length}, timeout=${timeoutSec}s`
       )
+
+      // AskUserQuestion 由 PreToolUse 通道负责。旧版部署或配置缺失时，
+      // PermissionRequest 可能随后再来一次；这里直接回退终端，避免第二个弹窗。
+      if (item.tool === 'AskUserQuestion' && item.kind === 'permission') {
+        this.log(
+          'warn',
+          `忽略重复的 AskUserQuestion 权限请求（PreToolUse 已弹过问答）：${item.sessionLabel}`
+        )
+        sendJson(response, 200, { status: 'ok', decision: 'ask' })
+        return
+      }
       const unknown = unknownSuggestionTypes(item.suggestions)
       if (unknown.length > 0) {
         this.log('warn', `未知 suggestion 类型 ${unknown.join(', ')}，将用通用标签显示并原样回传`)

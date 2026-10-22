@@ -15,13 +15,13 @@ Claude Code 的桌面审批与通知工具：把权限请求、`AskUserQuestion`
 
 ## 下载
 
-最新版本：[Desktop v0.2.1](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.1)
+最新版本：[Desktop v0.2.2](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.2)
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.2.1-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.2.1.exe`
-- macOS：`Claude.Notify-0.2.1-arm64.dmg`
+- Windows 免安装：Release 里的 `Claude-Notify-0.2.2-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.2.2.exe`
+- macOS：`Claude.Notify-0.2.2-arm64.dmg`
 
-也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.1) 下载。
+也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.2) 下载。
 
 Windows 包未签名，SmartScreen 提示时选“更多信息 → 仍要运行”。macOS DMG 未签名/未公证，macOS 26/27 上不能直接启动，详见 [desktop/README.md](desktop/README.md)。
 

@@ -17,7 +17,10 @@ interface HookRun {
   requests: number
 }
 
-async function runHook(permissionMode: string): Promise<HookRun> {
+async function runHookPayload(
+  payload: Record<string, unknown>,
+  extraEnv: Record<string, string> = {}
+): Promise<HookRun> {
   const dataDir = mkdtempSync(join(tmpdir(), 'claude-notify-hook-'))
   const transcript = join(dataDir, 'transcript.jsonl')
   writeFileSync(transcript, '')
@@ -41,7 +44,8 @@ async function runHook(permissionMode: string): Promise<HookRun> {
         CLAUDE_NOTIFY_TOKEN: 'test-token',
         CLAUDE_APPROVAL_URL: `http://127.0.0.1:${port}/claude-approval`,
         CLAUDE_APPROVAL_TIMEOUT: '2',
-        CLAUDE_NOTIFY_DATA_DIR: dataDir
+        CLAUDE_NOTIFY_DATA_DIR: dataDir,
+        ...extraEnv
       },
       stdio: ['pipe', 'pipe', 'pipe']
     })
@@ -53,17 +57,7 @@ async function runHook(permissionMode: string): Promise<HookRun> {
     child.stderr.on('data', (chunk) => {
       stderr += String(chunk)
     })
-    child.stdin.end(
-      JSON.stringify({
-        hook_event_name: 'PermissionRequest',
-        permission_mode: permissionMode,
-        tool_name: 'Bash',
-        tool_input: { command: 'pwd' },
-        session_id: 'hook-test-session',
-        cwd: dataDir,
-        transcript_path: transcript
-      })
-    )
+    child.stdin.end(JSON.stringify(payload))
     const code = await new Promise<number | null>((resolve) => {
       const timer = setTimeout(() => {
         child.kill('SIGTERM')
@@ -81,6 +75,16 @@ async function runHook(permissionMode: string): Promise<HookRun> {
   }
 }
 
+function runHook(permissionMode: string): Promise<HookRun> {
+  return runHookPayload({
+    hook_event_name: 'PermissionRequest',
+    permission_mode: permissionMode,
+    tool_name: 'Bash',
+    tool_input: { command: 'pwd' },
+    session_id: 'hook-test-session'
+  })
+}
+
 describe('approval hook bypass guard', () => {
   maybe('does not contact the desktop in bypass-like modes', async () => {
     for (const mode of ['bypassPermissions', 'bypass', 'dontAsk']) {
@@ -89,6 +93,21 @@ describe('approval hook bypass guard', () => {
       expect(result.requests, `${mode} should not request approval`).toBe(0)
       expect(result.stdout.trim(), `${mode} should not emit a decision`).toBe('')
     }
+  })
+
+  maybe('ignores AskUserQuestion PermissionRequest when PreToolUse owns the channel', async () => {
+    const result = await runHookPayload(
+      {
+        hook_event_name: 'PermissionRequest',
+        permission_mode: 'default',
+        tool_name: 'AskUserQuestion',
+        tool_input: { questions: [{ question: 'Which env?', options: [] }] },
+        session_id: 'hook-test-question'
+      },
+      { CLAUDE_ASKUSER_CHANNEL: 'pretooluse' }
+    )
+    expect(result.code, result.stderr).toBe(0)
+    expect(result.requests, 'AskUserQuestion 只应由 PreToolUse 弹一次').toBe(0)
   })
 
   maybe('still requests approval in default mode', async () => {

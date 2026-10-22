@@ -70,6 +70,28 @@ describe('NotifyServer', () => {
     await server.stop()
   })
 
+  it('ignores a duplicate AskUserQuestion permission request', async () => {
+    const response = await rawPost(
+      port,
+      '/claude-approval',
+      {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      JSON.stringify({
+        request_id: 'question-ghost',
+        session_id: 'question-session',
+        tool_name: 'AskUserQuestion',
+        kind: 'permission',
+        timeout_seconds: 30,
+        tool_input: { questions: [{ question: 'Which env?', options: [] }] }
+      })
+    )
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toMatchObject({ status: 'ok', decision: 'ask' })
+    expect(approvals).toHaveLength(0)
+  })
+
   it('serves health without auth', async () => {
     const response = await fetch(`http://127.0.0.1:${port}/health`)
     expect(response.status).toBe(200)

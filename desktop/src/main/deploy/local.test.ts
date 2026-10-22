@@ -73,6 +73,7 @@ describe('deployLocal', () => {
     expect(config.CLAUDE_NOTIFY_TOKEN).toBe('test-token')
     expect(config.CLAUDE_APPROVAL_URL).toBe('http://127.0.0.1:18765/claude-approval')
     expect(config[HOOK_VERSION_KEY]).toBe(HOOK_VERSION)
+    expect(config.CLAUDE_ASKUSER_CHANNEL).toBe('pretooluse')
 
     const backups = readFileSync(result.settingsPath, 'utf-8')
     expect(backups).toContain('third-party')
