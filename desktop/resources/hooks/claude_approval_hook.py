@@ -117,7 +117,8 @@ RESOLUTION_URL = cfg(
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
-HOOK_VERSION = "3"
+HOOK_VERSION = "4"
+CURRENT_EVENT = ""
 
 
 def session_environment() -> dict:
@@ -467,12 +468,22 @@ def maybe_dump(hook_input: dict) -> None:
         pass
 
 
+def event_matches(expected: str) -> bool:
+    """只允许返回本次 hook 实际收到的事件名，避免 Claude 报 event name 不匹配。"""
+    if CURRENT_EVENT and CURRENT_EVENT != expected:
+        note(f"拒绝返回 {expected} 输出：本次事件是 {CURRENT_EVENT}")
+        return False
+    return True
+
+
 def emit_allow(updated_permissions: Optional[list] = None) -> None:
     """
     按 PermissionRequest 钩子协议输出允许决定。
     updated_permissions 为用户选择的 permission_suggestion 原对象
     （不透明 echo，等价于用户在终端对话框点对应“始终允许”）。
     """
+    if not event_matches("PermissionRequest"):
+        return
     decision: dict = {"behavior": "allow"}
     if updated_permissions:
         decision["updatedPermissions"] = updated_permissions
@@ -487,6 +498,8 @@ def emit_allow(updated_permissions: Optional[list] = None) -> None:
 
 def emit_deny(reason: str) -> None:
     """按 PermissionRequest 钩子协议输出拒绝决定。"""
+    if not event_matches("PermissionRequest"):
+        return
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
@@ -570,6 +583,8 @@ def emit_pretooluse_answer(questions: list, answers: list) -> None:
     选项 label；多选 label 逗号连接；自由文本直接作为值），工具收到
     后直接执行、不再弹任何交互 UI。
     """
+    if not event_matches("PreToolUse"):
+        return
     answer_map: dict = {}
     for item in answers:
         if not isinstance(item, dict):
@@ -638,6 +653,8 @@ def main() -> None:
     maybe_dump(hook_input)
 
     event = hook_input.get("hook_event_name") or ""
+    global CURRENT_EVENT
+    CURRENT_EVENT = event
     tool_name = hook_input.get("tool_name") or ""
 
     if event == "PermissionRequest" and bypasses_permission_prompt(hook_input):

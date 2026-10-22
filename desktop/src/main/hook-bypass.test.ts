@@ -110,6 +110,35 @@ describe('approval hook bypass guard', () => {
     expect(result.requests, 'AskUserQuestion 只应由 PreToolUse 弹一次').toBe(0)
   })
 
+  maybe('never emits an event name that differs from the hook input', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'claude-notify-hook-'))
+    const script = `
+import importlib.util
+spec = importlib.util.spec_from_file_location("approval_hook", ${JSON.stringify(hookPath)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.CURRENT_EVENT = "PreToolUse"
+module.emit_allow()
+module.emit_deny("nope")
+print("GUARD_OK")
+module.CURRENT_EVENT = "PermissionRequest"
+module.emit_allow()
+`
+    try {
+      const result = spawnSync(python, ['-c', script], {
+        encoding: 'utf-8',
+        env: { ...process.env, CLAUDE_NOTIFY_DATA_DIR: dataDir }
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout.trim().split('\n')[0]).toBe('GUARD_OK')
+      expect(result.stderr).toContain('拒绝返回 PermissionRequest 输出')
+      const jsonLine = result.stdout.trim().split('\n').at(-1) || ''
+      expect(JSON.parse(jsonLine).hookSpecificOutput.hookEventName).toBe('PermissionRequest')
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
   maybe('still requests approval in default mode', async () => {
     const result = await runHook('default')
     expect(result.code, result.stderr).toBe(0)

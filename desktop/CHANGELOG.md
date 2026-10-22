@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.3 — 2026-10-22
+
+### 修复
+
+- Hook 输出增加事件名硬校验：`PermissionRequest` 只返回 `PermissionRequest`，`PreToolUse` 只返回 `PreToolUse`
+- 事件不匹配时静默回退终端，避免 Claude 报 `hook returned incorrect event name`
+- 旧 hook 会在应用启动时自动升级到版本 4；建议安装后完全退出再启动
+
+### 测试
+
+- 新增 hook 错误事件名回归测试；当前 55 个测试通过
+
 ## 0.2.2 — 2026-10-22
 
 ### 修复

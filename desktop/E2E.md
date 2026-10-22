@@ -32,6 +32,8 @@ E2E PASS · all · 105.2s
 
 `bypass` 用例的回归背景：旧版 `claude_approval_hook.py` 没有读取 `permission_mode`，在 bypass 下仍会把 Bash/文件工具转发到桌面。当前 hook 会跳过 `bypassPermissions` / `dontAsk`；应用启动时若检测到本机 hook 版本过期，会自动备份并更新。
 
+Hook 事件名回归：`PermissionRequest` 只能输出 `PermissionRequest`，`PreToolUse` 只能输出 `PreToolUse`；不匹配时静默回退终端，避免 Claude 报 `hook returned incorrect event name`。该路径由 `src/main/hook-bypass.test.ts` 覆盖。
+
 `AskUserQuestion` 重复弹窗回归：问答由 PreToolUse 通道负责；旧部署缺少 `CLAUDE_ASKUSER_CHANNEL` 时，随后的 PermissionRequest 会再弹一次。服务端现在直接拒绝这种重复 PermissionRequest（回退终端），hook 测试也验证通道存在时不会发送。真实 `AskUserQuestion` 在当前 `-p` 模型工具集不可用，因此该路径由 self-test + hook/server 单测覆盖，而不是本脚本的真实 Claude 用例。
 
 ### 明确不覆盖

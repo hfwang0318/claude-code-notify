@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.2.2**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.2)。
+当前版本 **0.2.3**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.3)。
 
 ## 运行
 
@@ -86,9 +86,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.2.2-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.2.2.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.2.2-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.2.3-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.2.3.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.2.3-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
