@@ -6,8 +6,8 @@ __pycache__/
 .ruff_cache/
 
 # PyInstaller outputs
-build/
-dist/
+/build/
+/dist/
 
 # Local logs and diagnostics
 *.log

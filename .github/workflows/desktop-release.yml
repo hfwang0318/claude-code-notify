@@ -1,0 +1,132 @@
+name: Desktop Build
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'desktop-v*'
+
+jobs:
+  mac:
+    name: macOS dmg
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm dist:mac
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          SKIP_NOTARIZE: '1'
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd release
+          shasum -a 256 *.dmg > SHA256SUMS-macos.txt
+      - name: Ensure release exists
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Claude Notify ${GITHUB_REF_NAME#desktop-v}" \
+              --notes "See desktop/CHANGELOG.md for details." \
+              --latest || \
+            gh release view "${GITHUB_REF_NAME}" >/dev/null
+      - name: Upload dmg to release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" release/*.dmg release/SHA256SUMS-macos.txt --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-notify-macos
+          path: |
+            desktop/release/*.dmg
+            desktop/release/SHA256SUMS-macos.txt
+
+  windows:
+    name: Windows NSIS + portable
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm dist:win
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $launcher = @(
+            '@echo off',
+            'cd /d %~dp0',
+            'start "" "Claude Notify.exe"'
+          ) -join "`r`n"
+          Set-Content -Path release/win-unpacked/RUN-ME.bat -Value $launcher -Encoding ascii
+          Set-Content -Path release/win-unpacked/README-PORTABLE.txt -Value "Claude Notify $version portable build. Run RUN-ME.bat to start." -Encoding utf8
+          Compress-Archive -Path release/win-unpacked/* -DestinationPath "release/Claude-Notify-$version-win-x64-portable.zip" -Force
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem release -File |
+            Where-Object { $_.Extension -in '.exe', '.zip' } |
+            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } |
+            Set-Content -Encoding ascii release/SHA256SUMS-windows.txt
+      - name: Ensure release exists
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Claude Notify ${GITHUB_REF_NAME#desktop-v}" \
+              --notes "See desktop/CHANGELOG.md for details." \
+              --latest || \
+            gh release view "${GITHUB_REF_NAME}" >/dev/null
+      - name: Upload installer, portable zip and checksums
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            release/*Setup*.exe \
+            release/*portable*.zip \
+            release/SHA256SUMS-windows.txt \
+            --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claude-notify-windows
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.zip
+            desktop/release/SHA256SUMS-windows.txt

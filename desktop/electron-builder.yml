@@ -1,0 +1,38 @@
+appId: com.claude-notify.app
+productName: Claude Notify
+npmRebuild: false
+buildDependenciesFromSource: false
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+extraResources:
+  - from: resources/hooks
+    to: hooks
+  - from: resources/trayTemplate.png
+    to: trayTemplate.png
+  - from: resources/trayTemplate@2x.png
+    to: trayTemplate@2x.png
+  - from: resources/app.ico
+    to: app.ico
+mac:
+  icon: build/icon.icns
+  target:
+    - dmg
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+afterSign: scripts/notarize.cjs
+win:
+  icon: build/icon.ico
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true

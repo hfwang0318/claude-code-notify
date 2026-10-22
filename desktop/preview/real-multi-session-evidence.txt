@@ -1,0 +1,10 @@
+# Real Claude Code 2.1.295 multi-session test — final build
+2026-10-22T05:56:48.406Z info HTTP 服务已启动 · 0.0.0.0:18780 · Bearer Token 校验开启
+2026-10-22T05:57:02.319Z notify 收到审批请求：tool=Bash, kind=permission, project=cn-real-workH, suggestions=1, timeout=230s
+2026-10-22T05:57:02.324Z notify 收到审批 · cn-real-workH · 8888 · real-two-sessions · Bash · 需留意 · 230s
+2026-10-22T05:57:03.159Z notify 收到审批请求：tool=Bash, kind=permission, project=cn-real-workG, suggestions=1, timeout=230s
+2026-10-22T05:57:03.164Z notify 收到审批 · cn-real-workG · 7777 · real-two-sessions · Bash · 需留意 · 230s
+2026-10-22T05:57:15.343Z allow cn-real-workH · 8888 · real-two-sessions · Bash · pwd && date +%s > result.txt · 允许
+2026-10-22T05:57:15.345Z notify 审批结果：tool=Bash, decision=allow
+2026-10-22T05:57:16.158Z allow cn-real-workG · 7777 · real-two-sessions · Bash · pwd && date +%s > result.txt · 允许
+2026-10-22T05:57:16.161Z notify 审批结果：tool=Bash, decision=allow

@@ -8,11 +8,53 @@
 让远端或本机运行的 Claude Code 在需要权限审批、提出问题或完成当前阶段时，
 及时提醒你，并支持直接在桌面置顶弹窗中完成处理。
 
-Claude Code Notify 是一个基于 Python 与 PySide6 的跨平台桌面应用。它在开发机
+旧版 Claude Code Notify 是一个基于 Python 与 PySide6 的跨平台桌面应用。它在开发机
 运行本地 HTTP 服务，通过 Claude Code Hooks 接收远端服务器或本机 Claude Code
 的事件。关闭主窗口后，应用会继续驻留在系统托盘。
 
-## 核心功能
+
+> **当前主版本：Electron 桌面端 0.2.5**，位于 [`desktop/`](desktop/)。根目录的 Python/PySide6 实现作为旧版保留，适合对照与 Python 线维护。
+
+## 两套实现
+
+| 目录 | 技术栈 | 状态 |
+|---|---|---|
+| `desktop/` | Electron + React + TypeScript | 当前主版本，持续维护 |
+| 仓库根目录 | Python + PySide6 | 旧版实现，保留用于对照 |
+
+服务器端钩子始终是零依赖 Python 脚本，部署到远端 `~/.claude/`，不要求服务器安装 Node。
+
+## Electron 桌面版（当前主版本）
+
+最新版本：[Desktop v0.2.5](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.5)
+
+- Windows 免安装：`Claude-Notify-0.2.5-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.2.5.exe`
+- macOS：`Claude.Notify-0.2.5-arm64.dmg`
+
+也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.5) 下载。
+
+```bash
+cd desktop
+pnpm install
+pnpm dev          # 开发模式
+pnpm test         # 55 个单测/集成测试
+pnpm e2e:claude   # 真实 Claude Code 端到端（需已登录 Claude）
+pnpm self-test    # HTTP 协议冒烟
+```
+
+- [desktop/README.md](desktop/README.md)：功能、开发、打包、平台表现
+- [desktop/E2E.md](desktop/E2E.md)：真实 Claude Code 端到端测试
+- [desktop/RELEASE.md](desktop/RELEASE.md)：发布与签名流程
+- [desktop/CHANGELOG.md](desktop/CHANGELOG.md)：版本变更
+
+Windows 包未签名，SmartScreen 提示时选“更多信息 → 仍要运行”。macOS DMG 未签名/未公证，macOS 26/27 上不能直接启动。
+
+## Python/PySide6 旧版
+
+以下内容描述根目录的 Python 实现；日常使用和发布请优先选择上面的 Electron 桌面版。
+
+## Python 版核心功能
 
 - **桌面快速审批**：在置顶弹窗中允许、拒绝或交回终端处理权限请求。
 - **AskUserQuestion 代答**：Claude 提问时可以直接在桌面弹窗中选择答案。
@@ -68,7 +110,7 @@ flowchart LR
 Linux 会参与自动化测试，并提供基础平台兜底实现，但当前主要支持和打包目标是
 Windows 与 macOS。
 
-## 快速开始
+## Python 版快速开始
 
 ### 1. 获取并启动应用
 
@@ -128,7 +170,7 @@ python claude_notify_server.py
 > `curl http://<桌面端IP>:18765/health`。成功时应返回
 > `{"status":"ok"}`。企业网络、VPN、NAT 和主机防火墙都可能阻断该连接。
 
-## 构建桌面应用
+## 构建 Python 桌面应用
 
 ### Windows
 
@@ -205,7 +247,7 @@ Presentation 层不直接判断 Windows 或 macOS。
 完整设计见 [0 层架构文档](docs/architecture/00-l0-architecture.md)，协议、配置和
 维护说明见 [项目文档](项目文档.md)。
 
-## 开发与测试
+## Python 开发与测试
 
 安装开发依赖：
 

@@ -610,6 +610,21 @@ def handle_result_pretooluse(result: dict, questions: list) -> None:
     # ask / timeout / dismissed：不输出 → 正常交互流程（终端接管）
 
 
+def bypasses_permission_prompt(hook_input: dict) -> bool:
+    """判断当前 Claude Code 权限模式是否根本不需要审批弹窗。
+
+    bypassPermissions（以及等价的 dontAsk）下 Claude Code 可能仍然触发
+    PermissionRequest 钩子，但工具已经直接执行；此时再弹窗只会产生幽灵审批。
+    """
+    mode = str(
+        hook_input.get("permission_mode")
+        or hook_input.get("permissionMode")
+        or ""
+    )
+    normalized = mode.replace("_", "").replace("-", "").lower()
+    return normalized in {"bypasspermissions", "bypass", "dontask"}
+
+
 def main() -> None:
     # ---- 读取钩子输入 ----
     try:
@@ -634,6 +649,13 @@ def main() -> None:
         notify_stage_status(
             hook_input,
             "completed" if event == "Stop" else "resumed",
+        )
+        sys.exit(0)
+
+    if event == "PermissionRequest" and bypasses_permission_prompt(hook_input):
+        note(
+            "permission_mode="
+            f"{hook_input.get('permission_mode')}，无需审批，跳过桌面弹窗"
         )
         sys.exit(0)
 
