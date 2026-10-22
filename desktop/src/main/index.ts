@@ -119,7 +119,7 @@ function windowsBuild(): number {
 function createMainWindow(): BrowserWindow {
   const area = screen.getPrimaryDisplay().workArea
   const width = Math.min(1120, area.width - 40)
-  const height = Math.min(740, area.height - 40)
+  const height = Math.min(800, area.height - 40)
   const isMac = process.platform === 'darwin'
   const isWindows = process.platform === 'win32'
   // Windows 11 22H2+ supports the system Acrylic material. Older builds fall
@@ -139,7 +139,7 @@ function createMainWindow(): BrowserWindow {
     x: Math.round(area.x + (area.width - width) / 2),
     y: Math.round(area.y + (area.height - height) / 2),
     minWidth: 1000,
-    minHeight: 660,
+    minHeight: 700,
     show: false,
     title: APP_NAME,
     backgroundColor: useGlass ? '#00000000' : '#0a0a0c',

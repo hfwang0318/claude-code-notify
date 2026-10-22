@@ -38,7 +38,7 @@ body {
   background: transparent;
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 13px;
+  font-size: 15px;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
@@ -74,7 +74,7 @@ body.popup #root {
   place-items: center;
   color: var(--faint);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 14px;
   background: var(--bg);
 }
 
@@ -122,7 +122,7 @@ body.popup #root {
 }
 
 .brand-name {
-  font-size: 14.5px;
+  font-size: 16.5px;
   font-weight: 750;
   letter-spacing: -0.01em;
   line-height: 1.2;
@@ -132,7 +132,7 @@ body.popup #root {
 .brand-sub {
   margin-top: 2px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.16em;
   color: var(--faint);
 }
@@ -152,7 +152,7 @@ body.popup #root {
   border-radius: 999px;
   border: 1px solid var(--line-strong);
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 11.5px;
   letter-spacing: 0.13em;
   color: var(--faint);
   background: rgba(255, 255, 255, 0.04);
@@ -187,7 +187,7 @@ body.popup #root {
   border: 1px solid var(--line-strong);
   background: rgba(255, 255, 255, 0.055);
   color: var(--ink-2);
-  font-size: 11.5px;
+  font-size: 13.5px;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
@@ -215,7 +215,7 @@ body.popup #root {
 
 .btn.compact {
   min-height: 30px;
-  font-size: 11px;
+  font-size: 13px;
   padding: 0 11px;
 }
 
@@ -226,7 +226,7 @@ body.popup #root {
   background: linear-gradient(180deg, #f0906f 0%, #e07a5a 46%, #cf5b3f 100%);
   color: var(--on-coral);
   font-weight: 750;
-  font-size: 12.5px;
+  font-size: 14.5px;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.36),
     0 8px 22px rgba(0, 0, 0, 0.35);
@@ -295,14 +295,14 @@ body.popup #root {
 }
 
 .status-key {
-  font-size: 11px;
+  font-size: 13px;
   color: var(--faint);
   flex: none;
 }
 
 .status-value {
   font-family: var(--mono);
-  font-size: 13.5px;
+  font-size: 15.5px;
   font-weight: 700;
   letter-spacing: -0.01em;
   white-space: nowrap;
@@ -399,20 +399,20 @@ body.popup #root {
 
 .card-index {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--coral);
 }
 
 .card-title {
-  font-size: 12.5px;
+  font-size: 14.5px;
   font-weight: 700;
   color: var(--ink);
 }
 
 .card-hint {
   margin-left: auto;
-  font-size: 10.5px;
+  font-size: 12.5px;
   color: var(--faint);
   font-family: var(--mono);
   letter-spacing: 0.02em;
@@ -430,13 +430,13 @@ body.popup #root {
 
 .kv dt {
   color: var(--faint);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .kv dd {
   margin: 0;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
@@ -462,7 +462,7 @@ body.popup #root {
   border: 0;
   background: none;
   color: #f2a08a;
-  font-size: 10px;
+  font-size: 12px;
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -494,7 +494,7 @@ body.popup #root {
   border-radius: 10px;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   cursor: pointer;
   transition:
     background 0.16s ease,
@@ -525,13 +525,13 @@ body.popup #root {
   gap: 12px;
   padding: 11px 16px;
   border-top: 1px solid var(--line);
-  font-size: 11px;
+  font-size: 13px;
   color: var(--faint);
 }
 
 .pref-value {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-2);
   text-align: right;
 }
@@ -549,7 +549,7 @@ body.popup #root {
 
 .keyboard-title {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.16em;
   color: var(--faint);
 }
@@ -560,7 +560,7 @@ body.popup #root {
   gap: 8px;
   margin: 9px 0;
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: 12.5px;
 }
 
 kbd {
@@ -572,14 +572,14 @@ kbd {
   background: rgba(255, 255, 255, 0.06);
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 11.5px;
   text-align: center;
 }
 
 .keyboard-card p {
   margin: 0;
   color: var(--faint);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.65;
 }
 
@@ -627,7 +627,7 @@ kbd {
   align-items: center;
   gap: 8px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
@@ -635,7 +635,7 @@ kbd {
 }
 
 .deploy-mode {
-  font-size: 8.5px;
+  font-size: 10.5px;
   color: var(--faint);
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -646,7 +646,7 @@ kbd {
 
 .deploy-sub {
   margin-top: 3px;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--faint);
   white-space: nowrap;
   overflow: hidden;
@@ -696,7 +696,7 @@ kbd {
   padding: 8px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.45;
   animation: log-in 0.18s ease-out;
 }
@@ -711,12 +711,12 @@ kbd {
 
 .log-time {
   color: var(--faint);
-  font-size: 10px;
+  font-size: 12px;
   padding-top: 1px;
 }
 
 .log-level {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.07em;
   padding-top: 1px;
@@ -760,7 +760,7 @@ kbd {
   padding: 44px 16px;
   text-align: center;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 13px;
 }
 
 /* ---------------- footer / toast ---------------- */
@@ -776,7 +776,7 @@ kbd {
 .actions-hint {
   margin-left: auto;
   color: var(--faint);
-  font-size: 10px;
+  font-size: 12px;
   font-family: var(--mono);
   white-space: nowrap;
 }
@@ -792,7 +792,7 @@ kbd {
   border: 1px solid var(--line-strong);
   background: rgba(30, 30, 33, 0.94);
   color: var(--ink);
-  font-size: 11.5px;
+  font-size: 13.5px;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.1),
     0 16px 40px rgba(0, 0, 0, 0.5);
@@ -877,7 +877,7 @@ kbd {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.05);
   color: var(--faint);
-  font-size: 15px;
+  font-size: 17px;
   line-height: 1;
   cursor: pointer;
   z-index: 4;
@@ -897,7 +897,7 @@ kbd {
 
 .popup-kicker {
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 11.5px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: #f2a08a;
@@ -906,13 +906,13 @@ kbd {
 .popup-time {
   margin-left: auto;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--faint);
 }
 
 .popup-title {
   margin: 8px 22px 0 23px;
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 750;
   letter-spacing: -0.02em;
   line-height: 1.25;
@@ -921,7 +921,7 @@ kbd {
 
 .popup-sub {
   margin: 6px 22px 0 23px;
-  font-size: 11px;
+  font-size: 13px;
   color: var(--muted);
   line-height: 1.5;
 }
@@ -943,14 +943,14 @@ kbd {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.06em;
   color: var(--ink-2);
 }
 
 .popup-project {
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 11.5px;
   color: var(--faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -966,7 +966,7 @@ kbd {
   background: rgba(224, 122, 90, 0.09);
   color: #f2a08a;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -977,7 +977,7 @@ kbd {
   border-radius: 11px;
   background: rgba(0, 0, 0, 0.3);
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 13.5px;
   color: #dedee3;
   white-space: nowrap;
   overflow: hidden;
@@ -1010,7 +1010,7 @@ kbd {
 
 .popup-count b {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--muted);
 }
@@ -1041,7 +1041,7 @@ kbd {
   min-height: 43px;
   padding: 0 18px;
   border-radius: 12px;
-  font-size: 12.5px;
+  font-size: 14.5px;
   font-weight: 750;
   cursor: pointer;
   transition:
@@ -1092,7 +1092,7 @@ kbd {
   border: 0;
   background: none;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 13px;
   text-decoration: underline;
   text-underline-offset: 3px;
   cursor: pointer;
@@ -1106,7 +1106,7 @@ kbd {
 .popup-foot {
   padding: 10px 23px 15px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   color: var(--faint);
   letter-spacing: 0.02em;
 }
@@ -1177,7 +1177,7 @@ kbd {
   border: 1px solid var(--line-strong);
   background: rgba(255, 255, 255, 0.055);
   color: var(--ink-2);
-  font-size: 11.5px;
+  font-size: 13.5px;
   font-weight: 600;
   text-align: left;
   padding: 0 14px;
@@ -1215,13 +1215,13 @@ kbd {
 
 .question-index {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.12em;
   color: var(--faint);
 }
 
 .question-text {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1.5;
   color: var(--ink);
@@ -1243,7 +1243,7 @@ kbd {
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--ink-2);
-  font-size: 11.5px;
+  font-size: 13.5px;
   text-align: left;
   cursor: pointer;
   transition:
@@ -1296,7 +1296,7 @@ kbd {
 }
 
 .question-desc {
-  font-size: 10.5px;
+  font-size: 12.5px;
   color: var(--faint);
   line-height: 1.45;
 }
@@ -1307,7 +1307,7 @@ kbd {
   border: 0;
   background: none;
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: 12.5px;
   text-decoration: underline;
   text-underline-offset: 2px;
   cursor: pointer;
@@ -1326,7 +1326,7 @@ kbd {
   background: rgba(0, 0, 0, 0.3);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   outline: none;
 }
 
@@ -1336,7 +1336,7 @@ kbd {
 
 .question-hint {
   color: #f2a08a;
-  font-size: 10.5px;
+  font-size: 12.5px;
   text-align: center;
 }
 
@@ -1378,14 +1378,14 @@ kbd {
 
 .modal-kicker {
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.18em;
   color: var(--coral);
 }
 
 .modal-head h2 {
   margin: 5px 0 0;
-  font-size: 17px;
+  font-size: 19px;
   font-weight: 750;
   letter-spacing: -0.01em;
 }
@@ -1393,7 +1393,7 @@ kbd {
 .modal-head p {
   margin: 5px 0 0;
   color: var(--faint);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
@@ -1405,7 +1405,7 @@ kbd {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.05);
   color: var(--faint);
-  font-size: 16px;
+  font-size: 18px;
   cursor: pointer;
 }
 
@@ -1435,7 +1435,7 @@ kbd {
 .form-section-title {
   margin-bottom: 10px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   color: var(--faint);
   text-transform: uppercase;
@@ -1464,7 +1464,7 @@ kbd {
 
 .field span {
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: 12.5px;
 }
 
 .field input {
@@ -1475,7 +1475,7 @@ kbd {
   background: rgba(0, 0, 0, 0.24);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
   outline: none;
 }
 
@@ -1510,7 +1510,7 @@ kbd {
   border-radius: 8px;
   background: transparent;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   cursor: pointer;
 }
 
@@ -1524,7 +1524,7 @@ kbd {
 .form-note {
   margin-top: 8px;
   color: var(--faint);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .check-row {
@@ -1533,7 +1533,7 @@ kbd {
   gap: 8px;
   margin-top: 9px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 13px;
   cursor: pointer;
 }
 
@@ -1555,7 +1555,7 @@ kbd {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--faint);
-  font-size: 10.5px;
+  font-size: 12.5px;
   cursor: pointer;
 }
 
@@ -1574,7 +1574,7 @@ kbd {
   border-radius: 11px;
   background: rgba(0, 0, 0, 0.3);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.65;
 }
 
@@ -1587,7 +1587,7 @@ kbd {
 
 .deploy-log-line span {
   color: var(--faint);
-  font-size: 8.5px;
+  font-size: 10.5px;
   letter-spacing: 0.06em;
 }
 
@@ -1610,7 +1610,7 @@ kbd {
   border-radius: 9px;
   background: rgba(224, 141, 126, 0.08);
   color: #f0a99c;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .form-success {
@@ -1620,7 +1620,7 @@ kbd {
   border-radius: 9px;
   background: rgba(143, 209, 174, 0.08);
   color: #a4e3c5;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .modal-actions {
@@ -1662,7 +1662,7 @@ kbd {
   border-radius: 6px;
   background: transparent;
   color: var(--faint);
-  font-size: 10px;
+  font-size: 12px;
   cursor: pointer;
 }
 
