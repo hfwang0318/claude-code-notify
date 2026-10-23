@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.8 — 2026-10-23
+
+### 修复
+
+- 修复 0.2.7 远程部署验证命令缺少 `import sys`，导致保存部署时出现 `NameError: name 'sys' is not defined`
+- 部署验证改为在写入 `settings.json` 之前编译 approval / notify 两个 hook；验证失败不会留下指向坏脚本的 hook 配置
+
+### 测试
+
+- 新增真实 Python 编译命令回归测试，覆盖 `sys.argv` 和带空格的脚本路径
+- 当前 124 个测试
+
 ## 0.2.7 — 2026-10-23
 
 ### 修复
