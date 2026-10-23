@@ -542,7 +542,7 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
               </label>
             </div>
             <div className="form-note">
-              审批等待时间自动取钩子超时减 60 秒。多会话建议把钩子超时调到 600 秒，给队列留出余量。
+              审批等待时间自动取钩子超时减 60 秒。倒计时暂停会额外占用最多 600 秒钩子预算；多会话建议把钩子超时调到 600 秒，给队列留出余量。
             </div>
           </div>
 

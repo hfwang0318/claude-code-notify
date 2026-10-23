@@ -20,6 +20,7 @@ Claude Code Notification 钩子：把通知单向 POST 到 Windows 托盘应用�
 
 import json
 import os
+import re
 import socket
 import sys
 import urllib.request
@@ -41,7 +42,118 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-HOOK_VERSION = "2"
+HOOK_VERSION = "7"
+TASK_MAX_CHARS = 60
+TASK_TAIL_BYTES = 256 * 1024
+
+
+# Keep these three helpers in sync with claude_approval_hook.py. The two hooks
+# are deployed as standalone files, so they cannot share a module.
+def _clean_task_text(text: str) -> str:
+    text = re.sub(
+        r"<system-reminder>.*?</system-reminder>", " ", text, flags=re.S | re.I
+    )
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"<[^>]{1,120}>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.lstrip("#>-* ").strip()
+
+
+def _is_noise_prompt(text: str) -> bool:
+    probe = text.lstrip()
+    return (
+        not probe
+        or probe.startswith("<")
+        or probe.startswith("Caveat:")
+        or probe.startswith("[Request interrupted")
+        or probe.startswith("This session is being continued")
+        or "<command-name>" in probe[:400]
+        or "<local-command-stdout>" in probe[:400]
+    )
+
+
+def task_summary(transcript_path: str) -> str:
+    if not transcript_path:
+        return ""
+    try:
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as file:
+            if size > TASK_TAIL_BYTES:
+                file.seek(size - TASK_TAIL_BYTES)
+            data = file.read().decode("utf-8", "ignore")
+    except (OSError, ValueError):
+        return ""
+    for raw_line in reversed(data.splitlines()):
+        try:
+            entry = json.loads(raw_line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "last-prompt":
+            prompt = entry.get("lastPrompt")
+            if isinstance(prompt, str) and not _is_noise_prompt(prompt):
+                cleaned = _clean_task_text(prompt)
+                if cleaned:
+                    return cleaned[:TASK_MAX_CHARS]
+            continue
+        if entry.get("type") != "user":
+            continue
+        if entry.get("isMeta") or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or _is_noise_prompt(content):
+            continue
+        cleaned = _clean_task_text(content)
+        if cleaned:
+            return cleaned[:TASK_MAX_CHARS]
+    return ""
+
+
+def _read_git_head(head_path: str) -> str:
+    try:
+        with open(head_path, "r", encoding="utf-8", errors="ignore") as file:
+            head = file.read(300).strip()
+    except OSError:
+        return ""
+    if head.startswith("ref:"):
+        ref = head[len("ref:") :].strip()
+        if ref.startswith("refs/heads/"):
+            return ref[len("refs/heads/") :]
+        return ref.rsplit("/", 1)[-1]
+    return head[:8]
+
+
+def git_branch(cwd: str) -> str:
+    if not cwd:
+        return ""
+    try:
+        directory = os.path.abspath(os.path.expanduser(cwd))
+    except (TypeError, ValueError):
+        return ""
+    for _ in range(8):
+        dotgit = os.path.join(directory, ".git")
+        try:
+            if os.path.isdir(dotgit):
+                return _read_git_head(os.path.join(dotgit, "HEAD"))
+            if os.path.isfile(dotgit):
+                with open(dotgit, "r", encoding="utf-8", errors="ignore") as file:
+                    content = file.read(300).strip()
+                if content.startswith("gitdir:"):
+                    gitdir = content[len("gitdir:") :].strip()
+                    if not os.path.isabs(gitdir):
+                        gitdir = os.path.normpath(os.path.join(directory, gitdir))
+                    return _read_git_head(os.path.join(gitdir, "HEAD"))
+        except OSError:
+            return ""
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    return ""
 
 
 def cfg(name: str, default: str = "") -> str:
@@ -103,6 +215,9 @@ def main() -> None:
         "tty": tty[5:] if tty.startswith("/dev/") else tty,
         "hook_version": HOOK_VERSION,
         "cwd": hook_input.get("cwd"),
+        "transcript_path": hook_input.get("transcript_path"),
+        "task": task_summary(str(hook_input.get("transcript_path") or "")),
+        "branch": git_branch(str(hook_input.get("cwd") or "")),
         "message": hook_input.get("message"),
         "notification_type": (
             hook_input.get("notification_type")

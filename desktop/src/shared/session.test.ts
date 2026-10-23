@@ -9,8 +9,11 @@ import {
   pickSessionColor,
   riskSegments,
   sessionColor,
+  sessionInitials,
   sessionKeyOf,
-  sortByDeadline
+  shortSessionId,
+  sortByDeadline,
+  taskTitle
 } from './session'
 
 function item(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
@@ -30,6 +33,8 @@ function item(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
     cwd: '/work/app',
     tty: 'ttys001',
     terminal: 'iTerm2',
+    task: '修复登录跳转',
+    branch: 'main',
     message: '',
     detail: '',
     toolInput: {},
@@ -71,6 +76,23 @@ describe('session identity', () => {
     ).toBe('app · ttys001')
     expect(deriveSessionLabel({ project: 'app', sessionId: 'abcdef' })).toBe('app · abcd')
     expect(sessionColor('本机:s1')).toBe(sessionColor('本机:s1'))
+  })
+
+  it('creates a short stable handle and a two-letter avatar', () => {
+    expect(shortSessionId('3C9F2A10-77BD-4A3E-9C7A-1234567890AB')).toBe('3c9f')
+    expect(shortSessionId('')).toBe('')
+    expect(sessionInitials({ project: 'claude-code-notify' })).toBe('CC')
+    expect(sessionInitials({ project: '前端' })).toBe('前')
+  })
+
+  it('turns the first task into a compact session name', () => {
+    expect(taskTitle('  修复多会话弹窗无法区分任务的问题  ')).toBe(
+      '修复多会话弹窗无法区分任务的问题'
+    )
+    expect(taskTitle('给审批接口补上 trace_id 透传')).toBe('给审批接口补上 trace_id 透传')
+    expect(taskTitle('a'.repeat(40))).toBe(`${'a'.repeat(22)}…`)
+    expect(taskTitle('ok')).toBe('')
+    expect(taskTitle('')).toBe('')
   })
 })
 

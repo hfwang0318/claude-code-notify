@@ -24,6 +24,8 @@ const api: DesktopApi = {
   },
   respond: (id: string, decision: string, extra?: ApprovalExtra) =>
     ipcRenderer.invoke('approval:respond', id, decision, extra),
+  pauseApproval: (id: string, paused: boolean) =>
+    ipcRenderer.invoke('approval:pause', id, paused),
   acknowledgeExpired: (id?: string) => ipcRenderer.invoke('approval:acknowledge', id),
   dismissNotice: () => ipcRenderer.invoke('notice:dismiss'),
   selectApproval: (id: string) => ipcRenderer.invoke('approval:select', id),

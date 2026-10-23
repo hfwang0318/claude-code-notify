@@ -4106,3 +4106,465 @@ kbd {
 .notice-card .popup-actions {
   margin-top: 14px;
 }
+
+/* ==========================================================================
+   v3 · session identity (multi-session popup / inbox)
+   ========================================================================== */
+
+/* The left spine now carries the session color, so two sessions in the same
+   project are distinguishable before reading a single word. */
+.popup-card::before {
+  background: var(--session-color, var(--coral));
+  box-shadow: 0 0 18px color-mix(in srgb, var(--session-color, var(--coral)) 55%, transparent);
+}
+
+.popup-identity {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  margin: 12px 34px 0 23px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--session-color, var(--coral)) 26%, var(--line));
+  border-radius: 13px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--session-color, var(--coral)) 12%, transparent),
+    rgba(255, 255, 255, 0.015)
+  );
+}
+
+.identity-avatar {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--session-color, var(--coral)) 42%, transparent);
+  background: color-mix(in srgb, var(--session-color, var(--coral)) 24%, transparent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--font-scale));
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.identity-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.identity-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.popup-card .identity-name {
+  max-width: 260px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: calc(13px * var(--font-scale));
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+
+.identity-name:hover {
+  color: #f2a08a;
+}
+
+.identity-id {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+  letter-spacing: 0.04em;
+}
+
+.identity-pinned {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--session-color, var(--coral)) 34%, transparent);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: calc(9.5px * var(--font-scale));
+}
+
+.identity-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+  white-space: nowrap;
+}
+
+.identity-meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.identity-path {
+  color: var(--faint);
+}
+
+.identity-task {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-2);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.identity-task-label {
+  flex: none;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9px * var(--font-scale));
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.identity-task-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.popup-card .identity-rename {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--session-color, var(--coral)) 55%, transparent);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--ink);
+  font-size: calc(12px * var(--font-scale));
+}
+
+.popup-request-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin: 10px 23px 0;
+}
+
+.popup-request-kind {
+  margin-left: auto;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+  letter-spacing: 0.08em;
+}
+
+/* Two-line session chips: name + task, instead of tty digits. */
+.session-chip {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  column-gap: 7px;
+  row-gap: 1px;
+  align-items: center;
+  min-width: 170px;
+  max-width: 240px;
+  height: auto;
+  padding: 6px 9px;
+  border-radius: 12px;
+}
+
+.session-chip i {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  align-self: start;
+  margin-top: 4px;
+}
+
+.session-chip-name {
+  grid-column: 2;
+  grid-row: 1;
+  color: var(--ink-2);
+  font-size: calc(11.5px * var(--font-scale));
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-chip-task {
+  grid-column: 2;
+  grid-row: 2;
+  color: var(--faint);
+  font-size: calc(10px * var(--font-scale));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-chip b {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.session-chip em {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.session-chip.active {
+  border-color: color-mix(in srgb, var(--session-color, var(--coral)) 55%, transparent);
+  background: color-mix(in srgb, var(--session-color, var(--coral)) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--session-color, var(--coral));
+}
+
+.session-chip.active .session-chip-name {
+  color: var(--ink);
+}
+
+.popup-position {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+  white-space: nowrap;
+}
+
+.queue-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.queue-group:last-child {
+  border-bottom: 0;
+}
+
+.queue-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 9px;
+  background: rgba(255, 255, 255, 0.025);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.queue-group-head i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.queue-group-head b {
+  color: var(--ink-2);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.queue-group-task {
+  flex: 1;
+  min-width: 0;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-group-head em {
+  flex: none;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-style: normal;
+  font-size: calc(9px * var(--font-scale));
+}
+
+.queue-row {
+  grid-template-columns: 52px minmax(0, 1fr) 40px;
+}
+
+.queue-command {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.notice-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 23px 0;
+}
+
+.identity-branch {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.notice-task {
+  margin: 8px 23px 0;
+}
+
+.session-id {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+}
+
+.inbox-session {
+  border-left: 3px solid color-mix(in srgb, var(--session-color, var(--line)) 70%, transparent);
+}
+
+.inbox-session-task {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 11px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--session-color, var(--coral)) 5%, transparent);
+  color: var(--ink-2);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.inbox-session-task-label {
+  flex: none;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9px * var(--font-scale));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.inbox-session-task-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-session-task-text.faint {
+  color: var(--faint);
+}
+
+.inbox-session-branch {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+}
+
+:root[data-theme='light'] .popup-identity {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--session-color, var(--coral)) 14%, #ffffff),
+    #ffffff
+  );
+}
+
+:root[data-theme='light'] .identity-avatar {
+  color: var(--ink);
+}
+
+:root[data-theme='light'] .popup-card .identity-rename {
+  background: #fff;
+}
+
+:root[data-theme='light'] .session-chip.active {
+  background: color-mix(in srgb, var(--session-color, var(--coral)) 14%, transparent);
+}
+
+:root[data-theme='light'] .queue-group-head {
+  background: rgba(20, 20, 24, 0.03);
+}
+
+:root[data-theme='light'] .inbox-session-task {
+  background: color-mix(in srgb, var(--session-color, var(--coral)) 7%, transparent);
+}
+
+.session-chip,
+.session-chip-name,
+.session-chip-task {
+  text-align: left;
+}
+
+/* Pause the countdown while the user types a long answer. */
+.popup-count {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.popup-pause {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+  cursor: pointer;
+}
+
+.popup-pause:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-2);
+}
+
+.popup-pause.active {
+  border-color: rgba(210, 176, 122, 0.42);
+  background: rgba(210, 176, 122, 0.08);
+  color: var(--amber);
+}
+
+.popup-count b.paused {
+  color: var(--amber);
+}
+
+.popup-count.paused .popup-bar i {
+  opacity: 0.4;
+  box-shadow: none;
+}
+
+.session-chip em.paused,
+.queue-time.paused {
+  color: var(--amber);
+  font-style: normal;
+}
+
+.session-urgent.paused {
+  color: var(--amber);
+  border-color: rgba(210, 176, 122, 0.3);
+  background: rgba(210, 176, 122, 0.08);
+}
+
+.inbox-time.paused {
+  color: var(--amber);
+}

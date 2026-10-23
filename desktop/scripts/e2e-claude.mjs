@@ -36,6 +36,14 @@ const electronBin =
     ? join(desktopRoot, 'node_modules', '.bin', 'electron.CMD')
     : join(desktopRoot, 'node_modules', '.bin', 'electron')
 const claudeBin = process.env.CLAUDE_BIN || 'claude'
+// Some Claude Code sessions start with only ToolSearch/Web registered. Asking
+// for Bash explicitly is not enough there; loading it first makes the real
+// approval cases deterministic instead of silently skipping.
+const BASH_TOOL_HINT =
+  'If the Bash tool is not already available, first use the ToolSearch tool to load it. '
+// Mirrors HOOK_PAUSE_BUDGET_SEC in the app: the hook process must outlive a
+// paused popup countdown, not just the initial approval window.
+const PAUSE_BUDGET_SEC = 600
 const keepTemp = process.env.E2E_KEEP === '1'
 const skipBuild = process.env.E2E_SKIP_BUILD === '1'
 const requireClaude = process.env.E2E_REQUIRE_CLAUDE === '1'
@@ -249,18 +257,33 @@ function buildSettings(auth, approvalTimeout) {
     `python3 ${shellQuote(join(desktopRoot, 'resources', 'hooks', 'claude_notify_hook.py'))}`
   ].join(' ')
   const settings = {
-    permissions: { defaultMode: 'default' },
+    // Some routed models only expose tools that have an explicit permission
+    // rule. "ask" keeps Bash/Write/Edit visible while still forcing the real
+    // PermissionRequest hook (unlike "allow", which would skip the popup).
+    permissions: { defaultMode: 'default', ask: ['Bash', 'Write', 'Edit'] },
     hooks: {
       PermissionRequest: [
         {
           matcher: '',
-          hooks: [{ type: 'command', command: approvalHook, timeout: approvalTimeout + 60 }]
+          hooks: [
+            {
+              type: 'command',
+              command: approvalHook,
+              timeout: approvalTimeout + 60 + PAUSE_BUDGET_SEC
+            }
+          ]
         }
       ],
       PreToolUse: [
         {
           matcher: '',
-          hooks: [{ type: 'command', command: approvalHook, timeout: approvalTimeout + 60 }]
+          hooks: [
+            {
+              type: 'command',
+              command: approvalHook,
+              timeout: approvalTimeout + 60 + PAUSE_BUDGET_SEC
+            }
+          ]
         }
       ],
       Notification: [
@@ -287,7 +310,7 @@ function writeSettings(auth) {
   settingsFile = normal
   timeoutSettingsFile = timeout
   writeFileSync(normal, JSON.stringify(buildSettings(auth, 120), null, 2), { mode: 0o600 })
-  writeFileSync(timeout, JSON.stringify(buildSettings(auth, 15), null, 2), { mode: 0o600 })
+  writeFileSync(timeout, JSON.stringify(buildSettings(auth, 20), null, 2), { mode: 0o600 })
 }
 
 function probeAuth() {
@@ -506,7 +529,7 @@ async function runBypassProbe(permissionMode, label, prefix, description) {
     label,
     randomUUID(),
     settingsFile,
-    `Use the Bash tool to run \`pwd > ${prefix}-bash.txt\`. Then create ${prefix}-write.txt with content OK and change it to OK!. Prefer the Write and Edit tools when they are available; otherwise use Bash. Do not ask permission. After the files exist, reply with exactly DONE.`,
+    `Fix the ${prefix} workspace files. ${BASH_TOOL_HINT}Use the Bash tool to run \`pwd > ${prefix}-bash.txt\`. Then create ${prefix}-write.txt with content OK and change it to OK!. Prefer the Write and Edit tools when they are available; otherwise use Bash. Do not ask permission. After the files exist, reply with exactly DONE.`,
     permissionMode
   )
   const deadline = Date.now() + 45000
@@ -637,16 +660,16 @@ async function runMultiSessionCase() {
     'work-a',
     randomUUID(),
     settingsFile,
-    'Use the Bash tool to run: pwd && date +%s > result.txt . After the tool succeeds, reply with exactly DONE.'
+    `Fix the login redirect regression. ${BASH_TOOL_HINT}Use the Bash tool to run: pwd && date +%s > result.txt . After the tool succeeds, reply with exactly DONE.`
   )
   const second = startClaude(
     'work-b',
     randomUUID(),
     settingsFile,
-    'Use the Bash tool to run: pwd && date +%s > result.txt . After the tool succeeds, reply with exactly DONE.'
+    `Audit the payment retry loop. ${BASH_TOOL_HINT}Use the Bash tool to run: pwd && date +%s > result.txt . After the tool succeeds, reply with exactly DONE.`
   )
 
-  const pendingNow = await waitPendingWithToolCheck(2, [first, second], 25000, [
+  const pendingNow = await waitPendingWithToolCheck(2, [first, second], 120000, [
     first.sessionId,
     second.sessionId
   ])
@@ -687,6 +710,36 @@ async function runMultiSessionCase() {
   )
   assert(queueText.includes('2 个会话'), `队列文案异常：${queueText}`)
 
+  // Every approval must carry a real task summary from the transcript and a
+  // stable short session id — the two things that disambiguate parallel work.
+  const identityTask = await cdp.eval(
+    "document.querySelector('.popup-identity .identity-task-text')?.textContent?.trim() || ''"
+  )
+  assert(identityTask.length > 0, '弹窗身份条没有任务摘要')
+  const identityId = await cdp.eval(
+    "document.querySelector('.popup-identity .identity-id')?.textContent?.trim() || ''"
+  )
+  assert(/^#[0-9a-z]{4}$/.test(identityId), `会话短码异常：${identityId}`)
+  const chipTasks = await cdp.eval(
+    "Array.from(document.querySelectorAll('.session-chip-task')).map((entry) => entry.textContent.trim())"
+  )
+  assert(
+    chipTasks.length === 2 &&
+      chipTasks.every((task) => task && task !== '暂无任务摘要'),
+    `会话条任务摘要缺失：${JSON.stringify(chipTasks)}`
+  )
+  assert(
+    new Set(chipTasks).size === 2,
+    `两个并发会话的任务摘要没有区分开：${JSON.stringify(chipTasks)}`
+  )
+  const chipNames = await cdp.eval(
+    "Array.from(document.querySelectorAll('.session-chip-name')).map((entry) => entry.textContent.trim())"
+  )
+  assert(
+    chipNames.length === 2 && new Set(chipNames).size === 2,
+    `两个并发会话的会话名没有区分开：${JSON.stringify(chipNames)}`
+  )
+
   // Switch to the second session explicitly before approving it.
   const targetLabel = await cdp.eval(
     "document.querySelectorAll('.session-chip')[1]?.querySelector('span')?.textContent || ''"
@@ -711,6 +764,19 @@ async function runMultiSessionCase() {
 
   await cdp.eval("document.querySelector('.popup-btn.allow')?.click()")
   await waitPending(1)
+  // Give React a frame to swap the card to the remaining session before the
+  // second click; clicking the resolved card's stale button would be a no-op.
+  await waitFor(
+    '弹窗切换到剩余会话',
+    async () => {
+      const label = await cdp.eval(
+        "document.querySelector('.popup-session-label')?.textContent || ''"
+      )
+      return label && label !== targetLabel ? label : null
+    },
+    5000,
+    100
+  )
   await cdp.eval("document.querySelector('.popup-btn.allow')?.click()")
   await waitPending(0, 20000)
   await Promise.all([waitExit(first.child, 60000), waitExit(second.child, 60000)])
@@ -739,9 +805,9 @@ async function runResolvedCase() {
     'work-resolved',
     randomUUID(),
     settingsFile,
-    'Use the Bash tool to run: pwd && date +%s > result.txt . If the Bash tool does not succeed, do not use any other tool; reply with exactly BLOCKED.'
+    `${BASH_TOOL_HINT}Use the Bash tool to run: pwd && date +%s > result.txt . If the Bash tool does not succeed, do not use any other tool; reply with exactly BLOCKED.`
   )
-  const pendingNow = await waitPendingWithToolCheck(1, [session], 25000, [
+  const pendingNow = await waitPendingWithToolCheck(1, [session], 60000, [
     session.sessionId
   ])
   if (!pendingNow) {
@@ -784,9 +850,9 @@ async function runTimeoutCase() {
     'work-timeout',
     randomUUID(),
     timeoutSettingsFile,
-    'Use the Bash tool to run: pwd && date +%s > result.txt . If the Bash tool does not succeed, do not use any other tool; reply with exactly BLOCKED.'
+    `${BASH_TOOL_HINT}Use the Bash tool to run: pwd && date +%s > result.txt . If the Bash tool does not succeed, do not use any other tool; reply with exactly BLOCKED.`
   )
-  const pendingNow = await waitPendingWithToolCheck(1, [session], 25000, [
+  const pendingNow = await waitPendingWithToolCheck(1, [session], 60000, [
     session.sessionId
   ])
   if (!pendingNow) {
@@ -797,6 +863,26 @@ async function runTimeoutCase() {
     return
   }
   await ensurePopupCdp()
+
+  // The countdown must survive a pause longer than the server timeout. The
+  // hook process gets the same pause budget, otherwise it would abandon the
+  // HTTP request while the user is still typing.
+  await cdp.eval("document.querySelector('.popup-pause')?.click()")
+  await delay(6000)
+  const pausedState = await getState()
+  assert(
+    pausedState.pending.some(
+      (item) => item.sessionId === session.sessionId && item.paused
+    ),
+    '暂停 6s 后审批已消失（暂停没有冻结服务端超时）'
+  )
+  const pauseLabel = await cdp.eval(
+    "document.querySelector('.popup-pause')?.textContent?.trim() || ''"
+  )
+  assert(pauseLabel.includes('继续'), `暂停按钮未切换为继续：${pauseLabel}`)
+  await cdp.eval("document.querySelector('.popup-pause')?.click()")
+  log('  ✓ 暂停 6s 未回退，恢复后继续倒计时')
+
   await waitSessionPending(session.sessionId, 0, 25000)
   const state = await getState()
   assert(state.expired.length > 0, '超时后 expired 为空')

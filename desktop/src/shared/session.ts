@@ -102,6 +102,35 @@ export function deriveSessionLabel(input: {
   return project
 }
 
+export function shortSessionId(sessionId: string): string {
+  const compact = (sessionId || '').replace(/[^a-zA-Z0-9]/g, '')
+  return compact.slice(0, 4).toLowerCase()
+}
+
+/** Two-letter avatar badge: "claude-code-notify" → "CC", "前端" → "前". */
+export function sessionInitials(input: { project?: string; label?: string }): string {
+  const source = (input.project || input.label || '?').trim()
+  const words = source.split(/[\s\-_./]+/).filter(Boolean)
+  const initials = words
+    .slice(0, 2)
+    .map((word) => Array.from(word)[0] || '')
+    .join('')
+  return (initials || Array.from(source)[0] || '?').toUpperCase().slice(0, 2)
+}
+
+/**
+ * Auto-name a session from its first real task. `/new` creates a new session,
+ * so a new session gets a new name; later topic changes inside the same session
+ * do not rewrite it (the task line remains the live view).
+ */
+export function taskTitle(task: string, max = 22): string {
+  const text = task.replace(/\s+/g, ' ').trim()
+  const chars = Array.from(text)
+  if (chars.length < 3) return ''
+  if (chars.length <= max) return text
+  return `${chars.slice(0, max).join('').trimEnd()}…`
+}
+
 export function pickSessionColor(key: string, used: Set<string>): string {
   const preferred = sessionColor(key)
   if (!used.has(preferred)) return preferred
@@ -288,6 +317,15 @@ export function summaryOfSession(
     sessionId: first.sessionId,
     origin: first.origin,
     label: first.sessionLabel,
+    title: taskTitle(first.task) || first.sessionLabel,
+    topic: taskTitle(first.task),
+    shortId: shortSessionId(first.sessionId),
+    task: first.task,
+    branch: first.branch,
+    ordinal: 1,
+    groupSize: 1,
+    firstSeen: first.createdAt,
+    customLabel: false,
     project: first.project,
     cwd: first.cwd,
     tty: first.tty,

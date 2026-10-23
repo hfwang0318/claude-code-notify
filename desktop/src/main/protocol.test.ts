@@ -13,6 +13,8 @@ describe('approvalFromPayload', () => {
         tty: 'ttys004',
         terminal: 'iTerm2',
         cwd: '/work/backend-api',
+        task: '修复登录跳转失败',
+        branch: 'feat/login',
         tool_name: 'Bash',
         tool_input: { command: 'git push --force origin main' },
         timeout_seconds: 60
@@ -25,6 +27,8 @@ describe('approvalFromPayload', () => {
     expect(item.sessionLabel).toContain('backend-api')
     expect(item.tty).toBe('ttys004')
     expect(item.terminal).toBe('iTerm2')
+    expect(item.task).toBe('修复登录跳转失败')
+    expect(item.branch).toBe('feat/login')
     expect(item.promptId).toBe('prompt-1')
     expect(item.risk.level).toBe('high')
     expect(item.correlation).toBe('exact')

@@ -43,6 +43,9 @@ interface PendingRequest {
   resolve: (payload: ApprovalResult) => void
   timer: NodeJS.Timeout
   finished: boolean
+  timeoutAt: number
+  paused: boolean
+  remainingMs: number
 }
 
 export interface ServerCallbacks {
@@ -159,6 +162,35 @@ export class NotifyServer {
     if (extra?.answers?.length) resolved.answers = extra.answers
     this.finish(pending, resolved)
     return true
+  }
+
+  /**
+   * Freeze a pending approval's timeout. The hook socket stays open; the user
+   * can type a long answer without racing the original countdown.
+   */
+  pause(itemId: string): { remainingMs: number } | null {
+    const pending = this.pending.get(itemId)
+    if (!pending || pending.finished || pending.paused) return null
+    const remainingMs = Math.max(0, pending.timeoutAt - Date.now())
+    pending.paused = true
+    pending.remainingMs = remainingMs
+    clearTimeout(pending.timer)
+    return { remainingMs }
+  }
+
+  /** Resume a paused approval from the exact remaining time (or an override). */
+  resume(itemId: string, remainingMs?: number): { timeoutAt: number } | null {
+    const pending = this.pending.get(itemId)
+    if (!pending || pending.finished || !pending.paused) return null
+    const wait = Math.max(0, remainingMs ?? pending.remainingMs)
+    pending.paused = false
+    pending.remainingMs = wait
+    pending.timeoutAt = Date.now() + wait
+    pending.timer = setTimeout(() => {
+      this.finish(pending, { status: 'ok', decision: 'timeout' })
+    }, wait)
+    pending.timer.unref?.()
+    return { timeoutAt: pending.timeoutAt }
   }
 
   private finish(pending: PendingRequest, result: ApprovalResult): void {
@@ -300,11 +332,15 @@ export class NotifyServer {
       const result = new Promise<ApprovalResult>((resolve) => {
         resolvePending = resolve
       })
+      const deadline = Date.now() + timeoutSec * 1000
       const pending: PendingRequest = {
         itemId,
         requestId: item.requestId,
         resolve: resolvePending,
         finished: false,
+        timeoutAt: deadline,
+        paused: false,
+        remainingMs: timeoutSec * 1000,
         timer: setTimeout(() => {
           this.finish(pending, { status: 'ok', decision: 'timeout' })
         }, timeoutSec * 1000)

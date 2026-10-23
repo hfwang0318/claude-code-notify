@@ -128,6 +128,8 @@ export function approvalFromPayload(
   const sessionLabel =
     safeString(payload.session_label) ||
     deriveSessionLabel({ project, terminal, tty, sessionId })
+  const task = safeString(payload.task).trim().slice(0, 160)
+  const branch = safeString(payload.branch).trim().slice(0, 80)
   const correlationField = safeString(payload.correlation)
   const correlation: ApprovalItem['correlation'] =
     correlationField === 'unmatched'
@@ -152,6 +154,8 @@ export function approvalFromPayload(
     cwd,
     tty,
     terminal,
+    task,
+    branch,
     message,
     detail,
     toolInput,
@@ -174,6 +178,8 @@ export function buildNotification(
   const origin = safeString(payload.origin) || '本机'
   const project = projectName(cwd)
   const message = safeString(payload.message)
+  const task = safeString(payload.task).trim()
+  const branch = safeString(payload.branch).trim()
   const notificationType = safeString(payload.notification_type)
   const isStop = notificationType === 'Stop' || safeString(payload.matcher) === 'Stop'
   const title = isStop
@@ -181,9 +187,10 @@ export function buildNotification(
     : `Claude Code 等待审批 · ${project}`
   const bodyParts = [
     message ||
-      (isStop ? 'Claude Code 已完成当前回合。' : 'Claude Code 正在等待权限审批。'),
-    `来源：${origin}${cwd ? ` · ${cwd}` : ''}`
+      (isStop ? 'Claude Code 已完成当前回合。' : 'Claude Code 正在等待权限审批。')
   ]
+  if (task) bodyParts.push(`任务：${task}`)
+  bodyParts.push(`来源：${origin}${branch ? ` · ${branch}` : ''}${cwd ? ` · ${cwd}` : ''}`)
   if (notificationType) bodyParts.push(`类型：${notificationType}`)
   if (sessionId) bodyParts.push(`会话：${sessionId.slice(0, 8)}`)
   return { title, body: bodyParts.join('\n') }

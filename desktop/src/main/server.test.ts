@@ -244,6 +244,29 @@ describe('NotifyServer', () => {
     expect(await response.json()).toMatchObject({ status: 'ok', decision: 'suggestion', index: 0 })
   })
 
+  it('pauses the deadline and resumes without expiring while paused', async () => {
+    const promise = fetch(`http://127.0.0.1:${port}/claude-approval`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        request_id: 'req_pause',
+        tool_name: 'Bash',
+        cwd: '/tmp/project',
+        message: 'test',
+        timeout_seconds: 5
+      })
+    })
+    const item = await waitFor(() => approvals[0] || null)
+    const paused = server.pause(item.id)
+    expect(paused?.remainingMs).toBeGreaterThan(0)
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    expect(resolutions).toHaveLength(0)
+    const resumed = server.resume(item.id)
+    expect(resumed?.timeoutAt).toBeGreaterThan(Date.now())
+    server.respond(item.id, 'allow')
+    expect(await (await promise).json()).toMatchObject({ status: 'ok', decision: 'allow' })
+  })
+
   it('resolves an approval from the terminal', async () => {
     const promise = fetch(`http://127.0.0.1:${port}/claude-approval`, {
       method: 'POST',

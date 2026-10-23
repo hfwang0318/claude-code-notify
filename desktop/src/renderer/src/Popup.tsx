@@ -7,11 +7,15 @@ import type {
 import {
   approvalCommand,
   extractEditDiff,
+  groupBySession,
   prettyToolInput,
   remainingSeconds,
   riskLabel,
   riskSegments,
   sessionColor,
+  sessionInitials,
+  shortPath,
+  shortSessionId,
   sortByDeadline
 } from '../../shared/session'
 import { describeSuggestion } from '../../shared/suggestions'
@@ -26,11 +30,6 @@ import { formatTime } from './format'
 
 function emptyDrafts(item: ApprovalItem): QuestionDraft[] {
   return item.questions.map(() => ({ selected: [], text: '', other: false }))
-}
-
-function sourceLabel(item: ApprovalItem): string {
-  const candidates = [item.terminal, item.tty, item.origin]
-  return candidates.find((value) => value && !item.sessionLabel.includes(value)) || ''
 }
 
 function CompletionNotice({
@@ -92,6 +91,18 @@ function CompletionNotice({
           <span className="popup-time">{formatTime(notice.createdAt)}</span>
         </header>
         <h1 className="popup-title">{notice.title}</h1>
+        {notice.shortId || notice.branch ? (
+          <div className="notice-meta">
+            {notice.shortId ? <span className="identity-id">#{notice.shortId}</span> : null}
+            {notice.branch ? <span className="identity-branch">{notice.branch}</span> : null}
+          </div>
+        ) : null}
+        {notice.task ? (
+          <div className="identity-task notice-task" title={notice.task}>
+            <span className="identity-task-label">任务</span>
+            <span className="identity-task-text">{notice.task}</span>
+          </div>
+        ) : null}
         <p className="popup-sub notice-body">{notice.body}</p>
         <div className="popup-actions inline">
           <button className="popup-btn allow" onClick={onDismiss}>
@@ -115,6 +126,8 @@ export default function Popup(): React.JSX.Element | null {
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [confirmHighRisk, setConfirmHighRisk] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [renaming, setRenaming] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
   const cardRef = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -156,6 +169,8 @@ export default function Popup(): React.JSX.Element | null {
   const isExpired = Boolean(expired && !selected)
   const colorFor = (key: string): string =>
     state?.sessions.find((session) => session.key === key)?.color || sessionColor(key)
+  const titleFor = (key: string, fallback: string): string =>
+    state?.sessions.find((session) => session.key === key)?.title || fallback
 
   useEffect(() => {
     if (!item) return
@@ -163,6 +178,8 @@ export default function Popup(): React.JSX.Element | null {
     setConfirmHighRisk(false)
     setAnswerErrors([])
     setActiveQuestion(0)
+    setRenaming(false)
+    setNameDraft('')
     setDrafts((current) => {
       if (current[item.id]) return current
       return { ...current, [item.id]: emptyDrafts(item) }
@@ -187,7 +204,12 @@ export default function Popup(): React.JSX.Element | null {
     window.setTimeout(() => card.focus(), 30)
   }, [item?.id])
 
-  const remaining = item && !isExpired ? remainingSeconds(item.timeoutAt, now) : 0
+  const remaining =
+    item && !isExpired
+      ? item.paused
+        ? Math.max(0, Math.ceil((item.pausedRemainingMs || 0) / 1000))
+        : remainingSeconds(item.timeoutAt, now)
+      : 0
   const total = Math.max(1, item?.timeoutSec || 1)
   const progress = Math.max(0, Math.min(1, remaining / total))
   const draft = item ? drafts[item.id] || emptyDrafts(item) : []
@@ -206,26 +228,41 @@ export default function Popup(): React.JSX.Element | null {
   const waitingSessions = useMemo(() => {
     const groups = new Map<
       string,
-      { key: string; label: string; color: string; count: number; earliest: number }
+      {
+        key: string
+        title: string
+        task: string
+        color: string
+        count: number
+        pausedCount: number
+        earliest: number
+      }
     >()
     for (const entry of pending) {
+      const session = state?.sessions.find((candidate) => candidate.key === entry.sessionKey)
       const existing = groups.get(entry.sessionKey)
       if (existing) {
         existing.count += 1
-        existing.earliest = Math.min(existing.earliest, entry.timeoutAt)
+        if (entry.paused) existing.pausedCount += 1
+        else existing.earliest = Math.min(existing.earliest, entry.timeoutAt)
       } else {
         groups.set(entry.sessionKey, {
           key: entry.sessionKey,
-          label: entry.sessionLabel,
-          color:
-            state?.sessions.find((session) => session.key === entry.sessionKey)?.color ||
-            sessionColor(entry.sessionKey),
+          title: session?.title || entry.sessionLabel,
+          task: session?.task || entry.task || '',
+          color: session?.color || sessionColor(entry.sessionKey),
           count: 1,
-          earliest: entry.timeoutAt
+          pausedCount: entry.paused ? 1 : 0,
+          earliest: entry.paused ? Number.POSITIVE_INFINITY : entry.timeoutAt
         })
       }
     }
-    return [...groups.values()].sort((left, right) => left.earliest - right.earliest)
+    return [...groups.values()]
+      .map((group) => ({ ...group, paused: group.pausedCount === group.count }))
+      .sort((left, right) => {
+        if (left.paused !== right.paused) return left.paused ? 1 : -1
+        return left.earliest - right.earliest
+      })
   }, [pending, state?.sessions])
 
   const submitAnswers = (): void => {
@@ -261,6 +298,12 @@ export default function Popup(): React.JSX.Element | null {
   const ask = (): void => {
     if (!item) return
     void api.respond(item.id, 'ask')
+  }
+
+  const togglePause = (): void => {
+    if (!item || isExpired) return
+    setSelectedId(item.id)
+    void api.pauseApproval(item.id, !item.paused)
   }
 
   const acknowledge = (id?: string): void => {
@@ -370,6 +413,35 @@ export default function Popup(): React.JSX.Element | null {
         }
         return
       }
+      // 跨会话 / 同会话切换必须支持键盘，才配得上“多会话”这个能力。
+      const switchModifier = state?.app.platform === 'darwin' ? event.metaKey : event.ctrlKey
+      if (switchModifier && /^[1-9]$/.test(event.key)) {
+        const target = waitingSessions[Number(event.key) - 1]
+        const first = target
+          ? pending.find((entry) => entry.sessionKey === target.key)
+          : undefined
+        if (first) {
+          event.preventDefault()
+          setSelectedId(first.id)
+          setShowQueue(false)
+        }
+        return
+      }
+      if (
+        switchModifier &&
+        (event.key === 'ArrowDown' || event.key === 'ArrowUp') &&
+        item
+      ) {
+        const sameSession = pending.filter((entry) => entry.sessionKey === item.sessionKey)
+        if (sameSession.length > 1) {
+          event.preventDefault()
+          const index = sameSession.findIndex((entry) => entry.id === item.id)
+          const offset = event.key === 'ArrowDown' ? 1 : -1
+          const next = sameSession[(index + offset + sameSession.length) % sameSession.length]
+          if (next) setSelectedId(next.id)
+        }
+        return
+      }
       if (event.key === 'Escape') {
         if (typing) {
           // 输入框内的 Esc 先退出输入，不提交“交给终端”；再按一次才交给终端。
@@ -435,16 +507,78 @@ export default function Popup(): React.JSX.Element | null {
 
   const queue = pending.filter((entry) => entry.id !== item.id)
   const urgentQueued = queue
-    .filter((entry) => remainingSeconds(entry.timeoutAt, now) <= 15)
+    .filter((entry) => !entry.paused && remainingSeconds(entry.timeoutAt, now) <= 15)
     .sort((left, right) => left.timeoutAt - right.timeoutAt)[0]
   const selectedSession = state.sessions.find((session) => session.key === item.sessionKey)
   const muted = (selectedSession?.mutedUntil || 0) > now
+
+  const identity = {
+    title: selectedSession?.title || item.sessionLabel,
+    shortId: selectedSession?.shortId || shortSessionId(item.sessionId),
+    task: selectedSession?.task || item.task || '',
+    branch: selectedSession?.branch || item.branch || '',
+    color: selectedSession?.color || colorFor(item.sessionKey),
+    customLabel: selectedSession?.customLabel || false,
+    project: selectedSession?.project || item.project,
+    origin: selectedSession?.origin || item.origin,
+    terminal: selectedSession?.terminal || item.terminal,
+    tty: selectedSession?.tty || item.tty,
+    cwd: selectedSession?.cwd || item.cwd
+  }
+  const initials = sessionInitials({ project: identity.project, label: identity.title })
+  const sourceLine = [
+    identity.origin,
+    identity.terminal || identity.tty,
+    identity.branch
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  const identityPath = shortPath(identity.cwd)
+  const sameSessionItems = pending.filter((entry) => entry.sessionKey === item.sessionKey)
+  const sessionPosition = waitingSessions.findIndex(
+    (session) => session.key === item.sessionKey
+  )
+  const requestPosition = sameSessionItems.findIndex((entry) => entry.id === item.id)
+  const switchModifierLabel = state.app.platform === 'darwin' ? '⌘' : 'Ctrl+'
+  const queueGroups = groupBySession(pending).map((group) => {
+    const session = state.sessions.find((candidate) => candidate.key === group.key)
+    const first = group.items[0]
+    return {
+      key: group.key,
+      items: group.items,
+      title: session?.title || first.sessionLabel,
+      task: session?.task || first.task || '',
+      color: session?.color || sessionColor(group.key)
+    }
+  })
+
+  const startRename = (): void => {
+    setRenaming(true)
+    setNameDraft(
+      identity.customLabel
+        ? identity.title
+        : (identity.task || identity.title).slice(0, 60)
+    )
+  }
+
+  const commitRename = (): void => {
+    const next = nameDraft.trim()
+    if (next) void api.renameSession(item.sessionKey, next)
+    setRenaming(false)
+    setNameDraft('')
+  }
+
+  const cancelRename = (): void => {
+    setRenaming(false)
+    setNameDraft('')
+  }
 
   return (
     <div className="popup-stage" data-platform={state.app.platform}>
       <section
         ref={cardRef}
         className={`popup-card risk-${item.risk.level}`}
+        style={{ '--session-color': identity.color } as React.CSSProperties}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="popup-title"
@@ -472,11 +606,72 @@ export default function Popup(): React.JSX.Element | null {
                 ? '需要回答'
                 : '需要授权'}
           </span>
-          {item.origin !== '本机' && !item.sessionLabel.includes(item.origin) ? (
-            <span className="popup-origin">{item.origin}</span>
-          ) : null}
           <span className="popup-time">{formatTime(item.createdAt)}</span>
         </header>
+
+        {!isExpired ? (
+          <div
+            className="popup-identity"
+            style={{ '--session-color': identity.color } as React.CSSProperties}
+          >
+            <span className="identity-avatar" aria-hidden="true">
+              {initials}
+            </span>
+            <div className="identity-body">
+              <div className="identity-line">
+                {renaming ? (
+                  <input
+                    className="identity-rename"
+                    value={nameDraft}
+                    autoFocus
+                    maxLength={60}
+                    placeholder={identity.task || identity.title}
+                    aria-label="会话名称"
+                    onChange={(event) => setNameDraft(event.target.value)}
+                    onBlur={cancelRename}
+                    onKeyDown={(event) => {
+                      event.stopPropagation()
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        commitRename()
+                      } else if (event.key === 'Escape') {
+                        event.preventDefault()
+                        cancelRename()
+                      }
+                    }}
+                  />
+                ) : (
+                  <button
+                    className="popup-session-label identity-name"
+                    title={`${identity.cwd || identity.title} · 点击重命名`}
+                    onClick={startRename}
+                  >
+                    {identity.title}
+                  </button>
+                )}
+                {identity.shortId ? (
+                  <span className="identity-id">#{identity.shortId}</span>
+                ) : null}
+                {identity.customLabel ? <span className="identity-pinned">已命名</span> : null}
+                {muted ? <span className="popup-muted">静音提醒</span> : null}
+              </div>
+              <div className="identity-meta">
+                <span>{sourceLine || identity.origin}</span>
+                {identityPath ? (
+                  <span className="identity-path" title={identity.cwd}>
+                    · {identityPath}
+                  </span>
+                ) : null}
+              </div>
+              {identity.task ? (
+                <div className="identity-task" title={identity.task}>
+                  <span className="identity-task-label">任务</span>
+                  <span className="identity-task-text">{identity.task}</span>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         <h1 className="popup-title" id="popup-title">
           {isExpired
@@ -503,8 +698,9 @@ export default function Popup(): React.JSX.Element | null {
                   aria-hidden="true"
                 />
                 <div className="expired-copy">
-                  <b>{entry.sessionLabel}</b>
+                  <b>{titleFor(entry.sessionKey, entry.sessionLabel)}</b>
                   <span>
+                    {entry.task ? `${entry.task} · ` : ''}
                     {entry.tool} · {approvalCommand(entry).slice(0, 90) || entry.message}
                   </span>
                 </div>
@@ -532,32 +728,25 @@ export default function Popup(): React.JSX.Element | null {
               </div>
             ) : null}
 
-            <div className="popup-session-row">
-              <span
-                className="session-dot"
-                style={{ background: colorFor(item.sessionKey) }}
-                aria-hidden="true"
-              />
-              <span className="popup-session-label" title={item.cwd}>
-                {item.sessionLabel}
-              </span>
-              {sourceLabel(item) ? (
-                <span className="popup-source">{sourceLabel(item)}</span>
-              ) : null}
-              {muted ? <span className="popup-muted">静音提醒</span> : null}
+            <div className="popup-request-row">
               <span className="popup-chip">工具 · {item.tool}</span>
               {item.risk.level !== 'low' ? (
                 <span className={`risk-chip risk-${item.risk.level}`}>
                   {riskLabel(item.risk.level)}
                 </span>
               ) : null}
+              <span className="popup-request-kind">
+                {item.kind === 'question' ? '问答请求' : '权限请求'}
+              </span>
             </div>
 
             {waitingSessions.length > 1 ? (
               <div className="session-strip" role="tablist" aria-label="等待中的会话">
                 {waitingSessions.map((session) => {
                   const active = session.key === item.sessionKey
-                  const left = Math.max(0, Math.ceil((session.earliest - now) / 1000))
+                  const left = Number.isFinite(session.earliest)
+                    ? Math.max(0, Math.ceil((session.earliest - now) / 1000))
+                    : 0
                   return (
                     <button
                       key={session.key}
@@ -565,15 +754,21 @@ export default function Popup(): React.JSX.Element | null {
                       aria-selected={active}
                       className={`session-chip ${active ? 'active' : ''}`}
                       style={{ '--session-color': session.color } as React.CSSProperties}
+                      title={`${session.title}${session.task ? ` · ${session.task}` : ''}`}
                       onClick={() => {
                         const first = pending.find((entry) => entry.sessionKey === session.key)
                         if (first) setSelectedId(first.id)
                       }}
                     >
                       <i aria-hidden="true" />
-                      <span>{session.label}</span>
+                      <span className="session-chip-name">{session.title}</span>
+                      <span className="session-chip-task">
+                        {session.task || '暂无任务摘要'}
+                      </span>
                       {session.count > 1 ? <b>{session.count}</b> : null}
-                      <em>{left}s</em>
+                      <em className={session.paused ? 'paused' : ''}>
+                        {session.paused ? '已暂停' : `${left}s`}
+                      </em>
                     </button>
                   )
                 })}
@@ -583,7 +778,7 @@ export default function Popup(): React.JSX.Element | null {
             {urgentQueued ? (
               <div className="urgent-queue">
                 <span>
-                  “{urgentQueued.sessionLabel}”的审批将在{' '}
+                  “{titleFor(urgentQueued.sessionKey, urgentQueued.sessionLabel)}”的审批将在{' '}
                   {remainingSeconds(urgentQueued.timeoutAt, now)}s 后回退终端
                 </span>
                 <button className="link" onClick={() => setSelectedId(urgentQueued.id)}>
@@ -735,7 +930,7 @@ export default function Popup(): React.JSX.Element | null {
               </div>
             )}
 
-            <div className="popup-count">
+            <div className={`popup-count ${item.paused ? 'paused' : ''}`}>
               <div
                 className="popup-bar"
                 role="progressbar"
@@ -745,7 +940,26 @@ export default function Popup(): React.JSX.Element | null {
               >
                 <i style={{ width: `${progress * 100}%` }} />
               </div>
-              <b className={remaining <= 15 ? 'urgent' : ''}>{remaining}s</b>
+              <b
+                className={`${remaining <= 15 && !item.paused ? 'urgent' : ''} ${
+                  item.paused ? 'paused' : ''
+                }`}
+              >
+                {item.paused ? `已暂停 · ${remaining}s` : `${remaining}s`}
+              </b>
+              <button
+                type="button"
+                className={`popup-pause ${item.paused ? 'active' : ''}`}
+                onClick={togglePause}
+                aria-pressed={Boolean(item.paused)}
+                title={
+                  item.paused
+                    ? '继续倒计时'
+                    : '暂停倒计时，留出打字/思考时间；暂停期间不会自动回退（钩子最多多等约 10 分钟）'
+                }
+              >
+                {item.paused ? '继续' : '暂停'}
+              </button>
             </div>
 
             {questionMode ? (
@@ -817,15 +1031,27 @@ export default function Popup(): React.JSX.Element | null {
             ) : null}
 
             <div className="popup-queue-row">
-              <button
-                className="popup-queue-toggle"
-                onClick={() => setShowQueue((value) => !value)}
-                aria-expanded={showQueue}
-              >
-                {waitingSessions.length} 个会话 · {pending.length} 条待审批
-                {queue.length > 0 ? ` · 还有 ${queue.length} 条` : ''}
-              </button>
+              {waitingSessions.length > 1 ? (
+                <span className="popup-position">
+                  会话 {sessionPosition + 1}/{waitingSessions.length}
+                  {sameSessionItems.length > 1
+                    ? ` · 本会话 ${requestPosition + 1}/${sameSessionItems.length}`
+                    : ''}
+                </span>
+              ) : null}
+              {pending.length > 1 ? (
+                <button
+                  className="popup-queue-toggle"
+                  onClick={() => setShowQueue((value) => !value)}
+                  aria-expanded={showQueue}
+                  title={`${switchModifierLabel}1–9 切换会话；${switchModifierLabel}↑/↓ 切换本会话请求`}
+                >
+                  {waitingSessions.length} 个会话 · {pending.length} 条待审批
+                  {queue.length > 0 ? ` · 还有 ${queue.length} 条` : ''}
+                </button>
+              ) : null}
               <span className="popup-foot-hint">
+                {waitingSessions.length > 1 ? `${switchModifierLabel}1–9 切会话 · ` : ''}
                 {questionMode
                   ? '1–9 答当前题 · Enter 提交 · Esc 交给终端'
                   : highRisk
@@ -836,32 +1062,47 @@ export default function Popup(): React.JSX.Element | null {
 
             {showQueue ? (
               <div className="queue-list" role="list">
-                {pending.map((entry) => {
-                  const left = remainingSeconds(entry.timeoutAt, now)
-                  const active = entry.id === item.id
-                  return (
-                    <button
-                      key={entry.id}
-                      role="listitem"
-                      className={`queue-row ${active ? 'active' : ''} ${
-                        left <= 15 ? 'urgent' : ''
-                      }`}
-                      onClick={() => {
-                        setSelectedId(entry.id)
-                        setShowQueue(false)
-                      }}
-                    >
-                      <span
+                {queueGroups.map((group) => (
+                  <div className="queue-group" key={group.key}>
+                    <div className="queue-group-head">
+                      <i
                         className="session-dot"
-                        style={{ background: colorFor(entry.sessionKey) }}
+                        style={{ background: group.color }}
                         aria-hidden="true"
                       />
-                      <span className="queue-session">{entry.sessionLabel}</span>
-                      <span className="queue-tool">{entry.tool}</span>
-                      <span className="queue-time">{left}s</span>
-                    </button>
-                  )
-                })}
+                      <b>{group.title}</b>
+                      <span className="queue-group-task">{group.task || '暂无任务摘要'}</span>
+                      <em>{group.items.length} 条</em>
+                    </div>
+                    {group.items.map((entry) => {
+                      const paused = Boolean(entry.paused)
+                      const left = paused ? 0 : remainingSeconds(entry.timeoutAt, now)
+                      const active = entry.id === item.id
+                      const command = approvalCommand(entry) || entry.message
+                      return (
+                        <button
+                          key={entry.id}
+                          role="listitem"
+                          className={`queue-row ${active ? 'active' : ''} ${
+                            left <= 15 && !paused ? 'urgent' : ''
+                          }`}
+                          onClick={() => {
+                            setSelectedId(entry.id)
+                            setShowQueue(false)
+                          }}
+                        >
+                          <span className="queue-tool">{entry.tool}</span>
+                          <span className="queue-command" title={command}>
+                            {command}
+                          </span>
+                          <span className={`queue-time ${paused ? 'paused' : ''}`}>
+                            {paused ? '已暂停' : `${left}s`}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
               </div>
             ) : null}
           </>
@@ -872,7 +1113,9 @@ export default function Popup(): React.JSX.Element | null {
         ) : (
           <div className="popup-foot">
             {muted ? '该会话已静音提醒 · ' : ''}
-            超时自动回退终端
+            {item.paused
+              ? '倒计时已暂停 · 点“继续”恢复自动回退（最长约 10 分钟）'
+              : '超时自动回退终端'}
           </div>
         )}
       </section>

@@ -25,6 +25,8 @@ function item(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
     cwd: '/work/app',
     tty: '',
     terminal: '',
+    task: '',
+    branch: '',
     message: '',
     detail: '',
     toolInput: { command: 'git status' },

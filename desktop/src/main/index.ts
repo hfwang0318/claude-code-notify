@@ -160,6 +160,7 @@ let notificationTimer: NodeJS.Timeout | null = null
 let noticeTimer: NodeJS.Timeout | null = null
 
 const localApprovals = new Map<string, (decision: string) => void>()
+const localTimers = new Map<string, NodeJS.Timeout>()
 const decisionSources = new Map<string, DecisionSource>()
 const itemCache = new Map<string, ApprovalItem>()
 const settledIds = new Set<string>()
@@ -219,10 +220,13 @@ function persistPendingSnapshot(): void {
       pendingSnapshotPath,
       store.get().pending.map((item) => ({
         id: item.id,
+        sessionId: item.sessionId,
+        sessionKey: item.sessionKey,
         sessionLabel: item.sessionLabel,
         origin: item.origin,
         tool: item.tool,
         project: item.project,
+        task: item.task,
         createdAt: item.createdAt
       }))
     )
@@ -682,9 +686,12 @@ function updateBadge(): void {
     app.dock.setBadge(count > 0 ? String(count) : '')
   }
   if (tray) {
+    const waitingTitles = [
+      ...new Set(store.get().pending.map((item) => sessionTitleFor(item)))
+    ].slice(0, 3)
     tray.setToolTip(
       count > 0
-        ? `${APP_NAME} · ${count} 条待审批 · ${waitingSessions} 个会话`
+        ? `${APP_NAME} · ${count} 条待审批 · ${waitingSessions} 个会话\n${waitingTitles.join('、')}`
         : `${APP_NAME} · 暂无待审批`
     )
     if (process.platform === 'darwin') {
@@ -713,6 +720,12 @@ function buildTrayMenu(): Menu {
   const state = store.get()
   const pending = state.pending.length
   const waitingSessions = new Set(state.pending.map((item) => item.sessionKey)).size
+  const groups = new Map<string, ApprovalItem[]>()
+  for (const item of state.pending) {
+    const group = groups.get(item.sessionKey)
+    if (group) group.push(item)
+    else groups.set(item.sessionKey, [item])
+  }
   const template: Electron.MenuItemConstructorOptions[] = [
     {
       label:
@@ -720,7 +733,23 @@ function buildTrayMenu(): Menu {
           ? `${pending} 条待审批 · ${waitingSessions} 个会话`
           : '暂无待审批',
       enabled: false
-    },
+    }
+  ]
+  if (groups.size > 0) {
+    template.push({
+      label: '等待中的会话',
+      submenu: [...groups.entries()].slice(0, 8).map(([key, items]) => {
+        const info = state.sessions.find((session) => session.key === key)
+        const title = info?.title || items[0].sessionLabel
+        const task = info?.task || items[0].task
+        return {
+          label: `${items.length} · ${title}${task ? ` — ${task.slice(0, 34)}` : ''}`,
+          click: () => focusSession(key)
+        }
+      })
+    })
+  }
+  template.push(
     { label: '打开待审批', click: () => sendUiCommand('inbox') },
     { label: '显示主窗口', click: () => showMainWindow() },
     { type: 'separator' },
@@ -742,7 +771,7 @@ function buildTrayMenu(): Menu {
     { label: '设置…', click: () => sendUiCommand('prefs') },
     { label: '关于', click: () => showAbout() },
     { type: 'separator' }
-  ]
+  )
   if (process.platform === 'darwin' || process.platform === 'win32') {
     template.push({
       label: '开机自启',
@@ -766,7 +795,11 @@ function refreshTrayMenu(force = false): void {
     state.server.listening,
     state.prefs.mode,
     state.deploy.localMode,
-    state.deploy.profiles.length
+    state.deploy.profiles.length,
+    state.sessions
+      .filter((session) => session.waiting > 0)
+      .map((session) => `${session.key}:${session.title}:${session.task}`)
+      .join(',')
   ].join('|')
   if (!force && signature === lastTraySignature) return
   lastTraySignature = signature
@@ -924,6 +957,7 @@ function finishItem(item: ApprovalItem, decision: string, source: DecisionSource
   // Always drop per-item bookkeeping, even for ids that were already settled.
   decisionSources.delete(item.id)
   itemCache.delete(item.id)
+  clearLocalTimeout(item.id)
   if (settledIds.has(item.id)) return
   settledIds.add(item.id)
   if (settledIds.size > 1000) settledIds.clear()
@@ -1013,6 +1047,53 @@ function respond(
   syncPopup()
 }
 
+function pauseApproval(itemId: string, paused: boolean): void {
+  const item = store.get().pending.find((entry) => entry.id === itemId)
+  if (!item) return
+  if (paused) {
+    if (item.paused) return
+    const remainingMs =
+      server.pause(itemId)?.remainingMs ?? Math.max(0, item.timeoutAt - Date.now())
+    clearLocalTimeout(itemId)
+    store.patch((draft) => {
+      draft.pending = draft.pending.map((entry) =>
+        entry.id === itemId
+          ? {
+              ...entry,
+              paused: true,
+              pausedRemainingMs: remainingMs,
+              // Paused items sort last and must never look "urgent".
+              timeoutAt: Number.MAX_SAFE_INTEGER
+            }
+          : entry
+      )
+    })
+    log('info', `倒计时已暂停 · ${item.sessionLabel} · 剩余 ${Math.ceil(remainingMs / 1000)}s`)
+  } else {
+    if (!item.paused) return
+    const remainingMs = Math.max(0, item.pausedRemainingMs || 0)
+    const resumed = server.resume(itemId, remainingMs)
+    if (!resumed) {
+      // Test/demo approvals do not go through the HTTP server.
+      scheduleLocalTimeoutMs(itemId, remainingMs)
+    }
+    store.patch((draft) => {
+      draft.pending = draft.pending.map((entry) =>
+        entry.id === itemId
+          ? {
+              ...entry,
+              paused: false,
+              pausedRemainingMs: 0,
+              timeoutAt: resumed?.timeoutAt ?? Date.now() + remainingMs
+            }
+          : entry
+      )
+    })
+    log('info', `倒计时已恢复 · ${item.sessionLabel} · ${Math.ceil(remainingMs / 1000)}s`)
+  }
+  syncPopup('none')
+}
+
 function acknowledgeExpired(id?: string): void {
   store.clearExpired(id)
   log('info', id ? '已确认一条回退提示' : '已确认全部回退提示')
@@ -1028,6 +1109,20 @@ function muted(key: string): boolean {
   return sessions.isMuted(key)
 }
 
+/** Popup/notification identity helpers: prefer the registry's stable title. */
+function sessionTitleFor(item: ApprovalItem): string {
+  return (
+    store.get().sessions.find((session) => session.key === item.sessionKey)?.title ||
+    item.sessionLabel
+  )
+}
+
+function sessionTaskFor(item: ApprovalItem): string {
+  return (
+    store.get().sessions.find((session) => session.key === item.sessionKey)?.task || item.task
+  )
+}
+
 function flushApprovalNotifications(): void {
   notificationTimer = null
   const items = notificationQueue
@@ -1036,11 +1131,15 @@ function flushApprovalNotifications(): void {
   const uniqueSessions = new Set(items.map((item) => item.sessionKey))
   const title =
     items.length === 1
-      ? `${items[0].sessionLabel} 等待审批`
+      ? `${sessionTitleFor(items[0])} 等待审批`
       : `${uniqueSessions.size} 个会话 · ${items.length} 条待审批`
   const body = items
     .slice(0, 4)
-    .map((item) => `${item.sessionLabel} · ${item.tool}：${(approvalCommand(item) || item.message).slice(0, 80)}`)
+    .map((item) => {
+      const task = sessionTaskFor(item)
+      const command = (approvalCommand(item) || item.message).slice(0, 60)
+      return `${sessionTitleFor(item)} · ${task ? `${task.slice(0, 40)} · ` : ''}${item.tool}：${command}`
+    })
     .join('\n')
   const notification = new Notification({
     title,
@@ -1096,9 +1195,10 @@ function notifyTimeout(item: ApprovalItem): void {
     return
   }
   if (popupWindow?.isVisible()) return
+  const task = sessionTaskFor(item)
   const notification = new Notification({
     title: '审批已回退终端',
-    body: `${item.sessionLabel} · ${item.tool} 未在 ${item.timeoutSec}s 内处理`,
+    body: `${sessionTitleFor(item)}${task ? ` · ${task.slice(0, 50)}` : ''} · ${item.tool} 未在 ${item.timeoutSec}s 内处理`,
     silent: true
   })
   notification.on('click', () => sendUiCommand('inbox'))
@@ -1174,10 +1274,27 @@ function handleApproval(item: ApprovalItem): void {
   notifyApproval(item)
 }
 
+function scheduleLocalTimeoutMs(id: string, delayMs: number): void {
+  clearLocalTimeout(id)
+  const timer = setTimeout(() => {
+    localTimers.delete(id)
+    if (store.get().pending.some((entry) => entry.id === id)) {
+      respond(id, 'timeout', undefined, 'timeout')
+    }
+  }, Math.max(0, delayMs))
+  timer.unref?.()
+  localTimers.set(id, timer)
+}
+
 function scheduleLocalTimeout(id: string, seconds: number): void {
-  setTimeout(() => {
-    if (store.get().pending.some((entry) => entry.id === id)) respond(id, 'timeout', undefined, 'timeout')
-  }, seconds * 1000)
+  scheduleLocalTimeoutMs(id, seconds * 1000)
+}
+
+function clearLocalTimeout(id: string): void {
+  const timer = localTimers.get(id)
+  if (!timer) return
+  clearTimeout(timer)
+  localTimers.delete(id)
 }
 
 function localApprovalItem(mode: 'approval' | 'question'): ApprovalItem {
@@ -1198,8 +1315,8 @@ function localApprovalItem(mode: 'approval' | 'question'): ApprovalItem {
   return {
     id,
     requestId: id,
-    sessionId: 'local-demo',
-    sessionKey: '本机:local-demo',
+    sessionId: 'a11ce000-0000-4000-8000-000000000002',
+    sessionKey: '本机:a11ce000-0000-4000-8000-000000000002',
     sessionLabel: 'claude-code-notify · 本机',
     origin: '本机',
     promptId: '',
@@ -1211,6 +1328,8 @@ function localApprovalItem(mode: 'approval' | 'question'): ApprovalItem {
     cwd: '~/workspace/claude-code-notify',
     tty: '',
     terminal: '',
+    task: mode === 'approval' ? '验证多会话审批弹窗的会话身份展示' : '确认部署目标环境',
+    branch: 'feat/popup-identity',
     message: mode === 'approval' ? 'Claude 请求执行权限' : 'Claude 想问你一个问题',
     detail: JSON.stringify(toolInput, null, 2),
     toolInput,
@@ -1279,7 +1398,9 @@ function createNotifyServer(): NotifyServer {
         cwd,
         project: projectName(cwd),
         tty: typeof payload.tty === 'string' ? payload.tty : '',
-        terminal: typeof payload.terminal === 'string' ? payload.terminal : ''
+        terminal: typeof payload.terminal === 'string' ? payload.terminal : '',
+        task: typeof payload.task === 'string' ? payload.task : '',
+        branch: typeof payload.branch === 'string' ? payload.branch : ''
       })
       store.patch((draft) => {
         draft.server.notified += 1
@@ -1295,9 +1416,14 @@ function createNotifyServer(): NotifyServer {
       })
       log('notify', `通知 · ${projectName(cwd) || '未知项目'} · ${title}`)
       refreshSessions()
+      const sessionInfo = key
+        ? store.get().sessions.find((session) => session.key === key)
+        : undefined
       const notificationType = safeString(payload.notification_type)
       const isStop =
         notificationType === 'Stop' || safeString(payload.matcher) === 'Stop'
+      const effectiveTitle =
+        isStop && sessionInfo?.title ? `${sessionInfo.title} 已完成` : title
       const hasPending =
         state.pending.length > 0 || state.expired.length > 0
       if (
@@ -1311,12 +1437,18 @@ function createNotifyServer(): NotifyServer {
       ) {
         showCompletionNotice({
           id: `notice_${randomUUID()}`,
-          title,
+          title: effectiveTitle,
           body,
           sessionKey: key || '',
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          sessionTitle: sessionInfo?.title,
+          sessionLabel: sessionInfo?.label,
+          shortId: sessionInfo?.shortId,
+          color: sessionInfo?.color,
+          task: sessionInfo?.task,
+          branch: sessionInfo?.branch
         })
-        log('notify', `完成弹窗 · ${projectName(cwd) || '未知项目'} · ${title}`)
+        log('notify', `完成弹窗 · ${projectName(cwd) || '未知项目'} · ${effectiveTitle}`)
         return
       }
       if (!deliver) {
@@ -1334,7 +1466,7 @@ function createNotifyServer(): NotifyServer {
         return
       }
       const notification = new Notification({
-        title,
+        title: effectiveTitle,
         body,
         silent: !state.prefs.sound
       })
@@ -2003,6 +2135,9 @@ function registerIpc(): void {
       respond(id, decision, extra, 'popup')
     }
   )
+  ipcMain.handle('approval:pause', (_event, id: string, paused: boolean) => {
+    pauseApproval(id, Boolean(paused))
+  })
   ipcMain.handle('approval:acknowledge', (_event, id?: string) => {
     acknowledgeExpired(id)
   })
@@ -2531,6 +2666,8 @@ function captureItem(
     cwd: '~/workspace/claude-code-notify',
     tty: '',
     terminal: '',
+    task: '',
+    branch: '',
     message: 'Claude 请求执行权限',
     detail: JSON.stringify(toolInput, null, 2),
     toolInput,
@@ -2563,7 +2700,7 @@ async function runCapture(): Promise<void> {
       message: '上次成功 16:15',
       localMode: 'popup',
       localHooks: 2,
-      hookVersion: '2',
+      hookVersion: HOOK_VERSION,
       hookStale: false,
       profiles: [
         {
@@ -2582,7 +2719,7 @@ async function runCapture(): Promise<void> {
           lastDeployAt: now - 3600_000,
           status: 'deployed',
           hooks: 2,
-          hookVersion: '2'
+          hookVersion: HOOK_VERSION
         }
       ]
     }
@@ -2689,11 +2826,15 @@ async function runCapture(): Promise<void> {
 
   const first = captureItem({
     id: 'apr_capture',
-    sessionId: 'session-front',
-    sessionKey: '本机:session-front',
-    sessionLabel: '前端 · iTerm2 · ttys004',
+    sessionId: '3c9f2a10-77bd-4a3e-9c7a-1234567890ab',
+    sessionKey: '本机:3c9f2a10-77bd-4a3e-9c7a-1234567890ab',
+    sessionLabel: 'claude-code-notify · ttys004',
     tty: 'ttys004',
     terminal: 'iTerm2',
+    project: 'claude-code-notify',
+    cwd: '~/workspace/claude-code-notify',
+    task: '修复多会话弹窗无法区分任务的问题',
+    branch: 'feat/popup-identity',
     toolInput: { command: 'git push origin feature/approval-popup --force-with-lease' },
     detail: 'git push origin feature/approval-popup --force-with-lease',
     message: 'Claude 请求执行权限',
@@ -2703,13 +2844,15 @@ async function runCapture(): Promise<void> {
   })
   const second = captureItem({
     id: 'apr_capture_2',
-    sessionId: 'session-api',
-    sessionKey: '本机:session-api',
-    sessionLabel: '后端 · VS Code · ttys007',
+    sessionId: '81bd5c44-1f2e-4a6b-8c0d-abcdef123456',
+    sessionKey: '本机:81bd5c44-1f2e-4a6b-8c0d-abcdef123456',
+    sessionLabel: 'claude-code-notify · ttys007',
     tty: 'ttys007',
     terminal: 'VS Code',
-    project: 'backend-api',
-    cwd: '~/workspace/backend-api',
+    project: 'claude-code-notify',
+    cwd: '~/worktrees/claude-code-notify',
+    task: '给审批接口补上 trace_id 透传',
+    branch: 'fix/trace-id',
     tool: 'Edit',
     toolInput: {
       file_path: 'src/server/config.ts',
@@ -2723,11 +2866,14 @@ async function runCapture(): Promise<void> {
   })
   const third = captureItem({
     id: 'apr_capture_3',
-    sessionId: 'session-infra',
-    sessionKey: 'prod-api:session-infra',
+    sessionId: 'd4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70',
+    sessionKey: 'prod-api:d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f70',
     sessionLabel: 'infra · prod-api',
     origin: 'prod-api',
     project: 'infra',
+    cwd: '~/srv/infra',
+    task: '重建 staging 集群并清理旧 PVC',
+    branch: 'main',
     toolInput: { command: 'terraform destroy -auto-approve' },
     createdAt: now,
     timeoutAt: now + 30000,
@@ -2750,6 +2896,13 @@ async function runCapture(): Promise<void> {
   const popupImage = await popupWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'popup.png'), popupImage.toPNG())
 
+  pauseApproval(third.id, true)
+  syncPopup('none')
+  popupWindow.webContents.send('popup:select', third.id)
+  await delay(600)
+  const pausedImage = await popupWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-paused.png'), pausedImage.toPNG())
+
   store.setPending([third])
   syncPopup('none')
   await delay(1000)
@@ -2758,8 +2911,8 @@ async function runCapture(): Promise<void> {
 
   const question = captureItem({
     id: 'apr_question',
-    sessionId: 'session-front',
-    sessionKey: '本机:session-front',
+    sessionId: '3c9f2a10-77bd-4a3e-9c7a-1234567890ab',
+    sessionKey: '本机:3c9f2a10-77bd-4a3e-9c7a-1234567890ab',
     sessionLabel: '前端 · iTerm2 · ttys004',
     kind: 'question',
     tool: 'AskUserQuestion',
@@ -3016,9 +3169,11 @@ async function bootstrap(): Promise<void> {
     await delay(900)
     const item = captureItem({
       id: 'local_demo',
-      sessionId: 'session-demo',
-      sessionKey: '本机:session-demo',
+      sessionId: 'a11ce000-0000-4000-8000-000000000001',
+      sessionKey: '本机:a11ce000-0000-4000-8000-000000000001',
       sessionLabel: 'claude-code-notify · iTerm2',
+      task: '验证多会话审批弹窗的会话身份展示',
+      branch: 'feat/popup-identity',
       toolInput: { command: 'git push origin feature/approval-popup --force-with-lease' },
       timeoutAt: Date.now() + 39000,
       timeoutSec: 60

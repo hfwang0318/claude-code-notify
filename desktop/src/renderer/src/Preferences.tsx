@@ -378,7 +378,7 @@ export default function Preferences({
                             style={{ background: session.color }}
                             aria-hidden="true"
                           />
-                          <b>{session.label}</b>
+                          <b title={session.task || session.label}>{session.title}</b>
                           <span>{session.origin}</span>
                           <em>{session.waiting > 0 ? `${session.waiting} 条等待` : '空闲'}</em>
                           <button
@@ -608,7 +608,7 @@ export default function Preferences({
                         </option>
                         {waitingSessions.map((session) => (
                           <option key={session.key} value={session.key}>
-                            {`${session.label} · ${session.origin}`}
+                            {`${session.title} · ${session.origin}`}
                           </option>
                         ))}
                       </select>

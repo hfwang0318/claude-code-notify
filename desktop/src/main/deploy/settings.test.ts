@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildEnvBlock,
   buildHookCommand,
+  HOOK_PAUSE_BUDGET_SEC,
   mergeSettingsJson,
   type HookEntry
 } from './settings'
@@ -22,10 +23,12 @@ describe('mergeSettingsJson', () => {
       })
     )
     expect(merged.hooks.PermissionRequest).toHaveLength(1)
-    expect(merged.hooks.PermissionRequest[0].hooks[0].timeout).toBe(300)
+    expect(merged.hooks.PermissionRequest[0].hooks[0].timeout).toBe(
+      300 + HOOK_PAUSE_BUDGET_SEC
+    )
     expect(merged.hooks.PermissionRequest[0].matcher).toBe('')
     expect(merged.hooks.PreToolUse).toHaveLength(1)
-    expect(merged.hooks.PreToolUse[0].hooks[0].timeout).toBe(300)
+    expect(merged.hooks.PreToolUse[0].hooks[0].timeout).toBe(300 + HOOK_PAUSE_BUDGET_SEC)
   })
 
   it('preserves third-party hooks and is idempotent', () => {

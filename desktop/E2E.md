@@ -25,9 +25,9 @@ E2E PASS · all · 80.5s
 |---|---|---|
 | `bypass` | 真实 Claude 分别用 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions` 启动，执行 Bash 并写入/编辑文件（Write/Edit 可用时优先） | 全程 pending=0；Bash + 文件结果真实产生；history 没有审批记录 |
 | `stop` | 真实 Claude 完成一轮（`-p`） | 应用日志收到 `type=Stop` 通知；标题是“已完成”而不是“等待审批” |
-| `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
+| `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；身份条有真实任务摘要与 4 位短码；两个会话条的任务摘要和会话名都不同；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
 | `resolved` | 一路真实 Claude 请求权限，然后模拟终端侧已处理 | 调用 `/claude-approval-resolved` 返回 `resolved`；pending 清空；history 为 `cancelled/terminal` |
-| `timeout` | 一路真实 Claude 请求权限，使用 15s hook 超时（服务端 5s） | 不做决定时 pending 清空；`expired` 出现；history 为 `timeout/timeout`；调用确认后 `expired` 清空 |
+| `timeout` | 一路真实 Claude 请求权限，使用 20s hook 超时（服务端 10s），并先暂停 6s 再恢复 | 不做决定时 pending 清空；`expired` 出现；history 为 `timeout/timeout`；调用确认后 `expired` 清空 |
 
 测试还会校验 `pending.json`、`history.jsonl`、`sessions.json` 的真实落盘内容。
 
@@ -38,6 +38,12 @@ Hook 事件名回归：`PermissionRequest` 只能输出 `PermissionRequest`，`P
 计划模式回归：`ExitPlanMode` 的 PermissionRequest allow 必须带原始 `updatedInput` 并 `setMode`，否则 Claude Code 2.1.28x 会保留计划审批对话框。真实 `-p` 当前没有 `ExitPlanMode` 工具，因此由 `src/main/hook-bypass.test.ts` 覆盖输出结构。
 
 `AskUserQuestion` 重复弹窗回归：问答由 PreToolUse 通道负责；旧部署缺少 `CLAUDE_ASKUSER_CHANNEL` 时，随后的 PermissionRequest 会再弹一次。服务端现在直接拒绝这种重复 PermissionRequest（回退终端），hook 测试也验证通道存在时不会发送。真实 `AskUserQuestion` 在当前 `-p` 模型工具集不可用，因此该路径由 self-test + hook/server 单测覆盖，而不是本脚本的真实 Claude 用例。
+
+会话身份回归（hook v7）：审批/通知钩子会从 `transcript_path` 末尾优先读取 Claude Code 写入的 `last-prompt`，找不到再回退最后一条字符串 `content` 的 user 消息；同时读取工作目录的 `.git/HEAD` 得到分支（`branch`）。`multi` 用例断言身份条有非空任务摘要、短码符合 `#xxxx`、两个并发会话的任务摘要与会话名都互不相同。旧 hook 不上报这两个字段时弹窗自动退化为“短码 + 分支/路径”，不会显示伪造摘要。
+
+工具暴露回归：部分路由模型只有在存在显式权限规则时才把 Bash/Write/Edit 放进工具表。E2E 的隔离 settings 因此写入 `permissions.ask: ["Bash","Write","Edit"]` —— `ask` 既能让工具可见，又会真实触发 PermissionRequest（`allow` 会直接跳过弹窗）。如果模型仍然只暴露 ToolSearch/Web，用例按 SKIP 处理而不是伪造通过。
+
+倒计时暂停回归：`timeout` 用例在审批到达后点击“暂停”，等待 6 秒（超过服务端 10 秒窗口的一半）并断言 pending 仍在、按钮变成“继续”，再恢复并等待正常超时。hook 的 settings timeout 和脚本 socket timeout 都会加上 600 秒暂停预算，否则 hook 会在暂停期间先断开。
 
 ### 明确不覆盖
 

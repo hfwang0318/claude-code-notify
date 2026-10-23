@@ -62,15 +62,24 @@ export interface UiConfig {
 
 export interface SessionMeta {
   label?: string
+  /** Where `label` came from. Auto labels can be replaced by a task-aware title. */
+  labelSource?: 'auto' | 'custom'
   color?: string
   mutedUntil?: number
   lastSeen?: number
+  firstSeen?: number
   sessionId?: string
   origin?: string
   project?: string
   cwd?: string
   tty?: string
   terminal?: string
+  /** Last task summary reported by the hook, cached for later notices. */
+  task?: string
+  /** First task snapshot used as the session's automatic name. */
+  topic?: string
+  /** Last git branch reported by the hook. */
+  branch?: string
 }
 
 export type SessionMetaMap = Record<string, SessionMeta>

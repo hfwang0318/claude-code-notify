@@ -2,7 +2,9 @@ export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
 export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
-export const HOOK_VERSION = '5'
+export const HOOK_VERSION = '7'
+/** Extra time the hook process may stay alive while a popup countdown is paused. */
+export const HOOK_PAUSE_BUDGET_SEC = 600
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
 
 export const ENV_MARK_BEGIN = '# >>> claude-notify >>>'
@@ -147,7 +149,8 @@ export function mergeSettingsJson(
 
   const entry: Record<string, unknown> = {
     ...options.hookEntry,
-    timeout: options.mode === 'popup' ? options.hookTimeout : 30
+    timeout:
+      options.mode === 'popup' ? options.hookTimeout + HOOK_PAUSE_BUDGET_SEC : 30
   }
   const sectionName = options.mode === 'popup' ? 'PermissionRequest' : 'Notification'
   const section = Array.isArray(hooks[sectionName])
@@ -170,7 +173,7 @@ export function mergeSettingsJson(
   if (options.mode === 'popup' && options.questionEntry) {
     const questionEntry: Record<string, unknown> = {
       ...options.questionEntry,
-      timeout: options.hookTimeout
+      timeout: options.hookTimeout + HOOK_PAUSE_BUDGET_SEC
     }
     const preSection = Array.isArray(hooks.PreToolUse)
       ? (hooks.PreToolUse as unknown[])

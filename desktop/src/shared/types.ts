@@ -51,6 +51,13 @@ export interface CompletionNotice {
   body: string
   sessionKey: string
   createdAt: number
+  /** Session identity, so a completion notice is as distinguishable as an approval. */
+  sessionTitle?: string
+  sessionLabel?: string
+  shortId?: string
+  color?: string
+  task?: string
+  branch?: string
 }
 
 export interface ApprovalOption {
@@ -87,6 +94,22 @@ export interface SessionInfo {
   sessionId: string
   origin: string
   label: string
+  /** Human-facing name: custom label, first-task auto name, or "project #2". */
+  title: string
+  /** First task snapshot used as the auto title; empty when unavailable. */
+  topic: string
+  /** First four characters of the session id; stable handle to match terminals/logs. */
+  shortId: string
+  /** One-line summary of the current task, extracted from the transcript by the hook. */
+  task: string
+  /** Current git branch of the working directory, when known. */
+  branch: string
+  /** 1-based position among sessions that share origin + project. */
+  ordinal: number
+  /** Number of sessions sharing origin + project (1 when unique). */
+  groupSize: number
+  firstSeen: number
+  customLabel: boolean
   project: string
   cwd: string
   tty: string
@@ -114,6 +137,10 @@ export interface ApprovalItem {
   cwd: string
   tty: string
   terminal: string
+  /** Task summary forwarded by the hook (last human prompt of this session). */
+  task: string
+  /** Git branch forwarded by the hook. */
+  branch: string
   message: string
   detail: string
   toolInput: Record<string, unknown>
@@ -125,6 +152,10 @@ export interface ApprovalItem {
   createdAt: number
   timeoutAt: number
   timeoutSec: number
+  /** True while the countdown is paused by the user (typing a long answer). */
+  paused?: boolean
+  /** Remaining milliseconds captured when the countdown was paused. */
+  pausedRemainingMs?: number
 }
 
 export interface ApprovalExtra {
@@ -318,6 +349,7 @@ export interface DesktopApi {
   getState(): Promise<AppState>
   onState(callback: (state: AppState) => void): () => void
   respond(id: string, decision: string, extra?: ApprovalExtra): Promise<void>
+  pauseApproval(id: string, paused: boolean): Promise<void>
   acknowledgeExpired(id?: string): Promise<void>
   dismissNotice(): Promise<void>
   selectApproval(id: string): Promise<void>

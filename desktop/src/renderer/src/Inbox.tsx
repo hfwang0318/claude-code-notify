@@ -7,6 +7,7 @@ import {
   remainingSeconds,
   riskLabel,
   sessionColor,
+  shortSessionId,
   sortByDeadline
 } from '../../shared/session'
 import { formatRelative } from './format'
@@ -70,6 +71,15 @@ function sessionMeta(state: AppState, item: ApprovalItem) {
       sessionId: item.sessionId,
       origin: item.origin,
       label: item.sessionLabel,
+      title: item.sessionLabel,
+      topic: '',
+      shortId: shortSessionId(item.sessionId),
+      task: item.task,
+      branch: item.branch,
+      ordinal: 1,
+      groupSize: 1,
+      firstSeen: item.createdAt,
+      customLabel: false,
       project: item.project,
       cwd: item.cwd,
       tty: item.tty,
@@ -103,12 +113,23 @@ export default function Inbox({
     return state.pending.filter((item) => {
       if (riskFilter !== 'all' && item.risk.level !== riskFilter) return false
       if (!text) return true
-      return [item.sessionLabel, item.origin, item.project, item.tool, approvalCommand(item)]
+      const session = state.sessions.find((candidate) => candidate.key === item.sessionKey)
+      return [
+        item.sessionLabel,
+        session?.title,
+        session?.task,
+        session?.branch,
+        item.task,
+        item.origin,
+        item.project,
+        item.tool,
+        approvalCommand(item)
+      ]
         .join(' ')
         .toLowerCase()
         .includes(text)
     })
-  }, [query, riskFilter, state.pending])
+  }, [query, riskFilter, state.pending, state.sessions])
   const groups = useMemo(() => groupBySession(sortByDeadline(visible)), [visible])
   const waitingSessions = new Set(visible.map((item) => item.sessionKey)).size
 
@@ -267,12 +288,24 @@ export default function Inbox({
         const meta = sessionMeta(state, first)
         const muted = (meta.mutedUntil || 0) > now
         const focused = focusSessionKey === group.key
-        const expiresIn = remainingSeconds(first.timeoutAt, now)
+        const pausedGroup = group.items.every((item) => item.paused)
+        const expiresIn = pausedGroup
+          ? 0
+          : Math.min(
+              ...group.items
+                .filter((item) => !item.paused)
+                .map((item) => remainingSeconds(item.timeoutAt, now))
+            )
         return (
           <section
             className={`inbox-session ${focused ? 'focused' : ''}`}
             key={group.key}
             id={`session-${encodeURIComponent(group.key)}`}
+            style={
+              {
+                '--session-color': meta.color || sessionColor(group.key)
+              } as React.CSSProperties
+            }
           >
             <header className="inbox-session-head">
               <span
@@ -292,6 +325,7 @@ export default function Inbox({
                     value={nameDraft}
                     autoFocus
                     maxLength={60}
+                    placeholder={meta.task || meta.title}
                     onChange={(event) => setNameDraft(event.target.value)}
                     onBlur={() => commitRename(group.key)}
                     aria-label="会话名称"
@@ -301,16 +335,23 @@ export default function Inbox({
                 <button
                   className="session-name"
                   title={`${meta.cwd || meta.project} · 点击重命名`}
-                  onClick={() => startRename(group.key, meta.label)}
+                  onClick={() =>
+                    startRename(group.key, meta.customLabel ? meta.label : meta.task || meta.label)
+                  }
                 >
-                  {meta.label}
+                  {meta.title}
                 </button>
               )}
-              {!meta.label.includes(meta.origin) ? (
+              {meta.shortId ? <span className="session-id">#{meta.shortId}</span> : null}
+              {!meta.title.includes(meta.origin) ? (
                 <span className="session-origin">{meta.origin}</span>
               ) : null}
               <span className="session-count">{group.items.length} 条</span>
-              {expiresIn <= 20 ? <span className="session-urgent">{expiresIn}s</span> : null}
+              {pausedGroup ? (
+                <span className="session-urgent paused">已暂停</span>
+              ) : expiresIn <= 20 ? (
+                <span className="session-urgent">{expiresIn}s</span>
+              ) : null}
               <div className="session-tools">
                 <button
                   className={`icon-btn ${muted ? 'active' : ''}`}
@@ -343,14 +384,35 @@ export default function Inbox({
               </div>
             </header>
 
+            {meta.task || meta.branch ? (
+              <div className="inbox-session-task">
+                {meta.task ? (
+                  <>
+                    <span className="inbox-session-task-label">任务</span>
+                    <span className="inbox-session-task-text" title={meta.task}>
+                      {meta.task}
+                    </span>
+                  </>
+                ) : (
+                  <span className="inbox-session-task-text faint">钩子未上报任务摘要</span>
+                )}
+                {meta.branch ? (
+                  <span className="inbox-session-branch" title="当前分支">
+                    {meta.branch}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="inbox-items">
               {group.items.map((item) => {
-                const left = remainingSeconds(item.timeoutAt, now)
+                const paused = Boolean(item.paused)
+                const left = paused ? 0 : remainingSeconds(item.timeoutAt, now)
                 const command = approvalCommand(item)
                 return (
                   <article
                     className={`inbox-item risk-${item.risk.level} ${
-                      left <= 15 ? 'urgent' : ''
+                      left <= 15 && !paused ? 'urgent' : ''
                     }`}
                     key={item.id}
                   >
@@ -365,7 +427,9 @@ export default function Inbox({
                       {item.correlation === 'unmatched' ? (
                         <span className="kind-badge warn">无法关联终端</span>
                       ) : null}
-                      <span className="inbox-time">{left}s</span>
+                      <span className={`inbox-time ${paused ? 'paused' : ''}`}>
+                        {paused ? '已暂停' : `${left}s`}
+                      </span>
                     </div>
                     <button
                       className="inbox-command"
@@ -386,6 +450,12 @@ export default function Inbox({
                         {formatRelative(item.createdAt, now)} · {item.origin}
                       </span>
                       <div className="inbox-actions">
+                        <button
+                          className="btn subtle compact"
+                          onClick={() => void api.pauseApproval(item.id, !item.paused)}
+                        >
+                          {paused ? '继续' : '暂停'}
+                        </button>
                         <button
                           className="btn subtle compact"
                           onClick={() => void api.selectApproval(item.id)}

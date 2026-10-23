@@ -37,6 +37,26 @@ function createBrowserFallback(): DesktopApi {
     respond: async () => {
       toast('浏览器预览模式：请在 Electron 中测试审批')
     },
+    pauseApproval: async (id, paused) => {
+      state = {
+        ...state,
+        pending: state.pending.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                paused,
+                pausedRemainingMs: paused
+                  ? Math.max(0, item.timeoutAt - Date.now())
+                  : 0,
+                timeoutAt: paused
+                  ? Number.MAX_SAFE_INTEGER
+                  : Date.now() + (item.pausedRemainingMs || 0)
+              }
+            : item
+        )
+      }
+      emit()
+    },
     acknowledgeExpired: async () => {
       state = { ...state, expired: [] }
       emit()

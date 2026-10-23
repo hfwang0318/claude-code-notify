@@ -70,6 +70,7 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
 import hashlib
 import json
 import os
+import re
 import socket
 import sqlite3
 import sys
@@ -117,8 +118,129 @@ RESOLUTION_URL = cfg(
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
-HOOK_VERSION = "5"
+# The popup countdown can be paused for long typing; keep the HTTP request
+# alive longer than the initial approval window. The Claude Code hook timeout
+# in settings.json gets the same budget added by the deploy code.
+PAUSE_BUDGET_SEC = 600
+SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
+HOOK_VERSION = "7"
 CURRENT_EVENT = ""
+
+TASK_MAX_CHARS = 60
+TASK_TAIL_BYTES = 256 * 1024
+
+
+def _clean_task_text(text: str) -> str:
+    """把一条用户输入压成适合弹窗单行展示的摘要。"""
+    text = re.sub(
+        r"<system-reminder>.*?</system-reminder>", " ", text, flags=re.S | re.I
+    )
+    text = re.sub(r"```.*?```", " ", text, flags=re.S)
+    text = re.sub(r"<[^>]{1,120}>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.lstrip("#>-* ").strip()
+
+
+def _is_noise_prompt(text: str) -> bool:
+    probe = text.lstrip()
+    return (
+        not probe
+        or probe.startswith("<")
+        or probe.startswith("Caveat:")
+        or probe.startswith("[Request interrupted")
+        or probe.startswith("This session is being continued")
+        or "<command-name>" in probe[:400]
+        or "<local-command-stdout>" in probe[:400]
+    )
+
+
+def task_summary(transcript_path: str) -> str:
+    """从 transcript 末尾取最近一条真实用户输入，作为“这个会话在做什么”。"""
+    if not transcript_path:
+        return ""
+    try:
+        size = os.path.getsize(transcript_path)
+        with open(transcript_path, "rb") as file:
+            if size > TASK_TAIL_BYTES:
+                file.seek(size - TASK_TAIL_BYTES)
+            data = file.read().decode("utf-8", "ignore")
+    except (OSError, ValueError):
+        return ""
+    # Claude Code 会在 transcript 末尾写一条 last-prompt；它比原始 user 消息
+    # 更靠近文件尾部，不会被大量 tool_result/api-request 挤出读取窗口。
+    # 找不到时再退回最后一条字符串 content 的 user 消息。
+    for raw_line in reversed(data.splitlines()):
+        try:
+            entry = json.loads(raw_line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "last-prompt":
+            prompt = entry.get("lastPrompt")
+            if isinstance(prompt, str) and not _is_noise_prompt(prompt):
+                cleaned = _clean_task_text(prompt)
+                if cleaned:
+                    return cleaned[:TASK_MAX_CHARS]
+            continue
+        if entry.get("type") != "user":
+            continue
+        if entry.get("isMeta") or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or _is_noise_prompt(content):
+            continue
+        cleaned = _clean_task_text(content)
+        if cleaned:
+            return cleaned[:TASK_MAX_CHARS]
+    return ""
+
+
+def _read_git_head(head_path: str) -> str:
+    try:
+        with open(head_path, "r", encoding="utf-8", errors="ignore") as file:
+            head = file.read(300).strip()
+    except OSError:
+        return ""
+    if head.startswith("ref:"):
+        ref = head[len("ref:") :].strip()
+        if ref.startswith("refs/heads/"):
+            return ref[len("refs/heads/") :]
+        return ref.rsplit("/", 1)[-1]
+    return head[:8]
+
+
+def git_branch(cwd: str) -> str:
+    """读取工作目录的当前分支；直接读 .git，避免每个审批都启动 git 进程。"""
+    if not cwd:
+        return ""
+    try:
+        directory = os.path.abspath(os.path.expanduser(cwd))
+    except (TypeError, ValueError):
+        return ""
+    for _ in range(8):
+        dotgit = os.path.join(directory, ".git")
+        try:
+            if os.path.isdir(dotgit):
+                return _read_git_head(os.path.join(dotgit, "HEAD"))
+            if os.path.isfile(dotgit):
+                with open(dotgit, "r", encoding="utf-8", errors="ignore") as file:
+                    content = file.read(300).strip()
+                if content.startswith("gitdir:"):
+                    gitdir = content[len("gitdir:") :].strip()
+                    if not os.path.isabs(gitdir):
+                        gitdir = os.path.normpath(os.path.join(directory, gitdir))
+                    return _read_git_head(os.path.join(gitdir, "HEAD"))
+        except OSError:
+            return ""
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    return ""
 
 
 def session_environment() -> dict:
@@ -757,12 +879,22 @@ def main() -> None:
             )
 
     session_env = session_environment()
+    transcript_path = str(
+        correlation.get("transcript_path")
+        or hook_input.get("transcript_path")
+        or ""
+    )
+    cwd = str(hook_input.get("cwd") or "")
     payload = {
         "request_id": correlation["request_id"],
         "session_id": hook_input.get("session_id"),
         "prompt_id": hook_input.get("prompt_id"),
         "tool_use_id": correlation["tool_use_id"],
-        "cwd": hook_input.get("cwd"),
+        "cwd": cwd,
+        "transcript_path": transcript_path,
+        # 多会话区分：任务摘要 + 分支，全部在钩子侧生成，只有短文本过网。
+        "task": task_summary(transcript_path),
+        "branch": git_branch(cwd),
         "tool_name": tool_name,
         "tool_input": tool_input,
         "message": message,
@@ -805,7 +937,7 @@ def main() -> None:
     try:
         with urllib.request.urlopen(
             request,
-            timeout=TIMEOUT,
+            timeout=SOCKET_TIMEOUT,
         ) as response:
             result = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
