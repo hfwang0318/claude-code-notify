@@ -1,9 +1,15 @@
+import { spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { Client, ClientChannel } from 'ssh2'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DEPLOY_CANCELLED,
+  PYTHON_COMPILE_SNIPPET,
   SSH_COMMAND_TIMEOUT,
+  buildPythonCompileCommand,
   execCommand,
   humanizeSshError,
   isDeployCancelled
@@ -33,6 +39,33 @@ function fakeClient(stream: FakeStream): Client {
 
 afterEach(() => {
   vi.useRealTimers()
+})
+
+const python = process.platform === 'win32' ? 'python' : 'python3'
+const hasPython = spawnSync(python, ['--version'], { stdio: 'ignore' }).status === 0
+const maybePython = hasPython ? it : it.skip
+
+describe('remote Python syntax check', () => {
+  it('includes the sys import in the built command', () => {
+    const command = buildPythonCompileCommand('/tmp/hook script.py')
+    expect(command).toContain('import sys')
+    expect(command).toContain("'/tmp/hook script.py'")
+  })
+
+  maybePython('compiles a real hook file without NameError', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'claude-notify-compile-'))
+    const file = join(directory, 'hook.py')
+    writeFileSync(file, 'import json\nprint(json.dumps({}))\n')
+    try {
+      const result = spawnSync(python, ['-c', PYTHON_COMPILE_SNIPPET, file], {
+        encoding: 'utf-8'
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stderr).not.toContain('NameError')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('execCommand', () => {

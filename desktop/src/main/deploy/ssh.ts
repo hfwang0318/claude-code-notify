@@ -53,6 +53,14 @@ export interface FingerprintError extends Error {
 export const SSH_COMMAND_TIMEOUT = 'SSH_COMMAND_TIMEOUT'
 export const DEPLOY_CANCELLED = 'DEPLOY_CANCELLED'
 
+export const PYTHON_COMPILE_SNIPPET =
+  "import sys; compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')"
+
+/** Build the remote syntax check without relying on a writable __pycache__. */
+export function buildPythonCompileCommand(scriptPath: string): string {
+  return `python3 -c "${PYTHON_COMPILE_SNIPPET}" ${shellQuote(scriptPath)}`
+}
+
 interface CodedError extends Error {
   code?: string
 }
@@ -428,6 +436,31 @@ export async function deployToServer(
         )
       }
 
+      // Validate before touching settings.json. A broken upload must not leave
+      // the server with hooks pointing at a script that cannot start.
+      checkAborted(signal)
+      log('验证钩子脚本 …')
+      const pythonCheck = await execCommand(client, 'command -v python3', 15000, signal)
+      if (pythonCheck.code !== 0 || !pythonCheck.stdout.trim()) {
+        throw new Error('服务器没有可用的 python3')
+      }
+      const scriptsToVerify = isPopup ? [remoteScript, remoteNotifyScript] : [remoteScript]
+      for (const scriptPath of scriptsToVerify) {
+        const verify = await execCommand(
+          client,
+          buildPythonCompileCommand(scriptPath),
+          20000,
+          signal
+        )
+        if (verify.code !== 0) {
+          const detail = verify.stderr.trim().slice(0, 300)
+          throw new Error(
+            `钩子脚本验证失败（${scriptPath}，exit=${verify.code}）${detail ? `：${detail}` : ''}`
+          )
+        }
+      }
+      log('钩子脚本验证通过')
+
       checkAborted(signal)
       const settingsPath = `${claudeDir}/settings.json`
       const existing = (await sftpRead(sftp, settingsPath)) || ''
@@ -512,24 +545,6 @@ export async function deployToServer(
     } finally {
       sftp.end()
     }
-
-    checkAborted(signal)
-    log('验证钩子脚本 …')
-    const pythonCheck = await execCommand(client, 'command -v python3', 15000, signal)
-    if (pythonCheck.code !== 0 || !pythonCheck.stdout.trim()) {
-      throw new Error('服务器没有可用的 python3')
-    }
-    const compileCommand =
-      `python3 -c "compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')" ` +
-      shellQuote(remoteScript)
-    const verify = await execCommand(client, compileCommand, 20000, signal)
-    if (verify.code !== 0) {
-      const detail = verify.stderr.trim().slice(0, 300)
-      throw new Error(
-        `钩子脚本验证失败（exit=${verify.code}）${detail ? `：${detail}` : ''}`
-      )
-    }
-    log('钩子脚本验证通过')
 
     checkAborted(signal)
     const healthUrl = `http://${config.callbackIp}:${config.callbackPort}/health`
