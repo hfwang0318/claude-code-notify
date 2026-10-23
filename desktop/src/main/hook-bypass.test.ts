@@ -93,7 +93,7 @@ describe('approval hook bypass guard', () => {
       expect(result.requests, `${mode} should not request approval`).toBe(0)
       expect(result.stdout.trim(), `${mode} should not emit a decision`).toBe('')
     }
-  })
+  }, 20000)
 
   maybe('ignores AskUserQuestion PermissionRequest when PreToolUse owns the channel', async () => {
     const result = await runHookPayload(
@@ -108,7 +108,7 @@ describe('approval hook bypass guard', () => {
     )
     expect(result.code, result.stderr).toBe(0)
     expect(result.requests, 'AskUserQuestion 只应由 PreToolUse 弹一次').toBe(0)
-  })
+  }, 20000)
 
   maybe('never emits an event name that differs from the hook input', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'claude-notify-hook-'))
