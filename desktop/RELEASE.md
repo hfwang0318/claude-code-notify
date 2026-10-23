@@ -4,7 +4,7 @@
 
 - 更新 `desktop/package.json` 的 `version`
 - `pnpm typecheck`
-- `pnpm test`（当前 126 个测试，以 `pnpm test` 输出为准）
+- `pnpm test`（当前 132 个测试，以 `pnpm test` 输出为准）
 - `pnpm e2e:claude`（真实 Claude Code：双会话 / resolved / timeout；没有 Claude 认证的 CI 会自动跳过）
 - `pnpm self-test`
 - `pnpm build`
@@ -58,8 +58,8 @@ pnpm dist:win
 
 ### 发布顺序
 
-1. 确认版本号已更新，提交并推送 `feat/electron-desktop`
-2. 创建并推送 annotated tag `desktop-v0.2.9`
+1. 确认版本号已更新，提交并推送 `main`
+2. 创建并推送 annotated tag `desktop-v0.3.0`
 3. workflow 会在 tag 上自动创建 GitHub Release（如果不存在），随后上传：
    - macOS `*.dmg` + `SHA256SUMS-macos.txt`
    - Windows `*Setup*.exe`、portable zip、`SHA256SUMS-windows.txt`

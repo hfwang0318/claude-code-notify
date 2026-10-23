@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.2.9**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.2.9)。
+当前版本 **0.3.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.3.0)。
 
 ## 运行
 
@@ -38,6 +38,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - 权限审批：允许 / 拒绝 / 自定义 options / `permission_suggestions`（按原始对象 echo index）
 - AskUserQuestion：单选、多选、多问题、自由输入，返回 `answers: [{question, selected, text}]`
 - 队列计数、倒计时、超时回退、Enter / Esc、动态高度、置顶与跨 Space
+- 倒计时可**暂停/继续**：问答场景打字时间不够时暂停，服务端超时和进度条一起冻结；会话条/队列显示“已暂停”
 - 超时后弹窗保留“已回退终端”提示，需点“我知道了”或按 Enter/Esc 关闭
 - `bypassPermissions` / `dontAsk` 下钩子直接跳过，不产生幽灵审批；0.2.1 起启动时自动备份并升级过期 hook
 - 回合结束通过 Stop hook 发送“已完成”通知；弹窗模式显示应用内完成弹窗，通知模式发送系统通知
@@ -46,13 +47,18 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ### 多会话与待审批收件箱
 
 - 会话身份：`origin + session_id` 作为 key，附带 `prompt_id`、tty、终端程序、项目路径；
-  会话可自动命名，也可在收件箱里重命名，颜色稳定并持久化到 `sessions.json`
-- 队列按**剩余时间**排序（EDF），不是简单 FIFO；弹窗顶部有会话条，可直接切换到其他会话
-- 弹窗显示“N 个会话 · M 条待审批”和完整队列；某条排队审批剩余 ≤15s 时会提示切换
-- 主窗口新增待审批收件箱：按会话分组、直接允许/拒绝/交给终端、按会话批量回退、静音提醒
+  新会话默认用**第一条任务摘要**命名（最多 22 字），也可在收件箱或弹窗里重命名，颜色稳定并持久化到 `sessions.json`
+- `/new` 会生成新的 `session_id`，因此新会话会获得新的名字/短码/颜色，和关闭后重新打开 Claude 一致；
+  同一会话内换主题只更新任务行，不重命名
+- 弹窗顶部是会话身份条：项目头像 + 会话色脊、稳定短码（`session_id` 前 4 位）、
+  主机 · 终端 · 分支 · 短路径，以及从 transcript 提取的**当前任务摘要**；没有任务摘要时按同项目 `#1/#2` 编号
+- 队列按**剩余时间**排序（EDF），不是简单 FIFO；会话条两行显示名称 + 任务摘要，可直接切换
+- 弹窗显示“N 个会话 · M 条待审批”和按会话分组的完整队列；某条排队审批剩余 ≤15s 时会提示切换
+- 键盘：`⌘/Ctrl + 1–9` 切会话，`⌘/Ctrl + ↑/↓` 切同一会话的多条请求；点击会话名可重命名
+- 主窗口待审批收件箱：按会话分组、显示任务/分支，直接允许/拒绝/交给终端、按会话批量回退、静音提醒
 - 超时不再只保留最后一条：`expired[]` 保留最近 20 条，弹窗和收件箱都能查看并逐条/全部确认
 - 队列准入控制：排队时间可能超过请求剩余时间时直接回退终端，避免“弹了却看不见”
-- 多服务器：部署时写入 `origin` 来源标签，弹窗/收件箱/历史/日志都会显示来源
+- 多服务器：部署时写入 `origin` 来源标签，弹窗/收件箱/历史/日志/系统通知/托盘都会显示来源与任务
 
 ### 部署与凭证
 
@@ -88,9 +94,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.2.9-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.2.9.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.2.9-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.3.0-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.3.0.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.3.0-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
@@ -101,7 +107,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：当前 126 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
+- `pnpm test`：当前 132 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
 - `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口）、Stop 回合通知、双会话并发、终端已处理、真实超时回退；工具未暴露时明示 SKIP，约 60–130s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)
