@@ -41,6 +41,10 @@ function createBrowserFallback(): DesktopApi {
       state = { ...state, expired: [] }
       emit()
     },
+    dismissNotice: async () => {
+      state = { ...state, notice: null }
+      emit()
+    },
     selectApproval: async () => {
       toast('浏览器预览模式：审批弹窗仅在 Electron 中显示')
     },

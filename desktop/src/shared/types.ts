@@ -44,6 +44,15 @@ export interface LogEntry {
   text: string
 }
 
+/** Transient "Claude finished a turn" notice shown in the popup window. */
+export interface CompletionNotice {
+  id: string
+  title: string
+  body: string
+  sessionKey: string
+  createdAt: number
+}
+
 export interface ApprovalOption {
   id: string
   label: string
@@ -293,6 +302,7 @@ export interface AppState {
   sessions: SessionInfo[]
   pending: ApprovalItem[]
   expired: ApprovalItem[]
+  notice: CompletionNotice | null
   history: ApprovalRecord[]
   rules: ApprovalRule[]
   logs: LogEntry[]
@@ -309,6 +319,7 @@ export interface DesktopApi {
   onState(callback: (state: AppState) => void): () => void
   respond(id: string, decision: string, extra?: ApprovalExtra): Promise<void>
   acknowledgeExpired(id?: string): Promise<void>
+  dismissNotice(): Promise<void>
   selectApproval(id: string): Promise<void>
   onSelectApproval(callback: (id: string) => void): () => void
   onFocusSession(callback: (sessionKey: string) => void): () => void

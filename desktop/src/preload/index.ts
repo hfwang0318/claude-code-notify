@@ -25,6 +25,7 @@ const api: DesktopApi = {
   respond: (id: string, decision: string, extra?: ApprovalExtra) =>
     ipcRenderer.invoke('approval:respond', id, decision, extra),
   acknowledgeExpired: (id?: string) => ipcRenderer.invoke('approval:acknowledge', id),
+  dismissNotice: () => ipcRenderer.invoke('notice:dismiss'),
   selectApproval: (id: string) => ipcRenderer.invoke('approval:select', id),
   onSelectApproval: (callback: (id: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, id: string): void => callback(id)

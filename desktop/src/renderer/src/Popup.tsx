@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { AppState, ApprovalItem } from '../../shared/types'
+import type {
+  AppState,
+  ApprovalItem,
+  CompletionNotice as CompletionNoticeInfo
+} from '../../shared/types'
 import {
   approvalCommand,
   extractEditDiff,
@@ -27,6 +31,77 @@ function emptyDrafts(item: ApprovalItem): QuestionDraft[] {
 function sourceLabel(item: ApprovalItem): string {
   const candidates = [item.terminal, item.tty, item.origin]
   return candidates.find((value) => value && !item.sessionLabel.includes(value)) || ''
+}
+
+function CompletionNotice({
+  notice,
+  platform,
+  onDismiss
+}: {
+  notice: CompletionNoticeInfo
+  platform: string
+  onDismiss: () => void
+}): React.JSX.Element {
+  const cardRef = useRef<HTMLElement>(null)
+  const padding = platform === 'win32' ? 8 : 18
+
+  useEffect(() => {
+    const card = cardRef.current
+    if (!card) return
+    const observer = new ResizeObserver(() => {
+      api.resizePopup(Math.ceil(card.scrollHeight + padding * 2))
+    })
+    observer.observe(card)
+    return () => observer.disconnect()
+  }, [notice.id, padding])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' && event.key !== 'Enter') return
+      event.preventDefault()
+      onDismiss()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onDismiss])
+
+  return (
+    <div className="popup-stage" data-platform={platform}>
+      <section
+        ref={cardRef}
+        className="popup-card notice-card"
+        role="status"
+        aria-live="polite"
+        tabIndex={-1}
+      >
+        <div className="popup-drag" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <button
+          className="popup-close"
+          onClick={onDismiss}
+          aria-label="关闭完成提醒"
+          title="关闭"
+        >
+          ×
+        </button>
+        <header className="popup-head">
+          <span className="popup-kicker">已完成</span>
+          <span className="popup-time">{formatTime(notice.createdAt)}</span>
+        </header>
+        <h1 className="popup-title">{notice.title}</h1>
+        <p className="popup-sub notice-body">{notice.body}</p>
+        <div className="popup-actions inline">
+          <button className="popup-btn allow" onClick={onDismiss}>
+            知道了
+          </button>
+        </div>
+        <div className="popup-foot">7 秒后自动关闭 · Enter / Esc 关闭</div>
+      </section>
+    </div>
+  )
 }
 
 export default function Popup(): React.JSX.Element | null {
@@ -347,7 +422,16 @@ export default function Popup(): React.JSX.Element | null {
     return () => window.removeEventListener('keydown', handler)
   }, [item, isExpired, highRisk, confirmHighRisk, draft, state, activeQuestion])
 
-  if (!state || !item) return null
+  if (!state) return null
+  if (!item) {
+    return state.notice ? (
+      <CompletionNotice
+        notice={state.notice}
+        platform={state.app.platform}
+        onDismiss={() => void api.dismissNotice()}
+      />
+    ) : null
+  }
 
   const queue = pending.filter((entry) => entry.id !== item.id)
   const urgentQueued = queue

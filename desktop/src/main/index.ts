@@ -35,6 +35,7 @@ import type {
   ApprovalRecord,
   ApprovalRule,
   BindMode,
+  CompletionNotice,
   DecisionSource,
   DeployFormConfig,
   DeployProfile,
@@ -54,7 +55,10 @@ import {
   sortByDeadline
 } from '../shared/session'
 import { buildRuleFromItem, matchingRule, validateRule } from '../shared/rules'
-import { canDeliverSystemNotification } from '../shared/notification-policy'
+import {
+  canDeliverSystemNotification,
+  shouldShowCompletionPopup
+} from '../shared/notification-policy'
 import { computeDeployDrift } from '../shared/deploy-drift'
 import {
   anchorFromLegacyPosition,
@@ -102,7 +106,7 @@ import {
 } from './deploy/ssh'
 import { HistoryStore } from './history'
 import { isPortFree, listAddresses, preferredAddress } from './net'
-import { approvalFromPayload } from './protocol'
+import { approvalFromPayload, safeString } from './protocol'
 import { NotifyServer } from './server'
 import { SessionRegistry } from './sessions'
 import { Store } from './store'
@@ -153,6 +157,7 @@ let lastTraySignature = ''
 let trayRefreshTimer: NodeJS.Timeout | null = null
 let notificationQueue: ApprovalItem[] = []
 let notificationTimer: NodeJS.Timeout | null = null
+let noticeTimer: NodeJS.Timeout | null = null
 
 const localApprovals = new Map<string, (decision: string) => void>()
 const decisionSources = new Map<string, DecisionSource>()
@@ -610,8 +615,9 @@ function createPopupWindow(): BrowserWindow {
 
 function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   const state = store.get()
-  const hasPending = state.pending.length > 0 || state.expired.length > 0
-  if (!hasPending) {
+  const hasApproval = state.pending.length > 0 || state.expired.length > 0
+  const hasNotice = Boolean(state.notice)
+  if (!hasApproval && !hasNotice) {
     if (popupWindow && !popupWindow.isDestroyed()) popupWindow.hide()
     return
   }
@@ -637,13 +643,14 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   const muted = state.pending[0] ? sessions.isMuted(state.pending[0].sessionKey) : false
   const policy = state.prefs.focusPolicy
   let shouldFocus =
-    focusMode === 'manual'
+    hasApproval &&
+    (focusMode === 'manual'
       ? true
       : policy === 'always'
         ? true
         : policy === 'first'
           ? !wasVisible
-          : false
+          : false)
   if (muted && focusMode !== 'manual') shouldFocus = false
 
   if (shouldFocus) {
@@ -1098,11 +1105,32 @@ function notifyTimeout(item: ApprovalItem): void {
   notification.show()
 }
 
+function clearCompletionNotice(): void {
+  if (noticeTimer) {
+    clearTimeout(noticeTimer)
+    noticeTimer = null
+  }
+  if (store.get().notice) store.setNotice(null)
+}
+
+function showCompletionNotice(notice: CompletionNotice): void {
+  store.setNotice(notice)
+  if (noticeTimer) clearTimeout(noticeTimer)
+  noticeTimer = setTimeout(() => {
+    noticeTimer = null
+    if (store.get().notice?.id !== notice.id) return
+    store.setNotice(null)
+    syncPopup('none')
+  }, 7000)
+  syncPopup('none')
+}
+
 // ---------------------------------------------------------------------------
 // approval handling
 // ---------------------------------------------------------------------------
 
 function handleApproval(item: ApprovalItem): void {
+  if (store.get().notice) clearCompletionNotice()
   itemCache.set(item.id, item)
   sessions.observe(item)
   refreshSessions()
@@ -1267,6 +1295,30 @@ function createNotifyServer(): NotifyServer {
       })
       log('notify', `通知 · ${projectName(cwd) || '未知项目'} · ${title}`)
       refreshSessions()
+      const notificationType = safeString(payload.notification_type)
+      const isStop =
+        notificationType === 'Stop' || safeString(payload.matcher) === 'Stop'
+      const hasPending =
+        state.pending.length > 0 || state.expired.length > 0
+      if (
+        shouldShowCompletionPopup({
+          isStop,
+          mode: state.prefs.mode,
+          headless,
+          muted: sessionMuted,
+          hasPending
+        })
+      ) {
+        showCompletionNotice({
+          id: `notice_${randomUUID()}`,
+          title,
+          body,
+          sessionKey: key || '',
+          createdAt: Date.now()
+        })
+        log('notify', `完成弹窗 · ${projectName(cwd) || '未知项目'} · ${title}`)
+        return
+      }
       if (!deliver) {
         const reason = headless
           ? '无界面模式'
@@ -1953,6 +2005,10 @@ function registerIpc(): void {
   )
   ipcMain.handle('approval:acknowledge', (_event, id?: string) => {
     acknowledgeExpired(id)
+  })
+  ipcMain.handle('notice:dismiss', () => {
+    clearCompletionNotice()
+    syncPopup('none')
   })
   ipcMain.handle('approval:select', (_event, id: string) => {
     if (popupWindow && !popupWindow.isDestroyed()) {

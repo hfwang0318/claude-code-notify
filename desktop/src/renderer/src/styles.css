@@ -4091,3 +4091,18 @@ kbd {
     inset 0 -1px 0 rgba(0, 0, 0, 0.3),
     inset 0 0 0 1px rgba(224, 122, 90, 0.28);
 }
+
+/* Completion notice reuses the approval window without approval controls. */
+.notice-card {
+  padding-bottom: 10px;
+}
+
+.notice-card .popup-sub {
+  white-space: pre-line;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.notice-card .popup-actions {
+  margin-top: 14px;
+}

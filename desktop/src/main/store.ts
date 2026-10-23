@@ -64,6 +64,7 @@ export class Store {
       sessions: [],
       pending: [],
       expired: [],
+      notice: null,
       history: [],
       rules: [],
       logs: [],
@@ -238,6 +239,11 @@ export class Store {
 
   setUpdate(update: AppUpdateInfo): void {
     this.state.update = update
+    this.emit()
+  }
+
+  setNotice(notice: AppState['notice']): void {
+    this.state.notice = notice
     this.emit()
   }
 

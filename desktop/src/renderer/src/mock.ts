@@ -143,5 +143,6 @@ export const mockState: AppState = {
   },
   onboarding: { done: true },
   update: { status: 'idle' },
+  notice: null,
   toast: null
 }
