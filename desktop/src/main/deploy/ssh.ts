@@ -14,6 +14,7 @@ import {
   buildHookCommand,
   mergeSettingsJson,
   removeEnvBlock,
+  settingsHaveOurHooks,
   stripSettingsJson,
   type DeployMode
 } from './settings'
@@ -583,7 +584,17 @@ export async function removeDeployFromServer(
     try {
       checkAborted(signal)
       const existing = await sftpRead(sftp, settingsPath)
-      if (existing && existing.trim()) {
+      if (existing === null) {
+        const exists = await execCommand(
+          client,
+          `test -f ${shellQuote(settingsPath)}`,
+          5000,
+          signal
+        )
+        if (exists.code === 0) {
+          throw new Error('无法读取服务器 settings.json，已中止移除，未删除任何 hook 配置')
+        }
+      } else if (existing.trim()) {
         const backupPath = `${settingsPath}.bak.${timestamp()}`
         await execCommand(
           client,
@@ -594,9 +605,18 @@ export async function removeDeployFromServer(
         log(`已备份现有配置 → ${backupPath}`)
         const stripped = stripSettingsJson(existing)
         removedHooks = stripped.removed
+        if (removedHooks === 0 && settingsHaveOurHooks(existing)) {
+          throw new Error(
+            'settings.json 中仍存在 Claude Notify hook，但格式无法识别；为避免误删第三方配置，已中止移除'
+          )
+        }
         if (stripped.changed) {
           await sftpWrite(sftp, settingsPath, stripped.text)
           await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
+          const verify = await sftpRead(sftp, settingsPath)
+          if (!verify || settingsHaveOurHooks(verify)) {
+            throw new Error('移除后 settings.json 仍检测到 Claude Notify hook，请检查文件权限或手动清理')
+          }
           log(`已从 settings.json 移除 ${removedHooks} 个钩子条目`)
         }
       }

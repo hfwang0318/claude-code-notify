@@ -4039,3 +4039,55 @@ kbd {
 :root[data-theme='light'] .font-preview {
   background: rgba(20, 20, 24, 0.04);
 }
+
+/* ---------------- Windows material & rounding ---------------- */
+
+/*
+ * Windows 11's system material is disabled by full opacity, so the shell keeps
+ * a translucent layer for acrylic to show through. The radius also gives a
+ * consistent rounded frame when DWM's own radius is unavailable (transparent
+ * acrylic windows lose native rounding in current Electron).
+ */
+.shell[data-platform='win32'] {
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 10, 12, 0.72);
+}
+
+:root[data-theme='light'] .shell[data-platform='win32'] {
+  background: rgba(243, 242, 238, 0.82);
+}
+
+/*
+ * The approval popup is a transparent window. Its old 110px outer shadow was
+ * clipped by the window edges on Windows and appeared as a wide grey halo.
+ * Keep only the inner highlight; the OS window itself provides separation.
+ */
+.popup-stage[data-platform='win32'] {
+  padding: 8px;
+}
+
+.popup-stage[data-platform='win32'] .popup-card {
+  max-height: calc(100vh - 16px);
+}
+
+:root[data-maximized='true'] .shell[data-platform='win32'] {
+  border-radius: 0;
+}
+
+.popup-stage[data-platform='win32'] .popup-card,
+.popup-stage[data-platform='win32'] .popup-card.risk-high,
+:root[data-theme='light'] .popup-stage[data-platform='win32'] .popup-card,
+:root[data-theme='light'] .popup-stage[data-platform='win32'] .popup-card.risk-high {
+  border-radius: 20px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.17),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3);
+}
+
+.popup-stage[data-platform='win32'] .popup-card.risk-high {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.17),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.3),
+    inset 0 0 0 1px rgba(224, 122, 90, 0.28);
+}

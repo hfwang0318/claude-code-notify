@@ -4,7 +4,7 @@
 
 - 更新 `desktop/package.json` 的 `version`
 - `pnpm typecheck`
-- `pnpm test`（当前 111 个测试，以 `pnpm test` 输出为准）
+- `pnpm test`（当前 122 个测试，以 `pnpm test` 输出为准）
 - `pnpm e2e:claude`（真实 Claude Code：双会话 / resolved / timeout；没有 Claude 认证的 CI 会自动跳过）
 - `pnpm self-test`
 - `pnpm build`

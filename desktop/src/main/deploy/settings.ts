@@ -49,13 +49,75 @@ export function buildHookCommand(
   return parts.join(' ')
 }
 
-function isOurs(entry: unknown): boolean {
+function isOurHook(entry: unknown): boolean {
   try {
     const serialized = JSON.stringify(entry)
     return ALL_HOOK_SCRIPTS.some((script) => serialized.includes(script))
   } catch {
     return false
   }
+}
+
+interface CleanHookList {
+  entries: unknown[]
+  removed: number
+}
+
+/**
+ * Remove our leaf hooks while keeping third-party hooks, even when a matcher
+ * wrapper contains both. Older installs and hand-edited settings can mix them.
+ */
+function cleanHookList(entries: unknown[]): CleanHookList {
+  const kept: unknown[] = []
+  let removed = 0
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      kept.push(entry)
+      continue
+    }
+    const record = entry as Record<string, unknown>
+    if (Array.isArray(record.hooks)) {
+      const nested = cleanHookList(record.hooks)
+      if (nested.removed > 0) {
+        removed += nested.removed
+        if (nested.entries.length > 0) {
+          kept.push({ ...record, hooks: nested.entries })
+        }
+      } else {
+        kept.push(entry)
+      }
+      continue
+    }
+    if (isOurHook(entry)) {
+      removed += 1
+      continue
+    }
+    kept.push(entry)
+  }
+  return { entries: kept, removed }
+}
+
+/**
+ * Walk every hook event (including sections added by newer Claude Code
+ * versions), recursively remove only our entries, and drop empty containers.
+ */
+function cleanHooks(settings: Record<string, unknown>): number {
+  const hooks =
+    settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+      ? (settings.hooks as Record<string, unknown>)
+      : null
+  if (!hooks) return 0
+  let removed = 0
+  for (const [sectionName, value] of Object.entries(hooks)) {
+    if (!Array.isArray(value)) continue
+    const cleaned = cleanHookList(value)
+    removed += cleaned.removed
+    if (cleaned.removed === 0) continue
+    if (cleaned.entries.length > 0) hooks[sectionName] = cleaned.entries
+    else delete hooks[sectionName]
+  }
+  if (Object.keys(hooks).length === 0) delete settings.hooks
+  return removed
 }
 
 export function mergeSettingsJson(
@@ -74,19 +136,14 @@ export function mergeSettingsJson(
     throw new Error('服务器上现有 settings.json 根节点必须是对象')
   }
 
+  // Re-deploying should replace our hooks without dropping third-party hooks
+  // that happen to share the same matcher wrapper.
+  cleanHooks(settings)
   const hooks =
     settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
       ? (settings.hooks as Record<string, unknown>)
       : {}
   settings.hooks = hooks
-
-  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification', 'Stop']) {
-    const entries = hooks[sectionName]
-    if (!Array.isArray(entries)) continue
-    const cleaned = entries.filter((entry) => !isOurs(entry))
-    if (cleaned.length > 0) hooks[sectionName] = cleaned
-    else delete hooks[sectionName]
-  }
 
   const entry: Record<string, unknown> = {
     ...options.hookEntry,
@@ -140,25 +197,12 @@ export function stripSettingsJson(existingText: string): {
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
     throw new Error('settings.json 根节点必须是对象')
   }
-  const hooks =
-    settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
-      ? (settings.hooks as Record<string, unknown>)
-      : null
-  if (!hooks) return { text: existingText, removed: 0, changed: false }
-  let removed = 0
-  for (const sectionName of ['PreToolUse', 'PermissionRequest', 'Notification', 'Stop']) {
-    const entries = hooks[sectionName]
-    if (!Array.isArray(entries)) continue
-    const cleaned = entries.filter((entry) => {
-      const ours = isOurs(entry)
-      if (ours) removed += 1
-      return !ours
-    })
-    if (cleaned.length > 0) hooks[sectionName] = cleaned
-    else delete hooks[sectionName]
+  const removed = cleanHooks(settings)
+  if (removed === 0) {
+    // Preserve the original formatting when there is nothing of ours to remove.
+    return { text: existingText, removed: 0, changed: false }
   }
-  const text = `${JSON.stringify(settings, null, 2)}\n`
-  return { text, removed, changed: removed > 0 }
+  return { text: `${JSON.stringify(settings, null, 2)}\n`, removed, changed: true }
 }
 
 export function installedHookVersion(config: Record<string, unknown> | null): string {

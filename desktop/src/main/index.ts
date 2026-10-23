@@ -57,6 +57,11 @@ import { buildRuleFromItem, matchingRule, validateRule } from '../shared/rules'
 import { canDeliverSystemNotification } from '../shared/notification-policy'
 import { computeDeployDrift } from '../shared/deploy-drift'
 import {
+  anchorFromLegacyPosition,
+  resolvePopupBounds,
+  type PopupAnchor
+} from '../shared/popup-layout'
+import {
   appDataDir,
   decryptSecret,
   encryptSecret,
@@ -134,7 +139,7 @@ let tray: Tray | null = null
 let mainWindow: BrowserWindow | null = null
 let popupWindow: BrowserWindow | null = null
 let popupReady = false
-let popupCustomPosition: { x: number; y: number } | null = null
+let popupAnchor: PopupAnchor | null = null
 let suppressMoveSave = false
 let serverPort = DEFAULT_PORT
 let serverBindMode: BindMode = 'all'
@@ -362,13 +367,27 @@ function resolveTheme(): 'dark' | 'light' {
   return theme
 }
 
+function windowsAcrylicEnabled(): boolean {
+  return (
+    process.platform === 'win32' &&
+    process.env.CLAUDE_NOTIFY_OPAQUE !== '1' &&
+    windowsBuild() >= 22621
+  )
+}
+
 function applyWindowTheme(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
   try {
     if (process.platform === 'darwin') {
       mainWindow.setVibrancy(currentTheme === 'dark' ? 'hud' : null)
     }
-    mainWindow.setBackgroundColor(currentTheme === 'dark' ? '#0a0a0c' : '#f3f2ee')
+    mainWindow.setBackgroundColor(
+      windowsAcrylicEnabled()
+        ? '#00000000'
+        : currentTheme === 'dark'
+          ? '#0a0a0c'
+          : '#f3f2ee'
+    )
   } catch {
     // material changes are best-effort
   }
@@ -381,8 +400,9 @@ function createMainWindow(): BrowserWindow {
   const isMac = process.platform === 'darwin'
   const isWindows = process.platform === 'win32'
   const forceOpaque = process.env.CLAUDE_NOTIFY_OPAQUE === '1'
-  const useAcrylic = isWindows && !forceOpaque && windowsBuild() >= 22621
-  const useGlass = currentTheme === 'dark' && !forceOpaque && (isMac || useAcrylic)
+  const useAcrylic = windowsAcrylicEnabled()
+  const useMacGlass = isMac && !forceOpaque && currentTheme === 'dark'
+  const useGlass = useMacGlass || useAcrylic
   const window = new BrowserWindow({
     width,
     height,
@@ -394,9 +414,10 @@ function createMainWindow(): BrowserWindow {
     title: APP_NAME,
     backgroundColor: useGlass ? '#00000000' : currentTheme === 'dark' ? '#0a0a0c' : '#f3f2ee',
     transparent: useGlass,
-    vibrancy: isMac && useGlass ? 'hud' : undefined,
-    visualEffectState: 'active',
-    backgroundMaterial: useAcrylic && useGlass ? 'acrylic' : undefined,
+    vibrancy: useMacGlass ? 'hud' : undefined,
+    visualEffectState: useMacGlass ? 'active' : undefined,
+    backgroundMaterial: useAcrylic ? 'acrylic' : undefined,
+    roundedCorners: true,
     titleBarStyle: isMac ? 'hiddenInset' : isWindows ? 'hidden' : 'default',
     trafficLightPosition: isMac ? { x: 18, y: 21 } : undefined,
     titleBarOverlay: isWindows
@@ -501,29 +522,16 @@ function popupDisplay(): Electron.Display {
   return screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
 }
 
-function intersects(display: Electron.Display, x: number, y: number): boolean {
-  const area = display.workArea
-  return (
-    x + 160 > area.x &&
-    x < area.x + area.width - 40 &&
-    y + 120 > area.y &&
-    y < area.y + area.height - 40
-  )
-}
-
-function popupBounds(): { x: number; y: number } {
-  if (popupCustomPosition) {
-    const onScreen = screen
-      .getAllDisplays()
-      .some((display) => intersects(display, popupCustomPosition!.x, popupCustomPosition!.y))
-    if (onScreen) return popupCustomPosition
-  }
-  const display = popupDisplay()
-  const area = display.workArea
-  return {
-    x: Math.round(area.x + area.width - POPUP_WIDTH - 22),
-    y: Math.round(area.y + area.height - POPUP_HEIGHT - 22)
-  }
+function popupBounds(height = POPUP_HEIGHT): { x: number; y: number } {
+  const display = popupAnchor
+    ? screen.getDisplayNearestPoint({ x: popupAnchor.x, y: popupAnchor.bottom })
+    : popupDisplay()
+  return resolvePopupBounds({
+    width: POPUP_WIDTH,
+    height,
+    area: display.workArea,
+    anchor: popupAnchor
+  })
 }
 
 let popupResizeTimer: NodeJS.Timeout | null = null
@@ -531,10 +539,16 @@ let popupResizeTimer: NodeJS.Timeout | null = null
 function savePopupPosition(): void {
   if (!popupWindow || popupWindow.isDestroyed() || suppressMoveSave) return
   const bounds = popupWindow.getBounds()
-  popupCustomPosition = { x: bounds.x, y: bounds.y }
+  // Persist the bottom edge, not the top-left corner. A top-left saved from a
+  // taller window makes the next 540px popup appear too high on Windows.
+  popupAnchor = { x: bounds.x, bottom: bounds.y + bounds.height }
   if (popupResizeTimer) clearTimeout(popupResizeTimer)
   popupResizeTimer = setTimeout(() => {
-    saveUiConfig({ popupPosition: popupCustomPosition })
+    saveUiConfig({
+      popupAnchor,
+      popupHeight: bounds.height,
+      popupPosition: null
+    })
   }, 250)
 }
 
@@ -605,11 +619,11 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
     if (headless && !isCapture) return
     popupWindow = createPopupWindow()
   }
-  const bounds = popupBounds()
   if (headless) return
 
   suppressMoveSave = true
   const current = popupWindow.getBounds()
+  const bounds = popupBounds(current.height)
   if (current.x !== bounds.x || current.y !== bounds.y) {
     popupWindow.setPosition(bounds.x, bounds.y)
   }
@@ -1907,8 +1921,8 @@ function applyPrefs(incoming: Partial<Prefs>): void {
     if (previous !== currentTheme) applyWindowTheme()
   }
   if (patch.position) {
-    popupCustomPosition = null
-    saveUiConfig({ popupPosition: null })
+    popupAnchor = null
+    saveUiConfig({ popupAnchor: null, popupHeight: null, popupPosition: null })
     syncPopup('none')
   }
   if (patch.localIp) {
@@ -2169,15 +2183,24 @@ function registerIpc(): void {
   ipcMain.on('popup:resize', (_event, height: number) => {
     if (!popupWindow || popupWindow.isDestroyed()) return
     const bounds = popupWindow.getBounds()
-    const nextHeight = Math.max(300, Math.min(820, Math.round(height)))
+    const display = screen.getDisplayNearestPoint({
+      x: bounds.x,
+      y: bounds.y + bounds.height
+    })
+    const area = display.workArea
+    const maxHeight = Math.max(300, Math.min(820, area.height - 16))
+    const nextHeight = Math.max(300, Math.min(maxHeight, Math.round(height)))
     if (Math.abs(nextHeight - bounds.height) < 2) return
     suppressMoveSave = true
+    const bottom = Math.min(bounds.y + bounds.height, area.y + area.height)
+    const nextY = Math.max(area.y, bottom - nextHeight)
     popupWindow.setBounds({
       x: bounds.x,
-      y: bounds.y + bounds.height - nextHeight,
+      y: nextY,
       width: POPUP_WIDTH,
       height: nextHeight
     })
+    popupAnchor = { x: bounds.x, bottom: nextY + nextHeight }
     setTimeout(() => {
       suppressMoveSave = false
     }, 120)
@@ -2775,7 +2798,24 @@ async function bootstrap(): Promise<void> {
     admissionControl: ui.admissionControl !== false,
     maxPending: typeof ui.maxPending === 'number' ? ui.maxPending : 8
   }
-  popupCustomPosition = ui.popupPosition || null
+  // Legacy configs only stored a top-left corner. Without the matching height
+  // we cannot recover the real bottom edge, so drop it and fall back to the
+  // bottom-right corner instead of preserving a potentially drifted position.
+  const legacyPosition =
+    ui.popupPosition &&
+    typeof ui.popupHeight === 'number' &&
+    Number.isFinite(ui.popupPosition.x) &&
+    Number.isFinite(ui.popupPosition.y)
+      ? ui.popupPosition
+      : null
+  popupAnchor =
+    ui.popupAnchor &&
+    Number.isFinite(ui.popupAnchor.x) &&
+    Number.isFinite(ui.popupAnchor.bottom)
+      ? ui.popupAnchor
+      : legacyPosition
+        ? anchorFromLegacyPosition(legacyPosition, ui.popupHeight ?? undefined)
+        : null
   nativeTheme.themeSource = prefs.theme || 'system'
   currentTheme =
     prefs.theme === 'system'

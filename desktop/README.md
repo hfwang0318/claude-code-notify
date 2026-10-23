@@ -14,7 +14,7 @@ pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
 pnpm capture    # 离屏截图：onboarding / main / inbox / history / logs / settings / deploy / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
-pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 111 个，以 pnpm test 输出为准）
+pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 122 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ```
 
@@ -101,7 +101,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：当前 111 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与移除、本机接入、Windows exec form、会话身份/风险/规则/协议、历史导出、通知策略、部署漂移）
+- `pnpm test`：当前 122 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
 - `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口）、Stop 回合通知、双会话并发、终端已处理、真实超时回退；工具未暴露时明示 SKIP，约 60–130s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)
@@ -170,8 +170,8 @@ macOS entitlements、Windows NSIS 配置，以及可选公证钩子 `scripts/not
 | 平台 | 背景效果 | 标题栏 |
 |---|---|---|
 | macOS | 深色：`vibrancy: 'hud'` + 透明窗口；浅色：不透明窗口保证对比度 | `hiddenInset` + 红绿灯 |
-| Windows 11 22H2+ | `backgroundMaterial: 'acrylic'` + 透明窗口 | `hidden` + `titleBarOverlay` |
-| Windows 10 / 更早 | 纯色 `#0a0a0c` 回退 | 同上 |
+| Windows 11 22H2+ | `backgroundMaterial: 'acrylic'` + 透明窗口 + 半透明 shell + 12px 圆角（深/浅色均生效） | `hidden` + `titleBarOverlay` |
+| Windows 10 / 更早 | 纯色 `#0a0a0c` 回退（系统不支持 Electron acrylic） | 同上 |
 
-Windows Acrylic 受系统「透明效果」和省电模式影响；关闭后退化为纯色。浅色主题始终使用不透明背景。
-`CLAUDE_NOTIFY_OPAQUE=1` 可强制关闭透明做对比。
+Windows Acrylic 受系统「透明效果」和省电模式影响；关闭后退化为纯色。
+`CLAUDE_NOTIFY_OPAQUE=1` 可强制关闭透明和 acrylic 做对比；Windows 最大化时自动取消 CSS 圆角。

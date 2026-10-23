@@ -12,6 +12,7 @@ import type {
   FontStyle,
   ThemeMode
 } from '../shared/types'
+import type { PopupAnchor } from '../shared/popup-layout'
 import type { DeployMode } from './deploy/settings'
 
 export interface DeployCache {
@@ -51,7 +52,12 @@ export interface UiConfig {
   admissionControl?: boolean
   maxPending?: number
   onboardingDone?: boolean
+  /** Legacy top-left position; migrated to popupAnchor on next launch. */
   popupPosition?: { x: number; y: number } | null
+  /** Bottom-edge anchor for the popup, stable across height changes. */
+  popupAnchor?: PopupAnchor | null
+  /** Height at the time popupAnchor was saved (used to migrate legacy data). */
+  popupHeight?: number | null
 }
 
 export interface SessionMeta {

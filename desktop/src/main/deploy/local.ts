@@ -23,6 +23,7 @@ import {
   installedHookVersion,
   mergeSettingsJson,
   removeEnvBlock,
+  settingsHaveOurHooks,
   stripSettingsJson,
   type DeployMode,
   type HookEntry
@@ -366,8 +367,17 @@ export function removeLocalDeploy(
     writeFileSync(backupPath, existing, 'utf-8')
     const stripped = stripSettingsJson(existing)
     removedHooks = stripped.removed
+    if (removedHooks === 0 && settingsHaveOurHooks(existing)) {
+      throw new Error(
+        'settings.json 中仍存在 Claude Notify hook，但格式无法识别；为避免误删第三方配置，已中止移除'
+      )
+    }
     if (stripped.changed) {
       writePrivate(settingsPath, stripped.text)
+      const verify = readFileSync(settingsPath, 'utf-8')
+      if (settingsHaveOurHooks(verify)) {
+        throw new Error('移除后 settings.json 仍检测到 Claude Notify hook，请检查文件权限或手动清理')
+      }
       onProgress('info', `已从本机 settings.json 移除 ${removedHooks} 个钩子条目`)
     }
   }

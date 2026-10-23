@@ -94,15 +94,17 @@ export default function Popup(): React.JSX.Element | null {
     })
   }, [item?.id])
 
+  const popupPadding = state?.app.platform === 'win32' ? 8 : 18
+
   useEffect(() => {
     const card = cardRef.current
     if (!card) return
     const observer = new ResizeObserver(() => {
-      api.resizePopup(Math.ceil(card.scrollHeight + 36))
+      api.resizePopup(Math.ceil(card.scrollHeight + popupPadding * 2))
     })
     observer.observe(card)
     return () => observer.disconnect()
-  }, [item?.id, detailsOpen, showQueue])
+  }, [item?.id, detailsOpen, showQueue, popupPadding])
 
   useEffect(() => {
     const card = cardRef.current
@@ -355,7 +357,7 @@ export default function Popup(): React.JSX.Element | null {
   const muted = (selectedSession?.mutedUntil || 0) > now
 
   return (
-    <div className="popup-stage">
+    <div className="popup-stage" data-platform={state.app.platform}>
       <section
         ref={cardRef}
         className={`popup-card risk-${item.risk.level}`}

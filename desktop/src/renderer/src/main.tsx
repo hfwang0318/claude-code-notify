@@ -23,11 +23,22 @@ function applyFont(style: string | undefined, size: string | undefined): void {
   )
 }
 
+/** Maximized Windows windows keep native square corners; CSS rounding would
+ * otherwise cut transparent notches out of the maximized frame. */
+function applyMaximized(): void {
+  const maximized =
+    window.outerWidth >= window.screen.availWidth - 4 &&
+    window.outerHeight >= window.screen.availHeight - 4
+  document.documentElement.dataset.maximized = maximized ? 'true' : 'false'
+}
+
 function Root(): React.JSX.Element {
   useEffect(() => {
     let current = 'system'
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const apply = (): void => applyTheme(current)
+    applyMaximized()
+    window.addEventListener('resize', applyMaximized)
     void api.getState().then((state) => {
       current = state.prefs.theme
       apply()
@@ -42,6 +53,7 @@ function Root(): React.JSX.Element {
     return () => {
       offState()
       media.removeEventListener('change', apply)
+      window.removeEventListener('resize', applyMaximized)
     }
   }, [])
 

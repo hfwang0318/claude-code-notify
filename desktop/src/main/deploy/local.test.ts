@@ -141,6 +141,47 @@ describe('deployLocal', () => {
     }
   })
 
+  it('removes hook entries and scripts while keeping third-party hooks', () => {
+    const claudeDir = tempDir()
+    const settingsPath = join(claudeDir, 'settings.json')
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        hooks: {
+          PermissionRequest: [
+            { matcher: '', hooks: [{ type: 'command', command: 'echo third-party' }] }
+          ]
+        }
+      })
+    )
+    const result = deployLocal(
+      {
+        mode: 'popup',
+        token: 'test-token',
+        port: 18765,
+        timeoutSec: 240,
+        writeEnv: false,
+        envShells: [],
+        claudeDir,
+        hooksDir: join(process.cwd(), 'resources', 'hooks')
+      },
+      () => undefined
+    )
+
+    const removed = removeLocalDeploy({ claudeDir }, () => undefined)
+    expect(removed.removedHooks).toBeGreaterThan(0)
+
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    expect(JSON.stringify(settings)).not.toContain('claude_approval_hook.py')
+    expect(JSON.stringify(settings)).not.toContain('claude_notify_hook.py')
+    expect(settings.hooks.PermissionRequest).toHaveLength(1)
+    expect(settings.hooks.PermissionRequest[0].hooks[0].command).toBe('echo third-party')
+    expect(settings.hooks.PreToolUse).toBeUndefined()
+    expect(settings.hooks.Stop).toBeUndefined()
+    expect(existsSync(result.scriptPath)).toBe(false)
+    expect(existsSync(result.configPath)).toBe(false)
+  })
+
   it('marks an old or missing hook version as stale', () => {
     const claudeDir = tempDir()
     const base = {
