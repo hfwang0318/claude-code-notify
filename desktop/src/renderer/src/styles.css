@@ -429,13 +429,6 @@ body.popup #root {
   background: rgba(255, 255, 255, 0.015);
 }
 
-.card-index {
-  font-family: var(--mono);
-  font-size: calc(11px * var(--font-scale));
-  letter-spacing: 0.14em;
-  color: var(--coral);
-}
-
 .card-title {
   font-size: calc(14.5px * var(--font-scale));
   font-weight: 700;
@@ -1381,8 +1374,8 @@ kbd {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(5, 5, 7, 0.62);
-  backdrop-filter: blur(8px);
+  background: rgba(5, 5, 7, 0.56);
+  backdrop-filter: blur(14px) saturate(115%);
 }
 
 .deploy-modal {
@@ -1820,7 +1813,7 @@ kbd {
 }
 
 :root[data-theme='light'] .modal-backdrop {
-  background: rgba(40, 38, 34, 0.32);
+  background: rgba(40, 38, 34, 0.4);
 }
 
 :root[data-theme='light'] .popup-card {
@@ -4567,4 +4560,386 @@ kbd {
 
 .inbox-time.paused {
   color: var(--amber);
+}
+
+/* ==========================================================================
+   v3 · focused main panel + status/settings modals
+   ========================================================================== */
+
+.main-shell .brand-sub {
+  letter-spacing: 0.12em;
+}
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  padding: 14px 18px 16px;
+}
+
+.onboarding.compact {
+  gap: 9px;
+  padding: 12px 16px;
+}
+
+/* ---------------- titlebar panel buttons ---------------- */
+
+.titlebar-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.titlebar-tabs button {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--faint);
+  font-size: calc(12.5px * var(--font-scale));
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.titlebar-tabs button:hover {
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.titlebar-tabs button.active {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.status-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 7px rgba(143, 209, 174, 0.55);
+}
+
+.status-dot.off {
+  background: var(--red);
+  box-shadow: 0 0 7px rgba(224, 141, 126, 0.5);
+}
+
+.status-dot.warn {
+  background: var(--amber);
+  box-shadow: 0 0 7px rgba(210, 176, 122, 0.5);
+}
+
+/* ---------------- panel footer ---------------- */
+
+.panel-foot {
+  flex: none;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 14px 7px 16px;
+  border-top: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.board-keys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--faint);
+  font-size: calc(12px * var(--font-scale));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board-keys kbd {
+  min-width: 26px;
+  padding: 2px 6px;
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.board-keys-label {
+  margin-right: 4px;
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  letter-spacing: 0.12em;
+  color: var(--faint);
+}
+
+.panel-foot-hint {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+  white-space: nowrap;
+}
+
+/* ---------------- status modal ---------------- */
+
+.status-modal {
+  width: min(1000px, 100%);
+  max-height: min(88vh, 900px);
+}
+
+.status-modal-body {
+  padding-bottom: 18px;
+}
+
+.status-modal .statusbar {
+  margin: 0 0 16px;
+}
+
+.modal-statusbar .status-cell {
+  padding: 11px 16px;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+/* ---------------- deployment entry ---------------- */
+
+.deploy-panel-modal {
+  width: min(940px, 100%);
+  max-height: min(88vh, 860px);
+}
+
+.deploy-panel-body {
+  padding: 18px 20px;
+}
+
+.deploy-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.deploy-choice {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px;
+}
+
+.deploy-choice-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+}
+
+.deploy-choice-icon {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--coral);
+}
+
+.deploy-choice-title {
+  min-width: 0;
+  flex: 1;
+}
+
+.deploy-choice-title h3 {
+  margin: 1px 0 0;
+  font-size: calc(16px * var(--font-scale));
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.deploy-choice-title p {
+  margin: 4px 0 0;
+  color: var(--faint);
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.55;
+}
+
+.deploy-choice-state {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  white-space: nowrap;
+}
+
+.deploy-choice-state.ok {
+  border-color: rgba(143, 209, 174, 0.26);
+  background: rgba(143, 209, 174, 0.08);
+  color: var(--green);
+}
+
+.deploy-choice-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 14px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.deploy-choice-meta > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: calc(12.5px * var(--font-scale));
+}
+
+.deploy-choice-meta dt {
+  color: var(--faint);
+}
+
+.deploy-choice-meta dd {
+  margin: 0;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--font-scale));
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deploy-choice .inline-warning {
+  margin: 10px 0 0;
+}
+
+.deploy-choice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 14px;
+}
+
+.deploy-choice-note {
+  margin: 10px 0 0;
+  color: var(--faint);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.6;
+}
+
+.deploy-choice-note .link {
+  margin-left: 3px;
+  font-size: inherit;
+}
+
+.deploy-panel-warning {
+  margin: 14px 0 0;
+}
+
+.deploy-panel-footnote {
+  margin: 14px 0 0;
+  color: var(--faint);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.55;
+}
+
+@media (max-width: 760px) {
+  .deploy-choice-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 1px solid var(--line);
+}
+
+.diag-cell {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 16px;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-size: calc(12.5px * var(--font-scale));
+  color: var(--faint);
+}
+
+.diag-cell:nth-child(2n) {
+  border-right: 0;
+}
+
+.diag-cell:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.diag-cell b {
+  font-family: var(--mono);
+  font-size: calc(12.5px * var(--font-scale));
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.diag-cell b.ok {
+  color: var(--green);
+}
+
+.diag-cell b.off {
+  color: var(--red);
+}
+
+.row.diag-actions {
+  padding-top: 12px;
+  padding-bottom: 10px;
+}
+
+:root[data-theme='light'] .panel-foot {
+  background: rgba(20, 20, 24, 0.035);
+}
+
+:root[data-theme='light'] .titlebar-tabs {
+  background: rgba(20, 20, 24, 0.04);
+}
+
+:root[data-theme='light'] .titlebar-tabs button:hover {
+  background: rgba(20, 20, 24, 0.05);
+}
+
+:root[data-theme='light'] .titlebar-tabs button.active {
+  background: rgba(20, 20, 24, 0.08);
+  color: var(--ink);
+}
+
+@media (max-width: 960px) {
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
 }

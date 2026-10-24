@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppState,
   BindMode,
@@ -10,6 +10,7 @@ import type {
 } from '../../shared/types'
 import { describeRule } from '../../shared/rules'
 import { api } from './api'
+import { useFocusTrap } from './useFocusTrap'
 
 export type SettingsSection = 'general' | 'popup' | 'network' | 'rules' | 'about'
 
@@ -23,7 +24,7 @@ interface Props {
 
 const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
   { id: 'general', label: '通用' },
-  { id: 'popup', label: '弹窗' },
+  { id: 'popup', label: '提醒' },
   { id: 'network', label: '网络' },
   { id: 'rules', label: '规则' },
   { id: 'about', label: '关于' }
@@ -107,6 +108,9 @@ export default function Preferences({
   const [ruleSessionKey, setRuleSessionKey] = useState('')
   const [ruleOrigin, setRuleOrigin] = useState('')
   const [ruleMessage, setRuleMessage] = useState('')
+  const dialogRef = useRef<HTMLElement>(null)
+
+  useFocusTrap(open, dialogRef, onClose)
 
   useEffect(() => {
     if (!open) return
@@ -120,18 +124,6 @@ export default function Preferences({
     setRuleOrigin('')
     if (state.pending[0]) setRuleProject(state.pending[0].project)
   }, [open, state.prefs.port, state.prefs.bindMode, state.prefs.timeoutSec, state.prefs.maxPending])
-
-  useEffect(() => {
-    if (!open) return
-    const handler = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        onClose()
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [open, onClose])
 
   const previews = useMemo(() => state.sessions.slice(0, 8), [state.sessions])
   const waitingCount = state.sessions.filter((session) => session.state === 'waiting').length
@@ -213,6 +205,7 @@ export default function Preferences({
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
+        ref={dialogRef}
       >
         <header className="modal-head">
           <div>
@@ -333,33 +326,20 @@ export default function Preferences({
               </div>
 
               <div className="form-section">
-                <div className="form-section-title">并发</div>
-                <div className="form-grid two">
-                  <label className="field">
-                    <span>最大等待审批数</span>
-                    <input
-                      type="number"
-                      min={1}
-                      max={30}
-                      value={maxPending}
-                      onChange={(event) => setMaxPending(event.target.value)}
-                      onBlur={() => save({ maxPending: Number(maxPending) })}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>弹窗默认超时（秒）</span>
-                    <input
-                      type="number"
-                      min={15}
-                      max={600}
-                      value={timeout}
-                      onChange={(event) => setTimeoutValue(event.target.value)}
-                      onBlur={() => save({ timeoutSec: Number(timeout) })}
-                    />
-                  </label>
-                </div>
+                <div className="form-section-title">队列</div>
+                <label className="field">
+                  <span>最大等待审批数</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={maxPending}
+                    onChange={(event) => setMaxPending(event.target.value)}
+                    onBlur={() => save({ maxPending: Number(maxPending) })}
+                  />
+                </label>
                 <div className="form-note">
-                  超时值用于本机接入；远程部署在部署表单里单独设置钩子超时。
+                  队列已满或排队时间超过剩余审批时间时，请求会直接回退终端。
                 </div>
               </div>
 
@@ -466,6 +446,26 @@ export default function Preferences({
                     已部署的钩子仍使用旧模式，需要重新接入或部署才会生效。
                   </div>
                 ) : null}
+              </div>
+
+              <div className="form-section">
+                <div className="form-section-title">超时回退</div>
+                <div className="form-grid two">
+                  <label className="field">
+                    <span>弹窗默认超时（秒）</span>
+                    <input
+                      type="number"
+                      min={15}
+                      max={600}
+                      value={timeout}
+                      onChange={(event) => setTimeoutValue(event.target.value)}
+                      onBlur={() => save({ timeoutSec: Number(timeout) })}
+                    />
+                  </label>
+                </div>
+                <div className="form-note">
+                  超时后交给终端处理；远程部署在部署表单里单独设置钩子超时。
+                </div>
               </div>
             </>
           ) : null}

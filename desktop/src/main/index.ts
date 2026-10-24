@@ -298,7 +298,7 @@ function sendToMain(channel: string, ...args: unknown[]): void {
   if (mainWindowReady) scheduleMainQueueFlush()
 }
 
-function sendUiCommand(command: 'prefs' | 'about' | 'inbox'): void {
+function sendUiCommand(command: 'prefs' | 'about' | 'inbox' | 'status' | 'deploy'): void {
   showMainWindow()
   sendToMain('ui:command', command)
 }
@@ -404,8 +404,8 @@ function applyWindowTheme(): void {
 
 function createMainWindow(): BrowserWindow {
   const area = screen.getPrimaryDisplay().workArea
-  const width = Math.min(1220, area.width - 40)
-  const height = Math.min(840, area.height - 40)
+  const width = Math.min(1080, area.width - 40)
+  const height = Math.min(820, area.height - 40)
   const isMac = process.platform === 'darwin'
   const isWindows = process.platform === 'win32'
   const forceOpaque = process.env.CLAUDE_NOTIFY_OPAQUE === '1'
@@ -417,8 +417,8 @@ function createMainWindow(): BrowserWindow {
     height,
     x: Math.round(area.x + (area.width - width) / 2),
     y: Math.round(area.y + (area.height - height) / 2),
-    minWidth: 1040,
-    minHeight: 720,
+    minWidth: 900,
+    minHeight: 640,
     show: false,
     title: APP_NAME,
     backgroundColor: useGlass ? '#00000000' : currentTheme === 'dark' ? '#0a0a0c' : '#f3f2ee',
@@ -752,6 +752,8 @@ function buildTrayMenu(): Menu {
   template.push(
     { label: '打开待审批', click: () => sendUiCommand('inbox') },
     { label: '显示主窗口', click: () => showMainWindow() },
+    { label: '状态…', click: () => sendUiCommand('status') },
+    { label: '部署…', click: () => sendUiCommand('deploy') },
     { type: 'separator' },
     {
       label: state.server.listening ? '暂停服务' : '启动服务',
@@ -2745,21 +2747,52 @@ async function runCapture(): Promise<void> {
       )
     )
 
+  await clickButton('状态')
+  await delay(600)
+  if (!(await mainWindow!.webContents.executeJavaScript(`!!document.querySelector('.status-modal')`))) {
+    throw new Error('status modal missing')
+  }
+  const statusImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'status.png'), statusImage.toPNG())
+  await mainWindow.webContents.executeJavaScript(
+    `document.querySelector('.status-modal .modal-close')?.click()`
+  )
+  await delay(300)
+
   await clickButton('设置')
   await delay(600)
   const settingsImage = await mainWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'settings.png'), settingsImage.toPNG())
-  await mainWindow!.webContents.executeJavaScript(
+  await mainWindow.webContents.executeJavaScript(
+    `Array.from(document.querySelectorAll('.settings-tabs button')).find((button) => button.textContent.trim() === '提醒')?.click()`
+  )
+  await delay(400)
+  const reminderImage = await mainWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'settings-reminder.png'), reminderImage.toPNG())
+  await mainWindow.webContents.executeJavaScript(
     `document.querySelector('.settings-modal .modal-close')?.click()`
   )
   await delay(300)
 
-  await clickButton('部署并验证')
-  await delay(600)
+  await clickButton('部署')
+  await delay(500)
   const deployImage = await mainWindow.webContents.capturePage()
-  writeFileSync(join(app.getAppPath(), 'artifacts', 'deploy-dialog.png'), deployImage.toPNG())
-  await mainWindow!.webContents.executeJavaScript(
-    `document.querySelector('.deploy-modal .modal-close')?.click()`
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'deploy.png'), deployImage.toPNG())
+  await mainWindow.webContents.executeJavaScript(
+    `Array.from(document.querySelectorAll('button')).find((button) => button.textContent.includes('远程部署'))?.click()`
+  )
+  await delay(700)
+  const deployDialogImage = await mainWindow.webContents.capturePage()
+  writeFileSync(
+    join(app.getAppPath(), 'artifacts', 'deploy-dialog.png'),
+    deployDialogImage.toPNG()
+  )
+  await mainWindow.webContents.executeJavaScript(
+    `document.querySelector('.deploy-modal:not(.deploy-panel-modal) .modal-close')?.click()`
+  )
+  await delay(300)
+  await mainWindow.webContents.executeJavaScript(
+    `document.querySelector('.deploy-panel-modal .modal-close')?.click()`
   )
   await delay(300)
 

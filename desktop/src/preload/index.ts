@@ -39,10 +39,10 @@ const api: DesktopApi = {
     ipcRenderer.on('focus:session', listener)
     return () => ipcRenderer.removeListener('focus:session', listener)
   },
-  onUiCommand: (callback: (command: 'prefs' | 'about' | 'inbox') => void) => {
+  onUiCommand: (callback: (command: 'prefs' | 'about' | 'inbox' | 'status' | 'deploy') => void) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      command: 'prefs' | 'about' | 'inbox'
+      command: 'prefs' | 'about' | 'inbox' | 'status' | 'deploy'
     ): void => callback(command)
     ipcRenderer.on('ui:command', listener)
     return () => ipcRenderer.removeListener('ui:command', listener)

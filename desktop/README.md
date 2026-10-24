@@ -12,7 +12,7 @@ cd desktop
 pnpm install
 pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
-pnpm capture    # 离屏截图：onboarding / main / inbox / history / logs / settings / deploy / popup*
+pnpm capture    # 离屏截图：onboarding / main / status / inbox / history / logs / settings / settings-reminder / deploy / deploy-dialog / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
 pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 126 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
@@ -82,7 +82,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - 系统通知聚合最近 1.2 秒内到达的会话，点击可跳转到对应会话；审批提醒与回合完成通知都支持按会话静音，并遵循“系统通知”总开关
 - 深色 / 浅色 / 跟随系统主题；浅色模式使用不透明窗口保证对比度
 - 字体样式（系统 / 圆体 / 衬线 / 等宽）与字号（小 / 标准 / 大 / 特大），主窗口、设置面板和审批弹窗同步生效
-- 首次使用 3 步引导；主窗口支持“待审批 / 历史 / 日志”三个面板
+- 首次使用引导；主窗口以待审批 / 历史 / 日志三个 tab 为主信息面板，标题栏只保留“状态 / 部署 / 设置 / 隐藏到托盘”；状态、部署与设置以模糊模态覆盖在主窗口上，部署页把本机接入与远程服务器部署并列呈现，状态页只保留服务、连接凭证和运行诊断，设置页新增“提醒”分类（位置 / 焦点 / 模式 / 超时）
 - 日志支持级别筛选、搜索、复制、清空、打开文件、粘底/暂停；文件超过 5MB 自动轮转
 - 崩溃/重启后提示上次未处理的审批数量；数据文件权限 600
 - 审批历史持久化到 `history.jsonl`，可按会话/项目/工具/结果筛选，导出 CSV
@@ -90,7 +90,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - 日志同时写 `~/.claude-notify/claude-notify.log`
 - macOS `vibrancy: 'hud'`；Windows 11 22H2+ `backgroundMaterial: 'acrylic'` + 隐藏标题栏
 - Windows 托盘使用 `resources/app.ico`；已设置 AppUserModelID
-- 0.1.2 起全局字体 +2px；主窗口高度 800
+- 主窗口默认 1080×820，支持缩放
 
 ## 下载、安装与升级
 

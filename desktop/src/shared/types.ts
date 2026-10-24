@@ -355,7 +355,7 @@ export interface DesktopApi {
   selectApproval(id: string): Promise<void>
   onSelectApproval(callback: (id: string) => void): () => void
   onFocusSession(callback: (sessionKey: string) => void): () => void
-  onUiCommand(callback: (command: 'prefs' | 'about' | 'inbox') => void): () => void
+  onUiCommand(callback: (command: 'prefs' | 'about' | 'inbox' | 'status' | 'deploy') => void): () => void
   toggleServer(): Promise<void>
   testNotify(): Promise<void>
   testApproval(): Promise<void>

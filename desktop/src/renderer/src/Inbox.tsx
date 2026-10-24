@@ -131,7 +131,6 @@ export default function Inbox({
     })
   }, [query, riskFilter, state.pending, state.sessions])
   const groups = useMemo(() => groupBySession(sortByDeadline(visible)), [visible])
-  const waitingSessions = new Set(visible.map((item) => item.sessionKey)).size
 
   useEffect(() => {
     if (!focusSessionKey) return
@@ -188,8 +187,8 @@ export default function Inbox({
           <div className="inbox-empty-mark" aria-hidden="true" />
           <h3>没有待审批</h3>
           <p>
-            本机或服务器上的 Claude Code 请求权限时，会在这里按会话分组出现；
-            置顶弹窗负责即时提醒，这个收件箱负责集中处理。
+            Claude Code 请求权限或提问时会按会话出现在这里。现在可以回到终端继续工作，
+            审批到了再回来处理。
           </p>
           <div className="inbox-empty-actions">
             <button className="btn compact" onClick={() => void api.testApproval()}>
@@ -201,10 +200,6 @@ export default function Inbox({
             <button className="btn subtle compact" onClick={onOpenHistory}>
               查看历史
             </button>
-          </div>
-          <div className="inbox-empty-meta">
-            {state.sessions.filter((session) => session.state === 'waiting').length} 个会话等待中 ·{' '}
-            {state.server.notified} 条通知 · 版本 {state.app.version}
           </div>
         </div>
       </div>
@@ -239,18 +234,22 @@ export default function Inbox({
         </div>
       </div>
 
-      <div className="inbox-summary">
-        <div>
-          <b>{visible.length}</b> 条待审批 · <b>{waitingSessions}</b> 个会话
-          {visible.length !== state.pending.length ? `（共 ${state.pending.length} 条）` : ''}
-          <span className="inbox-summary-hint">按剩余时间排序，最早回退的排在前面</span>
+      {visible.length !== state.pending.length || state.expired.length > 0 ? (
+        <div className="inbox-summary">
+          <div>
+            {visible.length !== state.pending.length ? (
+              <>
+                筛选后 <b>{visible.length}</b> 条（共 <b>{state.pending.length}</b> 条）
+              </>
+            ) : null}
+          </div>
+          {state.expired.length > 0 ? (
+            <button className="link" onClick={() => setShowExpired((value) => !value)}>
+              {state.expired.length} 条已回退{showExpired ? ' · 收起' : ' · 查看'}
+            </button>
+          ) : null}
         </div>
-        {state.expired.length > 0 ? (
-          <button className="link" onClick={() => setShowExpired((value) => !value)}>
-            {state.expired.length} 条已回退{showExpired ? ' · 收起' : ' · 查看'}
-          </button>
-        ) : null}
-      </div>
+      ) : null}
 
       {showExpired ? (
         <div className="expired-strip">
