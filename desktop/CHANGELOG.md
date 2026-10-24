@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — approval efficiency / runtime / auto-update
+## 0.5.0 — 2026-10-24
 
 ### 新增
 
@@ -14,7 +14,7 @@
 - ExitPlanMode 计划正文预览；MultiEdit/Write 多段 diff 与打开文件
 - 历史详情、JSON 导出、P50/P95/规则命中/风险统计
 - 部署目标删除/检查、keyPath 持久化、per-profile 模式不再被误判为 drift
-- 打包版自动更新（electron-updater）：启动检查、手动下载、重启安装；未签名 macOS 回退发布页
+- 打包版自动更新（electron-updater）：启动检查、手动下载、重启安装；GitHub feed 使用 `desktop-v` 标签前缀；未签名 macOS 回退发布页
 
 ### 性能
 
@@ -25,6 +25,9 @@
 
 ### 修复
 
+- 设置页“网络 / 规则 / 关于”的行内边距、分段控件高度、规则有效期与已保存规则列表排版
+- 审批弹窗的拒绝理由面板改为全宽，修复与“允许/拒绝”并排导致的裁切；稍后提醒/相同请求/记住规则行统一 23px 内容边距
+- 设置模态高度提升到 92vh，关于页底部操作不再被 footer 裁切
 - 更新检查从 `/releases/latest` 改为过滤 `desktop-v*`，避免把其他 Release 当成桌面更新
 - 本机/历史 JSON 写入改为临时文件 + rename；历史压缩在读取失败时不再清空文件
 - loopback 模式下状态页/接入命令显示 127.0.0.1
