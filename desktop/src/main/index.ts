@@ -45,15 +45,22 @@ import type {
   PopupPosition,
   Prefs,
   RuleScope,
-  SecurityInfo
+  SecurityInfo,
+  SkipReason
 } from '../shared/types'
 import {
   approvalCommand,
   assessRisk,
   projectName,
+  remainingSeconds,
   riskLabel,
-  sortByDeadline
+  URGENT_SECONDS
 } from '../shared/session'
+import {
+  admissionSnapshot,
+  approvalClusterKey,
+  clusterApprovals
+} from '../shared/approvals'
 import { buildRuleFromItem, matchingRule, validateRule } from '../shared/rules'
 import {
   canDeliverSystemNotification,
@@ -123,7 +130,7 @@ import {
 const APP_NAME = 'Claude Notify'
 const DEFAULT_PORT = 18765
 const POPUP_WIDTH = 560
-const POPUP_HEIGHT = 540
+const POPUP_HEIGHT = 760
 const LOG_MAX_BYTES = 5 * 1024 * 1024
 const BROADCAST_INTERVAL_MS = 16
 const MAIN_QUEUE_FLUSH_DELAY_MS = 30
@@ -166,6 +173,9 @@ let trayRefreshTimer: NodeJS.Timeout | null = null
 let notificationQueue: ApprovalItem[] = []
 let notificationTimer: NodeJS.Timeout | null = null
 let noticeTimer: NodeJS.Timeout | null = null
+let popupCollapsed = false
+let collapseRevealTimer: NodeJS.Timeout | null = null
+let lastAdmissionNotifyAt = 0
 
 const localApprovals = new Map<string, (decision: string) => void>()
 const localTimers = new Map<string, NodeJS.Timeout>()
@@ -573,10 +583,19 @@ function savePopupPosition(): void {
 }
 
 function createPopupWindow(): BrowserWindow {
-  const bounds = popupBounds()
+  const display = popupAnchor
+    ? screen.getDisplayNearestPoint({ x: popupAnchor.x, y: popupAnchor.bottom })
+    : popupDisplay()
+  const height = Math.max(300, Math.min(POPUP_HEIGHT, display.workArea.height - 16))
+  const bounds = resolvePopupBounds({
+    width: POPUP_WIDTH,
+    height,
+    area: display.workArea,
+    anchor: popupAnchor
+  })
   const window = new BrowserWindow({
     width: POPUP_WIDTH,
-    height: POPUP_HEIGHT,
+    height,
     x: bounds.x,
     y: bounds.y,
     show: false,
@@ -606,6 +625,7 @@ function createPopupWindow(): BrowserWindow {
   const reveal = (): void => {
     popupReady = true
     if (headless) return
+    if (popupCollapsed) return
     if (store.get().pending.length > 0 || store.get().expired.length > 0) {
       window.showInactive()
     }
@@ -637,6 +657,8 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   const hasApproval = visiblePending.length > 0 || state.expired.length > 0
   const hasNotice = Boolean(state.notice)
   if (!hasApproval && !hasNotice) {
+    popupCollapsed = false
+    clearCollapseReveal()
     if (popupWindow && !popupWindow.isDestroyed()) popupWindow.hide()
     return
   }
@@ -645,6 +667,21 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
     popupWindow = createPopupWindow()
   }
   if (headless) return
+
+  // "收起" is a real state, not a one-off hide: a background timer or an
+  // unrelated state update must not pop the card back into the user's face.
+  if (focusMode === 'new' || focusMode === 'manual') {
+    popupCollapsed = false
+    clearCollapseReveal()
+  }
+  const urgent = visiblePending.some(
+    (item) =>
+      !item.paused && remainingSeconds(item.timeoutAt, now) <= URGENT_SECONDS
+  )
+  if (popupCollapsed && hasApproval && !urgent) {
+    if (popupWindow.isVisible()) popupWindow.hide()
+    return
+  }
 
   suppressMoveSave = true
   const current = popupWindow.getBounds()
@@ -691,24 +728,94 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   }
 }
 
+function clearCollapseReveal(): void {
+  if (!collapseRevealTimer) return
+  clearTimeout(collapseRevealTimer)
+  collapseRevealTimer = null
+}
+
+/**
+ * Collapsing is intentionally different from "交给终端": the request stays in
+ * the queue and still expires, but the card stops covering the user's work.
+ */
+function collapsePopup(): void {
+  popupCollapsed = true
+  if (popupWindow && !popupWindow.isDestroyed()) popupWindow.hide()
+  log('info', '审批弹窗已收起；请求仍在队列中，超时前 15s 会重新出现')
+  scheduleCollapseReveal()
+}
+
+function scheduleCollapseReveal(): void {
+  clearCollapseReveal()
+  if (!popupCollapsed) return
+  const now = Date.now()
+  const next = store
+    .get()
+    .pending.filter(
+      (item) =>
+        (!item.snoozedUntil || item.snoozedUntil <= now) && !item.paused
+    )
+    .sort((left, right) => left.timeoutAt - right.timeoutAt)[0]
+  if (!next) return
+  if (remainingSeconds(next.timeoutAt, now) <= URGENT_SECONDS) return
+  const wait = Math.max(250, next.timeoutAt - now - (URGENT_SECONDS - 5) * 1000)
+  collapseRevealTimer = setTimeout(() => {
+    collapseRevealTimer = null
+    if (!popupCollapsed) return
+    popupCollapsed = false
+    syncPopup('none')
+  }, wait)
+  collapseRevealTimer.unref?.()
+}
+
+/** Notification / tray entry point: open the popup on one exact request. */
+function focusApproval(id: string): void {
+  popupCollapsed = false
+  clearCollapseReveal()
+  if (!popupWindow || popupWindow.isDestroyed()) {
+    if (headless) return
+    popupWindow = createPopupWindow()
+  }
+  syncPopup('manual')
+  const send = (): void => {
+    if (!popupWindow || popupWindow.isDestroyed()) return
+    popupWindow.webContents.send('popup:select', id)
+  }
+  setTimeout(send, 100)
+  setTimeout(send, 320)
+}
+
 // ---------------------------------------------------------------------------
 // badge, tray, menu
 // ---------------------------------------------------------------------------
 
 function updateBadge(): void {
   if (!store) return
-  const count = store.get().pending.length
-  const waitingSessions = new Set(store.get().pending.map((item) => item.sessionKey)).size
+  const state = store.get()
+  const now = Date.now()
+  const visible = state.pending.filter(
+    (item) => !item.snoozedUntil || item.snoozedUntil <= now
+  )
+  // One badge unit = one decision. Five identical requests share one card.
+  const count = new Set(visible.map(approvalClusterKey)).size
+  const waitingSessions = new Set(visible.map((item) => item.sessionKey)).size
+  const earliest = visible
+    .filter((item) => !item.paused)
+    .sort((left, right) => left.timeoutAt - right.timeoutAt)[0]
+  const earliestText = earliest
+    ? ` · 最早 ${remainingSeconds(earliest.timeoutAt, now)}s`
+    : ''
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setBadge(count > 0 ? String(count) : '')
   }
   if (tray) {
     const waitingTitles = [
-      ...new Set(store.get().pending.map((item) => sessionTitleFor(item)))
+      ...new Set(visible.map((item) => sessionTitleFor(item)))
     ].slice(0, 3)
     tray.setToolTip(
       count > 0
-        ? `${APP_NAME} · ${count} 条待审批 · ${waitingSessions} 个会话\n${waitingTitles.join('、')}`
+        ? `${APP_NAME} · ${count} 组 / ${visible.length} 条 · ${waitingSessions} 个会话${earliestText}` +
+          `${state.skipped.length + state.expired.length > 0 ? ` · 回退 ${state.skipped.length + state.expired.length}` : ''}\n${waitingTitles.join('、')}`
         : `${APP_NAME} · 暂无待审批`
     )
     if (process.platform === 'darwin') {
@@ -736,40 +843,80 @@ function copyConnectCommand(): void {
 
 function buildTrayMenu(): Menu {
   const state = store.get()
-  const pending = state.pending.length
-  const waitingSessions = new Set(state.pending.map((item) => item.sessionKey)).size
+  const now = Date.now()
+  const visible = state.pending.filter(
+    (item) => !item.snoozedUntil || item.snoozedUntil <= now
+  )
+  const pending = visible.length
+  const clusters = new Set(visible.map(approvalClusterKey)).size
+  const waitingSessions = new Set(visible.map((item) => item.sessionKey)).size
   const groups = new Map<string, ApprovalItem[]>()
-  for (const item of state.pending) {
+  for (const item of visible) {
     const group = groups.get(item.sessionKey)
     if (group) group.push(item)
     else groups.set(item.sessionKey, [item])
   }
+  const groupEntries = [...groups.entries()].sort((left, right) => {
+    const leftAt = Math.min(...left[1].map((item) => item.timeoutAt))
+    const rightAt = Math.min(...right[1].map((item) => item.timeoutAt))
+    return leftAt - rightAt
+  })
+  const allPaused = visible.length > 0 && visible.every((item) => item.paused)
   const template: Electron.MenuItemConstructorOptions[] = [
     {
       label:
         pending > 0
-          ? `${pending} 条待审批 · ${waitingSessions} 个会话`
+          ? `${clusters} 组 / ${pending} 条待审批 · ${waitingSessions} 个会话`
           : '暂无待审批',
       enabled: false
     }
   ]
-  if (groups.size > 0) {
+  if (groupEntries.length > 0) {
     template.push({
       label: '等待中的会话',
-      submenu: [...groups.entries()].slice(0, 8).map(([key, items]) => {
+      submenu: groupEntries.slice(0, 8).map(([key, items]) => {
         const info = state.sessions.find((session) => session.key === key)
         const title = info?.title || items[0].sessionLabel
         const task = info?.task || items[0].task
+        const earliest = Math.min(
+          ...items.filter((item) => !item.paused).map((item) => item.timeoutAt)
+        )
+        const left = Number.isFinite(earliest)
+          ? ` · ${remainingSeconds(earliest, now)}s`
+          : ' · 已暂停'
+        const risk = items.some((item) => item.risk.level === 'high') ? ' ⚠' : ''
+        const groups = clusterApprovals(items).length
+        const groupText =
+          groups === items.length ? `${groups} 组` : `${groups} 组/${items.length} 条`
         return {
-          label: `${items.length} · ${title}${task ? ` — ${task.slice(0, 34)}` : ''}`,
+          label: `${groupText} · ${title}${risk}${task ? ` — ${task.slice(0, 28)}` : ''}${left}`,
           click: () => focusSession(key)
         }
       })
     })
+    template.push(
+      {
+        label: allPaused ? '继续全部倒计时' : '暂停全部倒计时',
+        click: () => pauseAllApprovals(!allPaused)
+      },
+      {
+        label: '全部静音 30 分钟',
+        click: () => muteAllSessions(30)
+      },
+      { type: 'separator' }
+    )
   }
   template.push(
     { label: '打开待审批', click: () => sendUiCommand('inbox') },
-    { label: '显示主窗口', click: () => showMainWindow() },
+    { label: '显示主窗口', click: () => showMainWindow() }
+  )
+  if (state.expired.length > 0 || state.skipped.length > 0) {
+    template.push({
+      label: `回退记录 · ${state.expired.length + state.skipped.length} 条`,
+      click: () => sendUiCommand('inbox')
+    })
+  }
+  template.push(
     { label: '状态…', click: () => sendUiCommand('status') },
     { label: '部署…', click: () => sendUiCommand('deploy') },
     { type: 'separator' },
@@ -812,6 +959,9 @@ function refreshTrayMenu(force = false): void {
   const state = store.get()
   const signature = [
     state.pending.length,
+    state.pending.filter((item) => item.paused).length,
+    state.expired.length,
+    state.skipped.length,
     state.server.listening,
     state.prefs.mode,
     state.deploy.localMode,
@@ -1210,6 +1360,43 @@ function acknowledgeExpired(id?: string): void {
   syncPopup()
 }
 
+function clearSkipped(id?: string): void {
+  store.clearSkipped(id)
+  log('info', id ? '已确认一条队列回退记录' : '已确认全部队列回退记录')
+  updateBadge()
+  syncPopup()
+}
+
+/** One action for "I'm stepping away": freeze every visible countdown. */
+function pauseAllApprovals(paused: boolean): void {
+  const now = Date.now()
+  const targets = store
+    .get()
+    .pending.filter((item) => !item.snoozedUntil || item.snoozedUntil <= now)
+  if (targets.length === 0) return
+  for (const item of targets) {
+    if (Boolean(item.paused) === paused) continue
+    pauseApproval(item.id, paused)
+  }
+  store.setToast(
+    paused
+      ? `已暂停 ${targets.length} 条倒计时（hook 最长约多等 10 分钟）`
+      : `已恢复 ${targets.length} 条倒计时`
+  )
+}
+
+function muteAllSessions(minutes: number): void {
+  const waiting = store.get().sessions.filter((session) => session.waiting > 0)
+  if (waiting.length === 0) return
+  for (const session of waiting) sessions.mute(session.key, minutes)
+  refreshSessions()
+  store.setToast(
+    minutes > 0
+      ? `已静音 ${waiting.length} 个会话 ${minutes} 分钟`
+      : `已取消 ${waiting.length} 个会话的静音`
+  )
+}
+
 // ---------------------------------------------------------------------------
 // notifications
 // ---------------------------------------------------------------------------
@@ -1244,10 +1431,14 @@ function flushApprovalNotifications(): void {
   notificationQueue = []
   if (items.length === 0 || !Notification.isSupported() || headless) return
   const uniqueSessions = new Set(items.map((item) => item.sessionKey))
+  const earliest = Math.min(
+    ...items.filter((item) => !item.paused).map((item) => remainingSeconds(item.timeoutAt))
+  )
+  const left = Number.isFinite(earliest) ? ` · 最早 ${earliest}s` : ''
   const title =
     items.length === 1
-      ? `${sessionTitleFor(items[0])} 等待审批`
-      : `${uniqueSessions.size} 个会话 · ${items.length} 条待审批`
+      ? `${sessionTitleFor(items[0])} 等待审批${left}`
+      : `${uniqueSessions.size} 个会话 · ${items.length} 条待审批${left}`
   const body = items
     .slice(0, 4)
     .map((item) => {
@@ -1260,9 +1451,14 @@ function flushApprovalNotifications(): void {
     title,
     body,
     silent: true,
-    urgency: items.some((item) => item.risk.level === 'high') ? 'critical' : 'normal'
+    urgency: items.some((item) => item.risk.level === 'high') ? 'critical' : 'normal',
+    ...(process.platform === 'darwin'
+      ? { actions: [{ type: 'button' as const, text: '打开' }], closeButtonText: '关闭' }
+      : {})
   })
-  notification.on('click', () => focusSession(items[0].sessionKey))
+  const open = (): void => focusApproval(items[0].id)
+  notification.on('click', open)
+  notification.on('action', open)
   notification.show()
 }
 
@@ -1303,8 +1499,45 @@ function notifyApproval(item: ApprovalItem): void {
   notificationTimer = setTimeout(flushApprovalNotifications, 1200)
 }
 
+/** One aggregated system notice when a burst silently pushes work to the terminal. */
+function notifyAdmission(item: ApprovalItem, reason: SkipReason): void {
+  if (headless) return
+  if (Date.now() - lastAdmissionNotifyAt < 10_000) return
+  if (popupWindow?.isFocused()) return
+  const state = store.get()
+  if (
+    !canDeliverSystemNotification({
+      headless,
+      enabled: state.prefs.systemNotifications,
+      muted: muted(item.sessionKey),
+      supported: Notification.isSupported(),
+      quietHours: inQuietHours(),
+      highRisk: item.risk.level === 'high'
+    })
+  ) {
+    return
+  }
+  lastAdmissionNotifyAt = Date.now()
+  const notification = new Notification({
+    title: '审批未弹出，已回退终端',
+    body: `${sessionTitleFor(item)} · ${item.tool} · ${
+      reason === 'overloaded' ? '队列过载' : '预计来不及处理'
+    }`,
+    silent: true
+  })
+  notification.on('click', () => sendUiCommand('inbox'))
+  notification.show()
+}
+
 function notifyTimeout(item: ApprovalItem): void {
   const state = store.get()
+  // This is the only reliable signal when the popup is already showing another
+  // session: the system notification below is deliberately suppressed then.
+  if (!headless) {
+    store.setToast(
+      `${sessionTitleFor(item)} · ${item.tool} 未在 ${item.timeoutSec}s 内处理，已回退终端`
+    )
+  }
   if (
     !canDeliverSystemNotification({
       headless,
@@ -1324,7 +1557,7 @@ function notifyTimeout(item: ApprovalItem): void {
     body: `${sessionTitleFor(item)}${task ? ` · ${task.slice(0, 50)}` : ''} · ${item.tool} 未在 ${item.timeoutSec}s 内处理`,
     silent: true
   })
-  notification.on('click', () => sendUiCommand('inbox'))
+  notification.on('click', () => focusSession(item.sessionKey))
   notification.show()
 }
 
@@ -1371,16 +1604,45 @@ function handleApproval(item: ApprovalItem): void {
   }
 
   if (state.prefs.admissionControl) {
-    const pending = state.pending
-    const estimate = pending.length * 18
-    const overloaded = pending.length >= state.prefs.maxPending
-    const willExpire = pending.length > 0 && item.timeoutSec <= estimate + 10
+    // Count decision groups, not HTTP requests: five identical requests share
+    // one card, so admitting by raw length rejects work that one click clears.
+    const current = admissionSnapshot(state.pending)
+    const projected = admissionSnapshot([...state.pending, item])
+    // An identical request joins an existing card and adds zero decisions, so
+    // it must never be rejected just because that card is already counted.
+    const addsGroup =
+      projected.clusters > current.clusters || projected.timedClusters > current.timedClusters
+    // Paused cards are not competing for the user's remaining time.
+    const overloaded = addsGroup && current.timedClusters >= state.prefs.maxPending
+    const willExpire =
+      addsGroup &&
+      current.timedClusters > 0 &&
+      item.timeoutSec <= projected.estimateSec + 10
     if (overloaded || willExpire) {
+      const reason: SkipReason = overloaded ? 'overloaded' : 'deadline'
       decisionSources.set(item.id, 'admission')
+      const command = (approvalCommand(item) || item.message).slice(0, 160)
+      store.addSkipped({
+        id: `skip_${randomUUID()}`,
+        ts: Date.now(),
+        sessionKey: item.sessionKey,
+        sessionLabel: sessionTitleFor(item),
+        origin: item.origin,
+        tool: item.tool,
+        command,
+        reason,
+        pendingGroups: current.clusters,
+        timeoutSec: item.timeoutSec
+      })
       log(
         'warn',
-        `队列无法及时处理（${pending.length} 条排队），直接回退终端 · ${item.sessionLabel} · ${item.tool}`
+        `队列无法及时处理（${current.clusters} 组 / ${current.active} 条排队，` +
+          `预计 ${projected.estimateSec}s），直接回退终端 · ${item.sessionLabel} · ${item.tool}`
       )
+      store.setToast(
+        `${sessionTitleFor(item)} · ${item.tool} 因队列过载已回退终端`
+      )
+      notifyAdmission(item, reason)
       server.respond(item.id, 'ask')
       return
     }
@@ -2284,15 +2546,24 @@ function registerIpc(): void {
   ipcMain.handle('approval:acknowledge', (_event, id?: string) => {
     acknowledgeExpired(id)
   })
+  ipcMain.handle('approval:clear-skipped', (_event, id?: string) => {
+    clearSkipped(id)
+  })
+  ipcMain.handle('approval:pause-all', (_event, paused: boolean) => {
+    pauseAllApprovals(Boolean(paused))
+  })
+  ipcMain.handle('session:mute-all', (_event, minutes: number) => {
+    muteAllSessions(Number(minutes))
+  })
+  ipcMain.handle('popup:collapse', () => {
+    collapsePopup()
+  })
   ipcMain.handle('notice:dismiss', () => {
     clearCompletionNotice()
     syncPopup('none')
   })
   ipcMain.handle('approval:select', (_event, id: string) => {
-    if (popupWindow && !popupWindow.isDestroyed()) {
-      syncPopup('manual')
-      popupWindow.webContents.send('popup:select', id)
-    }
+    focusApproval(id)
   })
   ipcMain.handle('server:toggle', () => toggleServer())
   ipcMain.handle('test:notify', () => testNotify())
@@ -2850,6 +3121,41 @@ async function runSelfTest(): Promise<void> {
   results.expiredShown = store.get().expired.length > 0
   acknowledgeExpired()
   results.expiredAcknowledged = store.get().expired.length === 0
+
+  // Admission control must fall back the *decision group*, and the skipped
+  // request must remain visible as a record instead of vanishing.
+  store.setPrefs({ maxPending: 1 })
+  const admissionFirst = postApproval({
+    request_id: 'req_admission_1',
+    session_id: 'selftest-admission-1',
+    origin: 'self-test',
+    tool_name: 'Bash',
+    cwd: '/tmp/claude-notify-selftest',
+    message: 'admission test 1',
+    tool_input: { command: 'echo admission-one' }
+  })
+  const admissionItem = await waitPending('req_admission_1')
+  const admissionSecond = await postApproval({
+    request_id: 'req_admission_2',
+    session_id: 'selftest-admission-2',
+    origin: 'self-test',
+    tool_name: 'Bash',
+    cwd: '/tmp/claude-notify-selftest',
+    message: 'admission test 2',
+    tool_input: { command: 'echo admission-two' }
+  })
+  results.admission = {
+    decision: admissionSecond.body.decision,
+    skipped: store.get().skipped.length,
+    pending: store.get().pending.length,
+    reason: store.get().skipped[0]?.reason || null
+  }
+  if (admissionItem) respond(admissionItem.id, 'allow', undefined, 'popup')
+  await admissionFirst
+  clearSkipped()
+  results.admissionCleared = store.get().skipped.length === 0
+  store.setPrefs({ maxPending: 8 })
+
   results.historyCount = store.get().history.length
   results.sessionCount = store.get().sessions.length
   store.clearExpired()

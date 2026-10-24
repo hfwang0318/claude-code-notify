@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
+import { clusterApprovals } from '../../shared/approvals'
 import HistoryPanel from './HistoryPanel'
 import Inbox from './Inbox'
 import LogPanel from './LogPanel'
@@ -105,6 +106,9 @@ export default function App(): React.JSX.Element {
 
   const isMac = state.app.platform === 'darwin'
   const pending = state.pending.length
+  const pendingGroups = clusterApprovals(state.pending.filter(
+    (item) => !item.snoozedUntil || item.snoozedUntil <= Date.now()
+  )).length
   const serviceOk = state.server.listening
   const hasDeployedProfile = state.deploy.profiles.some(
     (profile) => profile.status === 'deployed'
@@ -253,7 +257,9 @@ export default function App(): React.JSX.Element {
                 onClick={() => setTab('inbox')}
               >
                 待审批
-                {pending > 0 ? <b>{pending}</b> : null}
+                {pendingGroups > 0 ? (
+                  <b title={`${pendingGroups} 组 / ${pending} 条`}>{pendingGroups}</b>
+                ) : null}
               </button>
               <button
                 role="tab"
@@ -314,7 +320,8 @@ export default function App(): React.JSX.Element {
               <kbd>1–9</kbd> 选项
             </span>
             <span className="panel-foot-hint">
-              J/K 选择 · A 允许 · D 拒绝 · T 终端 · ⌘/Ctrl + 1/2/3 切页
+              J/K 选择 · Space 多选 · A 允许 · D 拒绝 · T 终端 · S 稍后 · P 暂停 ·
+              ⌘/Ctrl + 1/2/3 切页
             </span>
           </footer>
         </section>

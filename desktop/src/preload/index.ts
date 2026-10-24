@@ -31,6 +31,10 @@ const api: DesktopApi = {
   snoozeApproval: (id: string, minutes: number) =>
     ipcRenderer.invoke('approval:snooze', id, minutes),
   acknowledgeExpired: (id?: string) => ipcRenderer.invoke('approval:acknowledge', id),
+  clearSkipped: (id?: string) => ipcRenderer.invoke('approval:clear-skipped', id),
+  collapsePopup: () => ipcRenderer.invoke('popup:collapse'),
+  pauseAll: (paused: boolean) => ipcRenderer.invoke('approval:pause-all', paused),
+  muteAll: (minutes: number) => ipcRenderer.invoke('session:mute-all', minutes),
   dismissNotice: () => ipcRenderer.invoke('notice:dismiss'),
   selectApproval: (id: string) => ipcRenderer.invoke('approval:select', id),
   onSelectApproval: (callback: (id: string) => void) => {

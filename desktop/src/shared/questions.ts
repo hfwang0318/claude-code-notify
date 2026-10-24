@@ -41,6 +41,17 @@ export function validateDrafts(
   return invalid
 }
 
+/** The next question that still needs an answer, wrapping to the first one. */
+export function nextUnansweredIndex(
+  questions: readonly ApprovalQuestion[],
+  drafts: readonly QuestionDraft[],
+  from = 0
+): number {
+  const invalid = validateDrafts(questions, drafts)
+  if (invalid.length === 0) return -1
+  return invalid.find((index) => index > from) ?? invalid[0]
+}
+
 /**
  * 构造答案列表。未回答的题目会被跳过；只有展开“其他”时才会附带文本，
  * 防止收起后残留的 text 被静默提交。

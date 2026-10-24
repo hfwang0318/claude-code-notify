@@ -51,3 +51,59 @@ export function clusterApprovals(items: ApprovalItem[]): ApprovalCluster[] {
 export function clusterFor(clusters: ApprovalCluster[], id: string): ApprovalItem[] {
   return clusters.find((cluster) => cluster.items.some((item) => item.id === id))?.items || []
 }
+
+/**
+ * Same tool + same canonical input, ignoring the session. This is only used to
+ * *surface* parallel work (three worktrees asking for the same test command);
+ * a decision is never applied across sessions without an explicit confirmation.
+ */
+export function crossSessionKey(item: ApprovalItem): string | null {
+  if (item.kind === 'question') return null
+  return `${item.tool}\u0000${stableStringify(item.toolInput)}`
+}
+
+export interface CrossSessionCluster {
+  key: string
+  items: ApprovalItem[]
+}
+
+export function crossSessionClusters(items: ApprovalItem[]): CrossSessionCluster[] {
+  const clusters = new Map<string, CrossSessionCluster>()
+  for (const item of items) {
+    const key = crossSessionKey(item)
+    if (!key) continue
+    const existing = clusters.get(key)
+    if (existing) existing.items.push(item)
+    else clusters.set(key, { key, items: [item] })
+  }
+  return [...clusters.values()]
+}
+
+/** Estimated wall-clock cost of one decision, used by the admission heuristic. */
+export const SECONDS_PER_DECISION = 18
+
+export interface AdmissionSnapshot {
+  /** Requests that are visible right now (not snoozed). */
+  active: number
+  /** Distinct decisions waiting, regardless of pause state. */
+  clusters: number
+  /** Distinct decisions whose hook timer is still running. */
+  timedClusters: number
+  estimateSec: number
+}
+
+/**
+ * Identical requests share one card and one decision, so counting raw HTTP
+ * requests overstates the queue by a lot. Admission must count decision groups.
+ */
+export function admissionSnapshot(items: ApprovalItem[], now = Date.now()): AdmissionSnapshot {
+  const active = items.filter((item) => !item.snoozedUntil || item.snoozedUntil <= now)
+  const clusters = new Set(active.map(approvalClusterKey))
+  const timed = new Set(active.filter((item) => !item.paused).map(approvalClusterKey))
+  return {
+    active: active.length,
+    clusters: clusters.size,
+    timedClusters: timed.size,
+    estimateSec: timed.size * SECONDS_PER_DECISION
+  }
+}

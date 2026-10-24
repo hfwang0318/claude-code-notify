@@ -62,6 +62,23 @@ hook v8 起，`PreToolUse` 关联日志从 SQLite 改为私有 JSONL，部署的
 E2E 的隔离 settings 仍显式写空 matcher，以保持旧用例的“所有工具都记录关联”行为。
 
 
+### 0.6 多会话分诊的验证边界
+
+当前真实 Claude E2E 仍以“并发到达 → 弹窗出现 → 逐条点击允许”为主。`multi` 用例会检查会话条数量、会话名/任务摘要、点击切换、逐条允许和 history，因此覆盖了多会话身份与基本切换；`stop`、`resolved` 覆盖通知与终端侧关闭。以下行为目前由单测、`pnpm capture` 和人工验收覆盖：
+
+- **sticky 会话**：同一会话连续多条审批时，决策后应停在同会话的下一条；只有其他会话剩余 ≤10s 才插队。E2E 的 `multi` 每个会话只有一条，无法覆盖“处理完第一条仍留在原会话”。
+- **会话感知排序**：`src/shared/triage.test.ts` 覆盖“截止时间接近时交错、相差较远时保持 EDF、不丢条目”。
+- **准入回退可见**：`src/shared/approvals.test.ts` 覆盖按决策组计数、排除暂停/稍后；真实触发需要把 `maxPending` 调低并并发灌入多条请求，当前脚本未做。
+- **过期/回退明细**：`expired` 的逐条关闭由 self-test 覆盖；`skipped` 明细、超时应用内提示需人工触发。
+- **收起语义**：`×` 收起后 pending 保留、超时前 15s 重现；E2E 仍通过点击按钮完成审批，不覆盖收起路径。
+- **焦点防护**：新卡片 500ms 内忽略 Enter/Esc 和单键快捷键；属于真实键盘/焦点行为，E2E 使用 `webContents` 点击，无法覆盖。
+- **批量与键盘**：收件箱本会话全选、选区感知 A/D/T、批量拒绝二次确认、`Space` 多选、`J/K/A/D/T/S/P`、`?` 帮助；由 renderer 人工/截图验收。
+- **跨会话同命令**：需要同一命令在两个会话并发请求；单测覆盖聚类，应用层确认流程由人工验收。
+- **规则建议**：连续允许 2 次后的固化提示、仅本会话/本项目范围、匹配预览；由人工验收，规则匹配本身由 `rules.test.ts` 覆盖。
+- **通知深链/动作**：点击通知直达具体 request、macOS “打开”动作；系统通知中心行为无法在无头 E2E 中可靠断言。
+
+2026-10-25 多轮真实 Claude 结果：`stop` 每轮通过；`multi`（会话条切换、逐条允许）与 `timeout`（含暂停/恢复）在工具可见的轮次通过；`resolved` 在工具可见的轮次通过。全量 `pnpm e2e:claude` 的最后一次尝试中，`bypass` 的 `--dangerously-skip-permissions` 入口在 120s 内没有退出；同一时刻 `pending=0`、没有审批记录，且 Claude 输出 `unrecognized_model`（当次路由模型），说明是 Claude 侧的模型/权限行为，不是弹窗卡住。随后定向 `E2E_CASES=stop,multi,resolved,timeout` 通过（`stop`、`timeout` 实测，`multi`/`resolved` 因工具未暴露 SKIP）。跳过不是失败，工具暴露与路由模型会变化；不要用单轮 SKIP 或单轮 bypass 失败推断审批 UI 回归。新增行为落地时，如果改动了弹窗/收件箱的可见文本或 DOM 结构，需要同时更新 `pnpm capture` 截图和本节的覆盖说明。
+
 ### 明确不覆盖
 
 - 交互式 TUI 中的真实按键/终端焦点（E2E 使用 `claude -p` 非交互模式）

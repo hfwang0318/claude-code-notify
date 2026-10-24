@@ -5447,3 +5447,615 @@ kbd {
   padding-right: 2px;
   scrollbar-width: thin;
 }
+
+/* ==========================================================================
+   Multi-session triage: receipts, fallback records, slack and dense queues
+   ========================================================================== */
+
+.popup-receipt {
+  margin: 8px 23px 0;
+  padding: 7px 10px;
+  border: 1px solid rgba(143, 209, 174, 0.32);
+  border-radius: 8px;
+  background: rgba(143, 209, 174, 0.08);
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+  animation: popup-in 0.16s ease;
+}
+
+.popup-skipped-banner {
+  margin: 8px 23px 0;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid rgba(210, 176, 122, 0.32);
+  border-radius: 8px;
+  background: rgba(210, 176, 122, 0.08);
+  color: var(--amber);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.popup-skipped-banner span {
+  flex: 1 1 220px;
+}
+
+.popup-panel {
+  margin: 10px 23px 0;
+}
+
+.popup-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.popup-panel-head b {
+  font-size: calc(14px * var(--font-scale));
+  color: var(--ink);
+}
+
+.popup-panel-head span {
+  flex: 1;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.popup-panel-hint {
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.55;
+}
+
+.popup-panel-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--faint);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.popup-panel .expired-list {
+  margin: 8px 0 0;
+}
+
+.popup-panel .expired-row {
+  grid-template-columns: 10px minmax(0, 1fr) 52px 34px;
+}
+
+.popup-panel > .popup-btn {
+  width: 100%;
+  margin-top: 9px;
+}
+
+.help-grid {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 7px 10px;
+  margin: 8px 0 0;
+}
+
+.help-grid dt {
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  color: var(--ink-2);
+}
+
+.help-grid dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.45;
+}
+
+.help-trigger {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+}
+
+.help-trigger:hover {
+  color: var(--ink);
+}
+
+.slack-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+  white-space: nowrap;
+}
+
+.slack-chip.tight {
+  color: var(--amber);
+  border-color: rgba(210, 176, 122, 0.3);
+}
+
+.slack-chip.urgent {
+  color: #f2a08a;
+  border-color: rgba(224, 122, 90, 0.4);
+  background: rgba(224, 122, 90, 0.08);
+}
+
+.popup-request-row .slack-chip {
+  margin-left: auto;
+}
+
+.popup-cross {
+  margin: 8px 23px 0;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid rgba(143, 179, 204, 0.28);
+  border-radius: 8px;
+  background: rgba(143, 179, 204, 0.07);
+  color: var(--blue);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.popup-cross span {
+  flex: 1 1 220px;
+}
+
+.danger-link {
+  color: var(--red) !important;
+}
+
+.popup-consequence {
+  margin: 9px 23px 4px;
+  color: var(--faint);
+  font-size: calc(10.5px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.popup-action-dock {
+  position: sticky;
+  bottom: -1px;
+  z-index: 4;
+  padding-bottom: 4px;
+  background: linear-gradient(
+    180deg,
+    rgba(22, 22, 26, 0) 0%,
+    rgba(22, 22, 26, 0.94) 22%,
+    rgba(22, 22, 26, 0.98) 100%
+  );
+}
+
+.popup-action-dock .popup-actions {
+  padding-top: 11px;
+}
+
+.option-key {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 1px 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: calc(9px * var(--font-scale));
+  opacity: 0.68;
+}
+
+.popup-btn:disabled,
+.popup-terminal:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
+.deny-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 0 8px;
+}
+
+.deny-chips .chip {
+  height: 24px;
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.rule-suggestion {
+  margin: 10px 23px 0;
+  padding: 8px 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px dashed rgba(143, 209, 174, 0.3);
+  border-radius: 8px;
+  background: rgba(143, 209, 174, 0.05);
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.rule-suggestion span {
+  flex: 1 1 220px;
+}
+
+.popup-remember-block {
+  margin: 8px 23px 0;
+}
+
+.popup-remember-block .popup-remember-row {
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.popup-remember-block .popup-remember {
+  margin: 0;
+  flex: 1;
+  min-width: 120px;
+}
+
+.rule-preview {
+  margin-top: 6px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(9.5px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.diff-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.diff-add {
+  color: var(--green);
+}
+
+.diff-del {
+  color: var(--red);
+}
+
+.diff-more {
+  margin-top: 4px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.queue-panel {
+  margin: 0 23px;
+}
+
+.queue-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.queue-search {
+  flex: 1;
+  min-width: 160px;
+  height: 26px;
+  font-size: calc(11px * var(--font-scale));
+}
+
+.queue-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--faint);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.queue-panel .queue-list {
+  margin: 6px 0 0;
+}
+
+.session-chip-more {
+  flex: none;
+  min-width: 36px;
+  height: 27px;
+  padding: 0 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+  cursor: pointer;
+}
+
+.session-chip-more:hover {
+  color: var(--ink-2);
+  border-color: var(--muted);
+}
+
+.inbox-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 10px;
+}
+
+.inbox-tools-hint {
+  flex: 1 1 200px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.inbox-receipt {
+  margin: 0 0 9px;
+  padding: 7px 10px;
+  border: 1px solid rgba(143, 209, 174, 0.3);
+  border-radius: 8px;
+  background: rgba(143, 209, 174, 0.07);
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.bulk-warn {
+  color: var(--red);
+}
+
+.kind-badge.cross {
+  color: var(--blue);
+  border-color: rgba(143, 179, 204, 0.3);
+}
+
+.skipped-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  font-size: 0;
+  flex: none;
+}
+
+.inbox-item-top {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.inbox-item-top .slack-chip {
+  margin-left: auto;
+}
+
+.inbox-item-top .inbox-time {
+  margin-left: 0;
+}
+
+.inbox-session-head {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+:root[data-theme='light'] .popup-action-dock {
+  background: linear-gradient(
+    180deg,
+    rgba(247, 245, 240, 0) 0%,
+    rgba(247, 245, 240, 0.95) 22%,
+    rgba(247, 245, 240, 0.99) 100%
+  );
+}
+
+:root[data-theme='light'] .popup-receipt,
+:root[data-theme='light'] .inbox-receipt {
+  background: rgba(47, 125, 91, 0.07);
+  border-color: rgba(47, 125, 91, 0.24);
+}
+
+:root[data-theme='light'] .popup-skipped-banner {
+  background: rgba(138, 106, 47, 0.07);
+  border-color: rgba(138, 106, 47, 0.26);
+}
+
+:root[data-theme='light'] .popup-cross {
+  background: rgba(47, 99, 127, 0.06);
+  border-color: rgba(47, 99, 127, 0.22);
+}
+
+.popup-toast {
+  margin: 8px 23px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-2);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.45;
+}
+
+:root[data-theme='light'] .popup-toast {
+  background: rgba(20, 20, 24, 0.04);
+}
+
+/* Fixed decision bar: the card body scrolls, the action area never does. */
+.popup-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.popup-body {
+  flex: 0 1 auto;
+  min-height: 240px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.popup-body::-webkit-scrollbar {
+  display: none;
+}
+
+.popup-action-dock {
+  position: static;
+  flex: none;
+  padding-bottom: 0;
+  background: transparent;
+}
+
+.popup-foot {
+  flex: none;
+}
+
+/* Two chips per row keeps a 5-session burst from eating the whole card. */
+.session-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.session-strip > .session-chip {
+  flex: 0 0 220px;
+  max-width: 220px;
+  min-width: 0;
+  display: flex;
+  height: 30px;
+  padding: 0 9px;
+}
+
+.identity-task.duplicate {
+  display: none;
+}
+
+.session-strip > .session-chip .session-chip-name {
+  flex: 0 1 auto;
+  max-width: 44%;
+  font-size: calc(11px * var(--font-scale));
+}
+
+.session-strip > .session-chip .session-chip-task {
+  flex: 1 1 auto;
+  font-size: calc(9.5px * var(--font-scale));
+}
+
+.session-strip > .session-chip b,
+.session-strip > .session-chip em {
+  flex: none;
+}
+
+.popup-actions.inline {
+  flex-wrap: wrap;
+}
+
+.popup-actions.inline .confirm-bar {
+  flex: 1 0 100%;
+}
+
+.popup-actions.inline .popup-btn {
+  flex: 1 1 0;
+}
+
+.popup-actions.inline .popup-terminal {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.popup-head,
+.popup-receipt,
+.popup-toast,
+.popup-skipped-banner,
+.session-strip {
+  flex: none;
+}
+
+/* Keep the task in the accessible tree but let the chip stay one compact line. */
+.session-strip > .session-chip .session-chip-task {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.popup-btn.allow .option-key {
+  border-color: rgba(36, 16, 9, 0.28);
+  color: rgba(36, 16, 9, 0.72);
+  opacity: 1;
+}
+
+.popup-btn.deny .option-key {
+  border-color: rgba(232, 160, 148, 0.26);
+  color: #e8a094;
+  opacity: 1;
+}
+
+.popup-action-dock .popup-count {
+  padding-top: 8px;
+}
+
+.popup-help {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+}
+
+.popup-help:hover {
+  color: var(--ink-2);
+  border-color: var(--line-strong);
+}
+
+.session-strip > .session-chip {
+  flex: 1 1 0;
+  max-width: none;
+}
+
+.popup-count {
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+}
+
+.popup-snooze-quick {
+  padding: 0 8px;
+  font-size: calc(10px * var(--font-scale));
+}
+
+.session-chip-flag {
+  flex: none;
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.session-chip-flag.high {
+  color: var(--amber);
+}
+
+.session-chip-flag.question {
+  color: var(--blue);
+}
+
+.session-chip-flag.remote {
+  color: var(--faint);
+}

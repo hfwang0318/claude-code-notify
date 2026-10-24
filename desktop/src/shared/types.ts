@@ -167,6 +167,27 @@ export interface ApprovalExtra {
   reason?: string
 }
 
+/**
+ * A request that never reached the popup because the admission control sent it
+ * straight back to the terminal. Kept in state so "why did nothing appear?" is
+ * answerable without opening the log.
+ */
+export type SkipReason = 'overloaded' | 'deadline'
+
+export interface SkippedApproval {
+  id: string
+  ts: number
+  sessionKey: string
+  sessionLabel: string
+  origin: string
+  tool: string
+  command: string
+  reason: SkipReason
+  /** How many distinct decision groups were already waiting. */
+  pendingGroups: number
+  timeoutSec: number
+}
+
 export interface ApprovalRecord {
   id: string
   ts: number
@@ -369,6 +390,8 @@ export interface AppState {
   sessions: SessionInfo[]
   pending: ApprovalItem[]
   expired: ApprovalItem[]
+  /** Requests the admission control returned to the terminal without showing. */
+  skipped: SkippedApproval[]
   notice: CompletionNotice | null
   history: ApprovalRecord[]
   rules: ApprovalRule[]
@@ -389,6 +412,10 @@ export interface DesktopApi {
   pauseApproval(id: string, paused: boolean): Promise<void>
   snoozeApproval(id: string, minutes: number): Promise<void>
   acknowledgeExpired(id?: string): Promise<void>
+  clearSkipped(id?: string): Promise<void>
+  collapsePopup(): Promise<void>
+  pauseAll(paused: boolean): Promise<void>
+  muteAll(minutes: number): Promise<void>
   dismissNotice(): Promise<void>
   selectApproval(id: string): Promise<void>
   onSelectApproval(callback: (id: string) => void): () => void

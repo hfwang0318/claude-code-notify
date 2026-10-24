@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { AppState, ApprovalItem } from '../../shared/types'
 import {
   approvalCommand,
@@ -8,9 +8,12 @@ import {
   riskLabel,
   sessionColor,
   shortSessionId,
-  sortByDeadline
+  slackSeconds,
+  sortForTriage,
+  URGENT_SECONDS
 } from '../../shared/session'
-import { clusterApprovals } from '../../shared/approvals'
+import { estimateHandlingMs } from '../../shared/analytics'
+import { clusterApprovals, crossSessionClusters } from '../../shared/approvals'
 import { formatRelative, minutesUntilTomorrow } from './format'
 import { api } from './api'
 
@@ -110,7 +113,16 @@ export default function Inbox({
   const [riskFilter, setRiskFilter] = useState<'all' | 'high' | 'medium'>('all')
   const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
   const [bulkAllowConfirm, setBulkAllowConfirm] = useState(false)
+  const [bulkDenyConfirm, setBulkDenyConfirm] = useState(false)
   const [activeKey, setActiveKey] = useState<string | null>(null)
+  const [sortMode, setSortMode] = useState<'deadline' | 'slack'>('deadline')
+  const [busy, setBusy] = useState(false)
+  const [receipt, setReceipt] = useState<string | null>(null)
+  const activeIndexRef = useRef(0)
+  const receiptTimer = useRef<number | null>(null)
+
+  const estimateFor = (item: ApprovalItem): number =>
+    estimateHandlingMs(state.history, item.tool, item.risk.level)
 
   const visible = useMemo(() => {
     const text = query.trim().toLowerCase()
@@ -134,8 +146,34 @@ export default function Inbox({
         .includes(text)
     })
   }, [query, riskFilter, state.pending, state.sessions])
-  const groups = useMemo(() => groupBySession(sortByDeadline(visible)), [visible])
-  const allClusters = useMemo(() => clusterApprovals(visible), [visible])
+  const ordered = useMemo(() => {
+    if (sortMode === 'deadline') return sortForTriage(visible)
+    return [...visible].sort((left, right) => {
+      const leftSlack = slackSeconds(
+        remainingSeconds(left.timeoutAt, now),
+        estimateHandlingMs(state.history, left.tool, left.risk.level)
+      )
+      const rightSlack = slackSeconds(
+        remainingSeconds(right.timeoutAt, now),
+        estimateHandlingMs(state.history, right.tool, right.risk.level)
+      )
+      return leftSlack - rightSlack || left.timeoutAt - right.timeoutAt
+    })
+  }, [visible, sortMode, state.history, now])
+  const groups = useMemo(() => groupBySession(ordered), [ordered])
+  const allClusters = useMemo(() => clusterApprovals(ordered), [ordered])
+  const snoozedCount = state.pending.filter(
+    (item) => item.snoozedUntil && item.snoozedUntil > now
+  ).length
+  const pendingGroupsCount = clusterApprovals(
+    state.pending.filter((item) => !item.snoozedUntil || item.snoozedUntil <= now)
+  ).length
+  const allPaused =
+    state.pending.length > 0 && state.pending.every((item) => item.paused)
+  const waitingSessions = state.sessions.filter((session) => session.waiting > 0)
+  const allMuted =
+    waitingSessions.length > 0 &&
+    waitingSessions.every((session) => (session.mutedUntil || 0) > now)
   const selectedClusters = useMemo(
     () => allClusters.filter((cluster) => selectedGroups.has(cluster.key)),
     [allClusters, selectedGroups]
@@ -149,6 +187,9 @@ export default function Inbox({
     selectedClusters.every((cluster) =>
       cluster.items.every((item) => item.risk.level === 'low')
     )
+  const selectedHasHigh = selectedClusters.some((cluster) =>
+    cluster.items.some((item) => item.risk.level === 'high')
+  )
 
   useEffect(() => {
     if (!bulkAllowConfirm) return
@@ -157,12 +198,26 @@ export default function Inbox({
   }, [bulkAllowConfirm])
 
   useEffect(() => {
+    if (!bulkDenyConfirm) return
+    const timer = window.setTimeout(() => setBulkDenyConfirm(false), 4000)
+    return () => window.clearTimeout(timer)
+  }, [bulkDenyConfirm])
+
+  useEffect(() => {
+    const index = allClusters.findIndex((cluster) => cluster.key === activeKey)
+    if (index >= 0) activeIndexRef.current = index
+  }, [activeKey, allClusters])
+
+  useEffect(() => {
     if (allClusters.length === 0) {
       if (activeKey) setActiveKey(null)
       return
     }
     if (!activeKey || !allClusters.some((cluster) => cluster.key === activeKey)) {
-      setActiveKey(allClusters[0].key)
+      // Acting on a card must advance to its neighbour, not jump to the top;
+      // otherwise keyboard triage throws the user back to the first item.
+      const next = allClusters[Math.min(activeIndexRef.current, allClusters.length - 1)]
+      setActiveKey(next.key)
     }
   }, [activeKey, allClusters])
 
@@ -173,6 +228,7 @@ export default function Inbox({
       return next.size === current.size ? current : next
     })
     setBulkAllowConfirm(false)
+    setBulkDenyConfirm(false)
   }, [allClusters])
 
   useEffect(() => {
@@ -190,6 +246,12 @@ export default function Inbox({
       ) {
         return
       }
+      if (
+        target?.tagName === 'BUTTON' &&
+        (event.key === ' ' || event.key === 'Enter')
+      ) {
+        return
+      }
       if (allClusters.length === 0) return
       const index = Math.max(
         0,
@@ -202,26 +264,42 @@ export default function Inbox({
         cards[bounded]?.scrollIntoView({ block: 'nearest' })
       }
       const active = allClusters[index]
+      const hasSelection = selectedGroups.size > 0
       if (event.key === 'j' || event.key === 'J') {
         event.preventDefault()
         focus(index + 1)
       } else if (event.key === 'k' || event.key === 'K') {
         event.preventDefault()
         focus(index - 1)
+      } else if (event.key === ' ' || event.key === 'Spacebar') {
+        event.preventDefault()
+        toggleSelect(active.key)
+      } else if (event.key === 'Escape' && hasSelection) {
+        event.preventDefault()
+        clearSelection()
       } else if (event.key === 'a' || event.key === 'A') {
         event.preventDefault()
-        approve(active.items)
+        if (hasSelection) bulkAllow()
+        else approve(active.items)
       } else if (event.key === 'd' || event.key === 'D') {
         event.preventDefault()
-        respondCluster(active.items, 'deny')
+        if (hasSelection) bulkDeny()
+        else respondCluster(active.items, 'deny')
       } else if (event.key === 't' || event.key === 'T') {
         event.preventDefault()
-        respondCluster(active.items, 'ask')
+        if (hasSelection) bulkDecision('ask')
+        else respondCluster(active.items, 'ask')
+      } else if (event.key === 's' || event.key === 'S') {
+        event.preventDefault()
+        snoozeCluster(active.items, 5)
+      } else if (event.key === 'p' || event.key === 'P') {
+        event.preventDefault()
+        pauseCluster(active.items, !active.items.every((item) => item.paused))
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [activeKey, allClusters])
+  }, [activeKey, allClusters, selectedGroups])
 
   useEffect(() => {
     if (!focusSessionKey) return
@@ -247,8 +325,29 @@ export default function Inbox({
     void api.muteSession(key, muted ? 0 : 30)
   }
 
+  const pushReceipt = (text: string): void => {
+    setReceipt(text)
+    if (receiptTimer.current) window.clearTimeout(receiptTimer.current)
+    receiptTimer.current = window.setTimeout(() => setReceipt(null), 2400)
+  }
+
+  const act = async (ids: string[], decision: string, label: string): Promise<void> => {
+    if (ids.length === 0 || busy) return
+    setBusy(true)
+    try {
+      await api.respondMany(ids, decision)
+      pushReceipt(`${label} · ${ids.length} 条`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const batchAsk = (items: ApprovalItem[]): void => {
-    void api.respondMany(items.map((item) => item.id), 'ask')
+    void act(
+      items.map((item) => item.id),
+      'ask',
+      '已交给终端'
+    )
     setConfirmBatch(null)
   }
 
@@ -259,11 +358,26 @@ export default function Inbox({
       void api.selectApproval(item.id)
       return
     }
-    void api.respondMany(items.map((entry) => entry.id), 'allow')
+    void act(
+      items.map((entry) => entry.id),
+      'allow',
+      `已允许 · ${item.tool}`
+    )
   }
 
   const respondCluster = (items: ApprovalItem[], decision: string): void => {
-    void api.respondMany(items.map((item) => item.id), decision)
+    const label =
+      decision === 'deny' ? '已拒绝' : decision === 'ask' ? '已交给终端' : '已处理'
+    void act(
+      items.map((item) => item.id),
+      decision,
+      label
+    )
+  }
+
+  const pauseCluster = (items: ApprovalItem[], paused: boolean): void => {
+    for (const item of items) void api.pauseApproval(item.id, paused)
+    pushReceipt(paused ? '本组倒计时已暂停' : '本组倒计时已恢复')
   }
 
   const toggleSelect = (key: string): void => {
@@ -274,42 +388,101 @@ export default function Inbox({
       return next
     })
     setBulkAllowConfirm(false)
+    setBulkDenyConfirm(false)
+  }
+
+  const selectAllGroup = (items: ApprovalItem[]): void => {
+    const keys = clusterApprovals(items).map((cluster) => cluster.key)
+    setSelectedGroups((current) => {
+      const allSelected = keys.length > 0 && keys.every((key) => current.has(key))
+      const next = new Set(current)
+      for (const key of keys) {
+        if (allSelected) next.delete(key)
+        else next.add(key)
+      }
+      return next
+    })
+    setBulkAllowConfirm(false)
+    setBulkDenyConfirm(false)
   }
 
   const clearSelection = (): void => {
     setSelectedGroups(new Set())
     setBulkAllowConfirm(false)
+    setBulkDenyConfirm(false)
   }
 
   const bulkDecision = (decision: string): void => {
     if (selectedItemIds.length === 0) return
-    void api.respondMany(selectedItemIds, decision)
+    const label =
+      decision === 'allow' ? '已批量允许' : decision === 'deny' ? '已批量拒绝' : '已批量交给终端'
+    void act(selectedItemIds, decision, label)
     clearSelection()
   }
 
   const bulkAllow = (): void => {
-    if (!canBulkAllow || selectedItemIds.length === 0) return
+    if (selectedItemIds.length === 0) return
+    if (!canBulkAllow) {
+      pushReceipt('选中项含高风险，批量允许只支持全部低风险')
+      return
+    }
     if (!bulkAllowConfirm) {
       setBulkAllowConfirm(true)
+      setBulkDenyConfirm(false)
       return
     }
     bulkDecision('allow')
   }
 
-  const snoozeCluster = (items: ApprovalItem[], minutes: number): void => {
-    for (const item of items) void api.snoozeApproval(item.id, minutes)
+  const bulkDeny = (): void => {
+    if (selectedItemIds.length === 0) return
+    if (!bulkDenyConfirm) {
+      setBulkDenyConfirm(true)
+      setBulkAllowConfirm(false)
+      return
+    }
+    bulkDecision('deny')
   }
 
+  const snoozeCluster = (items: ApprovalItem[], minutes: number): void => {
+    const left = Math.min(
+      ...items.filter((item) => !item.paused).map((item) => remainingSeconds(item.timeoutAt))
+    )
+    if (Number.isFinite(left) && left <= minutes * 60) {
+      pushReceipt(`剩余 ${left}s，${minutes} 分钟后提醒会直接超时`)
+      return
+    }
+    for (const item of items) void api.snoozeApproval(item.id, minutes)
+    pushReceipt(`已稍后 ${minutes} 分钟 · 倒计时继续`)
+  }
+
+  useEffect(
+    () => () => {
+      if (receiptTimer.current) window.clearTimeout(receiptTimer.current)
+    },
+    []
+  )
+
   if (state.pending.length === 0) {
+    const rolledBack = state.expired.length + state.skipped.length
     return (
       <div className="inbox">
-        {state.expired.length > 0 ? (
+        {rolledBack > 0 ? (
           <div className="inbox-expired">
             <div>
-              <b>{state.expired.length} 条审批已回退终端</b>
-              <span>桌面端不会再次提交这些决定；可在历史里查看。</span>
+              <b>{rolledBack} 条审批已回退终端</b>
+              <span>
+                超时 {state.expired.length} 条 · 队列过载 {state.skipped.length} 条；
+                桌面端不会再次提交这些决定。
+              </span>
             </div>
-            <button className="btn compact" onClick={() => api.acknowledgeExpired()}>
+            <button
+              className="btn compact"
+              onClick={() => {
+                void api.acknowledgeExpired()
+                void api.clearSkipped()
+              }}
+            >
               全部知道了
             </button>
           </div>
@@ -363,23 +536,81 @@ export default function Inbox({
             </button>
           ))}
         </div>
+        <div className="filter-chips" role="group" aria-label="排序">
+          <button
+            className={sortMode === 'deadline' ? 'chip active' : 'chip'}
+            aria-pressed={sortMode === 'deadline'}
+            onClick={() => setSortMode('deadline')}
+          >
+            按截止
+          </button>
+          <button
+            className={sortMode === 'slack' ? 'chip active' : 'chip'}
+            aria-pressed={sortMode === 'slack'}
+            onClick={() => setSortMode('slack')}
+            title="剩余时间减去按历史估算的处理时间"
+          >
+            按余量
+          </button>
+        </div>
       </div>
+
+      <div className="inbox-tools">
+        <span className="inbox-tools-hint">
+          {snoozedCount > 0 ? `${snoozedCount} 条稍后提醒 · ` : ''}
+          共 {pendingGroupsCount} 组 / {state.pending.length} 条
+        </span>
+        <button
+          className="btn subtle compact"
+          onClick={() => void api.pauseAll(!allPaused)}
+        >
+          {allPaused ? '继续全部' : '暂停全部'}
+        </button>
+        <button
+          className="btn subtle compact"
+          onClick={() => void api.muteAll(allMuted ? 0 : 30)}
+        >
+          {allMuted ? '全部取消静音' : '全部静音 30 分钟'}
+        </button>
+        {state.expired.length + state.skipped.length > 0 ? (
+          <button className="link" onClick={() => setShowExpired((value) => !value)}>
+            回退记录 {state.expired.length + state.skipped.length}
+          </button>
+        ) : null}
+      </div>
+
+      {receipt ? (
+        <div className="inbox-receipt" role="status" aria-live="polite">
+          {receipt}
+        </div>
+      ) : null}
 
       {selectedGroups.size > 0 ? (
         <div className="inbox-bulk" role="region" aria-label="批量操作">
           <div>
             已选 <b>{selectedClusters.length}</b> 组 / <b>{selectedItemIds.length}</b> 条
+            {selectedHasHigh ? <span className="bulk-warn"> · 含高风险</span> : null}
           </div>
           <div className="inbox-bulk-actions">
-            <button className="btn subtle compact" onClick={() => bulkDecision('ask')}>
+            <button
+              className="btn subtle compact"
+              disabled={busy}
+              onClick={() => bulkDecision('ask')}
+            >
               全部交给终端
             </button>
-            <button className="btn compact" onClick={() => bulkDecision('deny')}>
-              全部拒绝
+            <button
+              className={`btn compact ${bulkDenyConfirm ? 'danger' : ''}`}
+              disabled={busy}
+              onClick={bulkDeny}
+            >
+              {bulkDenyConfirm
+                ? `再点一次确认拒绝 ${selectedItemIds.length} 条`
+                : '全部拒绝'}
             </button>
             <button
               className={`btn compact ${bulkAllowConfirm ? 'danger' : 'primary'}`}
-              disabled={!canBulkAllow}
+              disabled={!canBulkAllow || busy}
               title={
                 canBulkAllow
                   ? '仅对低风险请求生效'
@@ -396,20 +627,11 @@ export default function Inbox({
         </div>
       ) : null}
 
-      {visible.length !== state.pending.length || state.expired.length > 0 ? (
+      {visible.length !== state.pending.length ? (
         <div className="inbox-summary">
           <div>
-            {visible.length !== state.pending.length ? (
-              <>
-                筛选后 <b>{visible.length}</b> 条（共 <b>{state.pending.length}</b> 条）
-              </>
-            ) : null}
+            筛选后 <b>{visible.length}</b> 条（共 <b>{state.pending.length}</b> 条）
           </div>
-          {state.expired.length > 0 ? (
-            <button className="link" onClick={() => setShowExpired((value) => !value)}>
-              {state.expired.length} 条已回退{showExpired ? ' · 收起' : ' · 查看'}
-            </button>
-          ) : null}
         </div>
       ) : null}
 
@@ -425,13 +647,36 @@ export default function Inbox({
               <b>{entry.sessionLabel}</b>
               <span>{entry.tool}</span>
               <code>{approvalCommand(entry).slice(0, 80) || entry.message}</code>
-              <time>{formatRelative(entry.createdAt, now)}</time>
+              <time>{formatRelative(entry.createdAt, now)} · 超时</time>
               <button className="link" onClick={() => api.acknowledgeExpired(entry.id)}>
                 关闭
               </button>
             </div>
           ))}
-          <button className="btn subtle compact" onClick={() => api.acknowledgeExpired()}>
+          {state.skipped.map((entry) => (
+            <div className="expired-strip-row" key={entry.id}>
+              <span className="skipped-dot" aria-hidden="true">
+                ⤺
+              </span>
+              <b>{entry.sessionLabel}</b>
+              <span>{entry.tool}</span>
+              <code>{entry.command.slice(0, 80)}</code>
+              <time>
+                {formatRelative(entry.ts, now)} ·{' '}
+                {entry.reason === 'overloaded' ? '队列过载' : '预计来不及'}
+              </time>
+              <button className="link" onClick={() => api.clearSkipped(entry.id)}>
+                关闭
+              </button>
+            </div>
+          ))}
+          <button
+            className="btn subtle compact"
+            onClick={() => {
+              void api.acknowledgeExpired()
+              void api.clearSkipped()
+            }}
+          >
             全部知道了
           </button>
         </div>
@@ -516,10 +761,12 @@ export default function Inbox({
               {!meta.title.includes(meta.origin) ? (
                 <span className="session-origin">{meta.origin}</span>
               ) : null}
-              <span className="session-count">{group.items.length} 条</span>
+              <span className="session-count">
+                {clusterApprovals(group.items).length} 组
+              </span>
               {pausedGroup ? (
                 <span className="session-urgent paused">已暂停</span>
-              ) : expiresIn <= 20 ? (
+              ) : expiresIn <= URGENT_SECONDS ? (
                 <span className="session-urgent">{expiresIn}s</span>
               ) : null}
               <div className="session-tools">
@@ -570,6 +817,16 @@ export default function Inbox({
                     全部交给终端
                   </button>
                 )}
+                <button
+                  className="btn subtle compact"
+                  onClick={() => selectAllGroup(group.items)}
+                >
+                  {clusterApprovals(group.items).every((cluster) =>
+                    selectedGroups.has(cluster.key)
+                  )
+                    ? '取消全选'
+                    : '全选本会话'}
+                </button>
               </div>
             </header>
 
@@ -608,10 +865,21 @@ export default function Inbox({
                     )
                 const command = approvalCommand(item)
                 const selected = selectedGroups.has(cluster.key)
+                const estimate = estimateFor(item)
+                const entrySlack = paused ? null : slackSeconds(left, estimate)
+                const cross = crossSessionClusters(state.pending).find((group) =>
+                  group.items.some((entry) => entry.id === item.id)
+                )
+                const crossOthers = cross
+                  ? cross.items.filter((entry) => entry.sessionKey !== item.sessionKey).length
+                  : 0
                 return (
                   <article
                     className={`inbox-item risk-${item.risk.level} ${
-                      left <= 15 && !paused ? 'urgent' : ''
+                      entrySlack !== null &&
+                      (entrySlack <= 0 || left <= URGENT_SECONDS)
+                        ? 'urgent'
+                        : ''
                     } ${selected ? 'selected' : ''} ${
                       activeKey === cluster.key ? 'active' : ''
                     }`}
@@ -639,8 +907,23 @@ export default function Inbox({
                       {duplicate > 1 ? (
                         <span className="kind-badge duplicate">相同 ×{duplicate}</span>
                       ) : null}
+                      {crossOthers > 0 ? (
+                        <span className="kind-badge cross">
+                          另有 {crossOthers} 会话同命令
+                        </span>
+                      ) : null}
                       {item.correlation === 'unmatched' ? (
                         <span className="kind-badge warn">无法关联终端</span>
+                      ) : null}
+                      {entrySlack !== null ? (
+                        <span
+                          className={`slack-chip ${
+                            entrySlack <= 0 ? 'urgent' : entrySlack <= 10 ? 'tight' : ''
+                          }`}
+                          title={`剩余 ${left}s，按历史估算处理约 ${Math.round(estimate / 1000)}s`}
+                        >
+                          余量 {entrySlack}s
+                        </span>
                       ) : null}
                       <span className={`inbox-time ${paused ? 'paused' : ''}`}>
                         {paused ? '已暂停' : `${left}s`}
@@ -688,9 +971,15 @@ export default function Inbox({
                           title="稍后提醒，倒计时继续"
                         >
                           <option value="">稍后…</option>
-                          <option value="1">1 分钟</option>
-                          <option value="5">5 分钟</option>
-                          <option value="15">15 分钟</option>
+                          {[1, 5, 15].map((minutes) => (
+                            <option
+                              key={minutes}
+                              value={minutes}
+                              disabled={left <= minutes * 60}
+                            >
+                              {minutes} 分钟
+                            </option>
+                          ))}
                         </select>
                         <button
                           className="btn subtle compact"
@@ -704,12 +993,14 @@ export default function Inbox({
                               className={`btn compact ${
                                 item.risk.level === 'high' ? 'danger' : 'primary'
                               }`}
+                              disabled={busy}
                               onClick={() => approve(items)}
                             >
                               {item.risk.level === 'high' ? '检查并允许' : '允许'}
                             </button>
                             <button
                               className="btn compact"
+                              disabled={busy}
                               onClick={() => respondCluster(items, 'deny')}
                             >
                               拒绝
@@ -718,6 +1009,7 @@ export default function Inbox({
                         ) : null}
                         <button
                           className="btn subtle compact"
+                          disabled={busy}
                           onClick={() => respondCluster(items, 'ask')}
                         >
                           终端

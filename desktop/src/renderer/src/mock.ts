@@ -3,7 +3,7 @@ import type { AppState } from '../../shared/types'
 const now = Date.now()
 
 export const mockState: AppState = {
-  app: { version: '0.5.1', platform: 'darwin' },
+  app: { version: '0.6.0', platform: 'darwin' },
   server: {
     listening: true,
     port: 18765,
@@ -66,6 +66,7 @@ export const mockState: AppState = {
   ],
   pending: [],
   expired: [],
+  skipped: [],
   history: [],
   rules: [],
   logs: [

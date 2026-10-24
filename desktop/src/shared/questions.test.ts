@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ApprovalQuestion } from './types'
 import {
   buildAnswers,
+  nextUnansweredIndex,
   validateDrafts,
   withOtherToggled,
   type QuestionDraft
@@ -63,5 +64,20 @@ describe('approval question drafts', () => {
       { question: '第二题', selected: ['A'], text: '还有 C' }
     ])
     expect(validateDrafts(questions, [drafts[0]])).toEqual([1])
+  })
+})
+
+describe('question navigation', () => {
+  it('moves to the next unanswered question and wraps to the first', () => {
+    const questions = [question({ question: 'Q1' }), question({ question: 'Q2' }), question({ question: 'Q3' })]
+    const drafts = [
+      draft({ selected: ['A'] }),
+      draft(),
+      draft({ selected: ['B'] })
+    ]
+    expect(nextUnansweredIndex(questions, drafts, 0)).toBe(1)
+    expect(nextUnansweredIndex(questions, drafts, 1)).toBe(1)
+    const allAnswered = [draft({ selected: ['A'] }), draft({ selected: ['A'] }), draft({ selected: ['A'] })]
+    expect(nextUnansweredIndex(questions, allAnswered, 0)).toBe(-1)
   })
 })

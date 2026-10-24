@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalItem } from './types'
-import { approvalClusterKey, clusterApprovals, clusterFor, stableStringify } from './approvals'
+import {
+  admissionSnapshot,
+  approvalClusterKey,
+  clusterApprovals,
+  clusterFor,
+  crossSessionClusters,
+  stableStringify
+} from './approvals'
 
 function item(overrides: Partial<ApprovalItem> = {}): ApprovalItem {
   return {
@@ -69,5 +76,58 @@ describe('approval clustering', () => {
     expect(approvalClusterKey(item({ id: 'a' }))).not.toBe(
       approvalClusterKey(item({ id: 'b', sessionKey: '本机:s2' }))
     )
+  })
+})
+
+describe('cross-session duplicate visibility', () => {
+  it('groups the same tool input across sessions but never questions', () => {
+    const groups = crossSessionClusters([
+      item({ id: 'a', sessionKey: '本机:s1', toolInput: { command: 'pnpm test' } }),
+      item({ id: 'b', sessionKey: '本机:s2', toolInput: { command: 'pnpm test' } }),
+      item({ id: 'c', sessionKey: '本机:s3', toolInput: { command: 'git status' } }),
+      item({ id: 'q1', kind: 'question' }),
+      item({ id: 'q2', kind: 'question', sessionKey: '本机:s2' })
+    ])
+    expect(groups).toHaveLength(2)
+    expect(groups[0].items.map((entry) => entry.id)).toEqual(['a', 'b'])
+    expect(groups[1].items.map((entry) => entry.id)).toEqual(['c'])
+  })
+})
+
+describe('admission snapshot', () => {
+  it('counts decision groups instead of raw requests', () => {
+    const now = 1_000_000
+    const snapshot = admissionSnapshot(
+      [
+        item({ id: 'a', timeoutAt: now + 30_000 }),
+        item({ id: 'b', timeoutAt: now + 30_000 }),
+        item({ id: 'c', sessionKey: '本机:s2', timeoutAt: now + 30_000 })
+      ],
+      now
+    )
+    expect(snapshot.active).toBe(3)
+    expect(snapshot.clusters).toBe(2)
+    expect(snapshot.estimateSec).toBe(36)
+  })
+
+  it('ignores snoozed requests and paused timers for the estimate', () => {
+    const now = 1_000_000
+    const snapshot = admissionSnapshot(
+      [
+        item({ id: 'a', timeoutAt: now + 30_000 }),
+        item({ id: 'b', sessionKey: '本机:s2', paused: true, timeoutAt: Number.MAX_SAFE_INTEGER }),
+        item({
+          id: 'c',
+          sessionKey: '本机:s3',
+          snoozedUntil: now + 60_000,
+          timeoutAt: now + 30_000
+        })
+      ],
+      now
+    )
+    expect(snapshot.active).toBe(2)
+    expect(snapshot.clusters).toBe(2)
+    expect(snapshot.timedClusters).toBe(1)
+    expect(snapshot.estimateSec).toBe(18)
   })
 })

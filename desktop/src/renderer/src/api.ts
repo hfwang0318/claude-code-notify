@@ -76,6 +76,47 @@ function createBrowserFallback(): DesktopApi {
       state = { ...state, expired: [] }
       emit()
     },
+    clearSkipped: async () => {
+      state = { ...state, skipped: [] }
+      emit()
+    },
+    collapsePopup: async () => {
+      toast('浏览器预览模式：已收起弹窗')
+    },
+    pauseAll: async (paused: boolean) => {
+      const now = Date.now()
+      state = {
+        ...state,
+        pending: state.pending.map((item) => {
+          if (item.snoozedUntil && item.snoozedUntil > now) return item
+          return {
+            ...item,
+            paused,
+            pausedRemainingMs: paused ? Math.max(0, item.timeoutAt - now) : 0,
+            timeoutAt: paused
+              ? Number.MAX_SAFE_INTEGER
+              : Date.now() + (item.pausedRemainingMs || 0)
+          }
+        })
+      }
+      emit()
+      toast(paused ? '已暂停全部倒计时（预览）' : '已恢复全部倒计时（预览）')
+    },
+    muteAll: async (minutes: number) => {
+      state = {
+        ...state,
+        sessions: state.sessions.map((session) =>
+          session.waiting > 0
+            ? {
+                ...session,
+                mutedUntil: minutes > 0 ? Date.now() + minutes * 60 * 1000 : null
+              }
+            : session
+        )
+      }
+      emit()
+      toast(minutes > 0 ? `已静音所有等待会话（预览）` : '已取消全部静音（预览）')
+    },
     dismissNotice: async () => {
       state = { ...state, notice: null }
       emit()

@@ -23,14 +23,14 @@ Claude Code 的桌面审批与通知工具：把权限请求、`AskUserQuestion`
 
 ## 下载
 
-最新版本：[Desktop v0.5.1](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.5.1)
+最新版本：[Desktop v0.6.0](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.6.0)
 
-- Windows 免安装：`Claude-Notify-0.5.1-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.5.1.exe`
-- macOS：`Claude.Notify-0.5.1-arm64.dmg`
+- Windows 免安装：`Claude-Notify-0.6.0-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.6.0.exe`
+- macOS：`Claude.Notify-0.6.0-arm64.dmg`
 - 校验：`SHA256SUMS-macos.txt` / `SHA256SUMS-windows.txt`
 
-也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.5.1) 下载。
+也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.6.0) 下载。
 
 Windows 包未签名，SmartScreen 提示时选“更多信息 → 仍要运行”。macOS DMG 未签名/未公证，macOS 26/27 上不能直接启动，详见 [desktop/README.md](desktop/README.md)。打包版的自动更新需要签名；未签名 macOS 会自动回退到发布页。
 
@@ -41,7 +41,7 @@ cd desktop
 pnpm install
 pnpm dev          # 开发模式
 pnpm demo         # 构建后打开主窗口 + 演示审批
-pnpm test         # 当前 156 个单测/集成测试，以实际输出为准
+pnpm test         # 当前 169 个单测/集成测试，以实际输出为准
 pnpm e2e:claude   # 真实 Claude Code 端到端（需已登录 Claude）
 pnpm self-test    # HTTP 协议冒烟
 pnpm local-app    # macOS：生成可双击的本机启动器
@@ -49,12 +49,12 @@ pnpm local-app    # macOS：生成可双击的本机启动器
 
 ## 核心能力
 
-- 权限审批：允许 / 拒绝（可附理由）/ 自定义 options / `permission_suggestions`
+- 权限审批：允许 / 拒绝（可附理由或快捷理由）/ 自定义 options / `permission_suggestions`；高风险二次确认、长 diff 摘要、500ms 焦点防护
 - `AskUserQuestion`：单选、多选、多问题、自由输入
-- 相同请求合并：同会话同工具同参数的并行审批一次处理，收件箱支持多选批量拒绝/回退/低风险允许
-- 稍后提醒：1/5/15 分钟后再弹，倒计时继续，不会改变超时语义
-- 多会话：`origin + session_id`、标签/颜色、EDF 队列、会话条切换
-- 待审批收件箱：按会话分组、搜索、风险筛选、批量回退、按会话静音（30 分钟 / 1 小时 / 4 小时 / 直到明天）
+- 相同请求合并：同会话同工具同参数的并行审批一次处理；跨会话同命令会提示并可确认后一起允许；收件箱支持多选批量拒绝/回退/低风险允许
+- 稍后提醒：1/5/15 分钟后再弹，倒计时继续；超过剩余时间时禁用；`×` 收起保留审批，超时前 15s 重现
+- 多会话：`origin + session_id`、标签/颜色、会话感知 EDF、决策后停留当前会话、会话条显示组数/暂停/截止、`⌘/Ctrl+1–9` 切换
+- 待审批收件箱：按会话分组、搜索、风险筛选、按截止/余量排序、本会话全选、批量拒绝确认、选区感知键盘、全局暂停/静音、回退记录明细
 - 主窗口以待审批/历史/日志三个 tab 为主面板；状态、部署与设置以模糊模态覆盖在主窗口上
 - 审批历史 `history.jsonl`、CSV/JSON 导出、统计（允许/拒绝/超时/P50/P95/规则命中）、可过滤日志
 - 自动规则：按会话/项目/全局匹配，支持有效期、来源绑定和前缀/通配安全匹配

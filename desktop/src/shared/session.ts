@@ -174,6 +174,69 @@ export function groupBySession<T extends { sessionKey: string; timeoutAt: number
   }))
 }
 
+/** One number for "this needs attention now" across the popup and the inbox. */
+export const URGENT_SECONDS = 20
+
+/**
+ * Session-aware EDF. Pure deadline order lets one busy session monopolise the
+ * popup until every other session times out; pure round-robin ignores urgency.
+ * This interleaves only when the next session's head is within `windowMs`, so a
+ * genuinely earlier deadline still wins.
+ */
+export function sortForTriage<
+  T extends { sessionKey: string; timeoutAt: number; createdAt: number }
+>(items: T[], windowMs = 10_000): T[] {
+  const groups = groupBySession(sortByDeadline(items)).map((group) => ({
+    key: group.key,
+    items: [...group.items]
+  }))
+  const ordered: T[] = []
+  let previousKey = ''
+  while (groups.length > 0) {
+    groups.sort((left, right) => {
+      const diff = left.items[0].timeoutAt - right.items[0].timeoutAt
+      return diff !== 0 ? diff : left.items[0].createdAt - right.items[0].createdAt
+    })
+    let pick = 0
+    if (groups[0].key === previousKey && groups.length > 1) {
+      const gap = groups[1].items[0].timeoutAt - groups[0].items[0].timeoutAt
+      if (gap <= windowMs) pick = 1
+    }
+    const group = groups[pick]
+    const next = group.items.shift()
+    if (next) ordered.push(next)
+    previousKey = group.key
+    if (group.items.length === 0) groups.splice(pick, 1)
+  }
+  return ordered
+}
+
+/** Remaining time minus the expected time to decide; negative means overdue. */
+export function slackSeconds(remaining: number, estimateMs: number): number {
+  return remaining - Math.round(Math.max(0, estimateMs) / 1000)
+}
+
+export interface DiffStat {
+  files: number
+  additions: number
+  deletions: number
+}
+
+/** One-line summary so a huge edit does not push the buttons out of view. */
+export function diffStat(
+  diffs: Array<{ filePath: string; oldText: string; newText: string }>
+): DiffStat {
+  const files = new Set<string>()
+  let additions = 0
+  let deletions = 0
+  for (const diff of diffs) {
+    files.add(diff.filePath)
+    if (diff.newText) additions += diff.newText.split('\n').length
+    if (diff.oldText) deletions += diff.oldText.split('\n').length
+  }
+  return { files: files.size, additions, deletions }
+}
+
 export function remainingSeconds(timeoutAt: number, now = Date.now()): number {
   return Math.max(0, Math.ceil((timeoutAt - now) / 1000))
 }

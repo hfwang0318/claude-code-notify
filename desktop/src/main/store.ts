@@ -12,7 +12,8 @@ import type {
   NetworkInfo,
   PopupPosition,
   Prefs,
-  SessionInfo
+  SessionInfo,
+  SkippedApproval
 } from '../shared/types'
 
 export interface StoreOptions {
@@ -68,6 +69,7 @@ export class Store {
       sessions: [],
       pending: [],
       expired: [],
+      skipped: [],
       notice: null,
       history: [],
       rules: [],
@@ -163,6 +165,18 @@ export class Store {
   clearExpired(id?: string): void {
     this.state.expired = id
       ? this.state.expired.filter((entry) => entry.id !== id)
+      : []
+    this.emit()
+  }
+
+  addSkipped(entry: SkippedApproval): void {
+    this.state.skipped = [entry, ...this.state.skipped].slice(0, 20)
+    this.emit()
+  }
+
+  clearSkipped(id?: string): void {
+    this.state.skipped = id
+      ? this.state.skipped.filter((entry) => entry.id !== id)
       : []
     this.emit()
   }
