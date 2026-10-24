@@ -249,6 +249,9 @@ function createBrowserFallback(): DesktopApi {
     openFile: async () => {
       toast('浏览器预览模式：无法打开本地文件')
     },
+    revealPath: async () => {
+      toast('浏览器预览模式：无法打开下载目录')
+    },
     checkUpdate: async (): Promise<AppUpdateInfo> => ({
       status: 'error',
       message: '浏览器预览模式：无法检查更新'

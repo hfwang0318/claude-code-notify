@@ -113,6 +113,7 @@ const api: DesktopApi = {
   openLogFile: () => ipcRenderer.invoke('logs:open-file'),
   openExternal: (url: string) => ipcRenderer.invoke('external:open', url),
   openFile: (path: string) => ipcRenderer.invoke('file:open', path),
+  revealPath: (path: string) => ipcRenderer.invoke('file:reveal', path),
   checkUpdate: (): Promise<AppUpdateInfo> => ipcRenderer.invoke('update:check'),
   downloadUpdate: (): Promise<AppUpdateInfo> => ipcRenderer.invoke('update:download'),
   installUpdate: (): Promise<void> => ipcRenderer.invoke('update:install'),

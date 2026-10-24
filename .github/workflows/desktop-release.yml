@@ -98,6 +98,7 @@ jobs:
           ) -join "`r`n"
           Set-Content -Path release/win-unpacked/RUN-ME.bat -Value $launcher -Encoding ascii
           Set-Content -Path release/win-unpacked/README-PORTABLE.txt -Value "Claude Notify $version portable build. Run RUN-ME.bat to start." -Encoding utf8
+          Set-Content -Path release/win-unpacked/portable.marker -Value "Claude Notify portable build $version" -Encoding utf8
           Compress-Archive -Path release/win-unpacked/* -DestinationPath "release/Claude-Notify-$version-win-x64-portable.zip" -Force
       - name: Generate checksums
         shell: pwsh

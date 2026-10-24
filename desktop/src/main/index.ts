@@ -116,7 +116,8 @@ import {
   checkForAppUpdate,
   downloadAppUpdate,
   initAutoUpdater,
-  installAppUpdate
+  installAppUpdate,
+  isPortableBuild
 } from './auto-update'
 
 const APP_NAME = 'Claude Notify'
@@ -2574,6 +2575,10 @@ function registerIpc(): void {
   ipcMain.handle('logs:clear', () => {
     store.clearLogs()
   })
+  ipcMain.handle('file:reveal', (_event, target: string) => {
+    if (typeof target !== 'string' || !target.trim()) return
+    if (existsSync(target)) shell.showItemInFolder(target)
+  })
   ipcMain.handle('file:open', async (_event, target: string) => {
     if (typeof target !== 'string' || !target.trim()) return
     const expanded = target.startsWith('~')
@@ -2604,6 +2609,10 @@ function registerIpc(): void {
   ipcMain.handle('update:download', async () => {
     const result = await downloadAppUpdate()
     store.setUpdate(result)
+    if (result.downloadedPath) {
+      shell.showItemInFolder(result.downloadedPath)
+      log('info', `免安装更新已下载：${result.downloadedPath}`)
+    }
     return result
   })
   ipcMain.handle('update:install', () => {
@@ -3432,7 +3441,11 @@ async function bootstrap(): Promise<void> {
   })
   if (!headless) showMainWindow()
 
-  if (!headless && store.get().prefs.autoUpdate && canUseNativeUpdater()) {
+  if (
+    !headless &&
+    store.get().prefs.autoUpdate &&
+    (canUseNativeUpdater() || isPortableBuild())
+  ) {
     const timer = setTimeout(() => {
       if (!store.get().prefs.autoUpdate) return
       void checkForAppUpdate(app.getVersion()).then((result) => {

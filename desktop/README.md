@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.5.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.5.0)。
+当前版本 **0.5.1**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.5.1)。
 
 ## 运行
 
@@ -14,7 +14,7 @@ pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
 pnpm capture    # 离屏截图：onboarding / main / status / inbox / history / logs / settings / settings-reminder / deploy / deploy-dialog / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
-pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 152 个，以 pnpm test 输出为准）
+pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 156 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ```
 
@@ -82,9 +82,10 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ### 自动更新
 
 - `electron-updater` + GitHub Releases（`publish` 配置在 `electron-builder.yml`）
-- 打包版启动 5 秒后检查（可在设置关闭）；发现更新后手动下载，下载完成重启安装
+- 打包版启动 5 秒后检查（可在设置关闭）
+- **Windows NSIS 安装版**：下载 `latest.yml` 对应的 Setup，下载完成重启安装
+- **免安装版**：检测 `RUN-ME.bat` / `portable.marker` / `PORTABLE_EXECUTABLE_DIR`，只下载对应的新 zip 到系统下载目录并打开文件夹，不自动替换当前目录
 - macOS 需要 Developer ID 签名/公证才能安装更新；未签名时自动回退到发布页
-- Windows NSIS 安装版支持自动更新；portable zip 不能自动更新
 - 发布流程会生成并上传 `latest-mac.yml` / `latest.yml`，macOS 同时产出 zip（更新包）
 
 ### 桌面能力
@@ -102,7 +103,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - 通知支持免打扰时段，审批/等待输入/需要回答/完成使用不同标题；按会话静音支持 30 分钟/1 小时/4 小时/直到明天
 - SessionEnd 会话结束态、30 分钟自动清理、`claude --resume` 命令复制
 - ExitPlanMode 计划正文预览；MultiEdit/Write 多段 diff 与“打开文件”
-- 打包版自动更新：启动检查、手动下载/重启安装；未签名 macOS 回退到发布页
+- 自动更新：安装版启动检查、下载、重启安装；免安装版下载新 zip 到下载目录，不自动替换；未签名 macOS 回退到发布页
 - 自动规则：按会话/项目/全局匹配工具与命令，直接允许；支持 1 小时/24 小时/永久有效期、来源绑定、
   规则命中审计；前缀/通配规则不会命中包含 shell 连接符的复合命令；高风险命令永不自动应用
 - 日志同时写 `~/.claude-notify/claude-notify.log`
@@ -112,9 +113,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.5.0-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.5.0.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.5.0-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.5.1-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.5.1.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.5.1-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
@@ -125,7 +126,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：当前 152 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
+- `pnpm test`：当前 156 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
 - `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口）、Stop 回合通知、双会话并发、终端已处理、真实超时回退；工具未暴露时明示 SKIP，约 60–130s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)
@@ -144,7 +145,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 - macOS Developer ID 签名 / 公证；Windows 代码签名（macOS 自动更新安装依赖签名）
 - 远端 SSH 部署目前由单测/人工验证覆盖；真实服务器/防火墙场景仍需人工验收
 - 非全屏的多 Space 切换人工验证（全屏覆盖已用 NSPanel 验证通过）
-- Windows NSIS 自动更新的真机升级验证；portable zip 不支持自动更新
+- Windows NSIS 自动更新的真机升级验证；portable zip 的“下载新 zip + 手动替换”流程需真机验收
 - 主进程 `index.ts` 的 controller 完整拆分（目前先拆出了 shared 逻辑与 auto-update/update 模块）
 
 ## 结构

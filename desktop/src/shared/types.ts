@@ -318,8 +318,12 @@ export interface AppUpdateInfo {
   message?: string
   /** 0-100 while a package is downloading. */
   progress?: number
-  /** True when only the release page is available (unsigned/dev build). */
+  /** True when only the release page / manual zip is available (portable/dev build). */
   manual?: boolean
+  /** False when the downloaded artifact must be installed manually. */
+  installable?: boolean
+  /** Downloaded portable/macOS zip, when a manual update was fetched. */
+  downloadedPath?: string
 }
 
 export interface Prefs {
@@ -432,6 +436,7 @@ export interface DesktopApi {
   openLogFile(): Promise<void>
   openExternal(url: string): Promise<void>
   openFile(path: string): Promise<void>
+  revealPath(path: string): Promise<void>
   checkUpdate(): Promise<AppUpdateInfo>
   downloadUpdate(): Promise<AppUpdateInfo>
   installUpdate(): Promise<void>

@@ -204,7 +204,10 @@ export default function Preferences({
         : state.update.status === 'downloading'
           ? `下载中 ${state.update.progress ?? 0}%`
           : state.update.status === 'downloaded'
-            ? state.update.message || '更新已下载，重启后安装'
+            ? state.update.message ||
+              (state.update.installable === false
+                ? '更新包已下载，请退出应用后手动替换'
+                : '更新已下载，重启后安装')
             : state.update.status === 'latest'
               ? state.update.message || '已是最新版本'
               : state.update.status === 'error'
@@ -803,24 +806,40 @@ export default function Preferences({
                   checked={state.prefs.autoUpdate}
                   onChange={(value) => save({ autoUpdate: value })}
                   label="启动时自动检查更新"
-                  hint="仅打包版本生效；下载与安装仍需要你确认"
+                  hint="安装版可下载并重启安装；免安装版只下载 zip，不会自动替换当前目录"
                 />
                 <div className="row">
                   <button className="btn" onClick={() => void api.checkUpdate()}>
                     检查更新
                   </button>
-                  {!state.update.manual &&
-                  (state.update.status === 'available' ||
-                    state.update.status === 'downloading') ? (
-                    <button className="btn primary" onClick={() => void api.downloadUpdate()}>
+                  {state.update.status === 'available' ||
+                  state.update.status === 'downloading' ? (
+                    <button
+                      className="btn primary"
+                      disabled={state.update.status === 'downloading'}
+                      onClick={() => void api.downloadUpdate()}
+                    >
                       {state.update.status === 'downloading'
                         ? `下载中 ${state.update.progress ?? 0}%`
-                        : '下载更新'}
+                        : state.update.manual
+                          ? '下载免安装包'
+                          : '下载更新'}
                     </button>
                   ) : null}
-                  {state.update.status === 'downloaded' ? (
+                  {state.update.status === 'downloaded' &&
+                  state.update.installable !== false ? (
                     <button className="btn primary" onClick={() => void api.installUpdate()}>
                       重启并安装
+                    </button>
+                  ) : null}
+                  {state.update.status === 'downloaded' &&
+                  state.update.installable === false &&
+                  state.update.downloadedPath ? (
+                    <button
+                      className="btn"
+                      onClick={() => void api.revealPath(state.update.downloadedPath as string)}
+                    >
+                      打开下载文件夹
                     </button>
                   ) : null}
                   {updateStatus ? <span className="form-note">{updateStatus}</span> : null}

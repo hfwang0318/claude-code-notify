@@ -4,7 +4,7 @@
 
 - 更新 `desktop/package.json` 的 `version`
 - `pnpm typecheck`
-- `pnpm test`（当前 152 个测试，以 `pnpm test` 输出为准）
+- `pnpm test`（当前 156 个测试，以 `pnpm test` 输出为准）
 - `pnpm e2e:claude`（真实 Claude Code：双会话 / resolved / timeout；没有 Claude 认证的 CI 会自动跳过）
 - `pnpm self-test`
 - `pnpm build`
@@ -60,7 +60,7 @@ pnpm dist:win
 ### 发布顺序
 
 1. 确认版本号已更新，提交并推送 `main`
-2. 创建并推送 annotated tag `desktop-v0.5.0`
+2. 创建并推送 annotated tag `desktop-v0.5.1`
 3. workflow 会在 tag 上自动创建 GitHub Release（如果不存在），随后上传：
    - macOS `*.dmg`、`*.zip`、`latest-mac.yml`、`SHA256SUMS-macos.txt`
    - Windows `*Setup*.exe`、portable zip、`latest.yml`、`SHA256SUMS-windows.txt`
@@ -107,7 +107,9 @@ pnpm dist:win
   `latest*.yml`。
 - macOS 更新包是 zip（`dmg` 用于安装分发），且安装更新要求签名/公证；
   未签名时 UI 会显示“自动更新不可用”并提供发布页。
-- Windows portable zip 不支持自动更新；NSIS 安装版支持。
+- Windows NSIS 安装版走原生 `electron-updater` 下载并安装；这是唯一自动替换的 Windows 形态。
+- Windows 免安装 zip 不自动替换：应用会把新版 `*-portable.zip` 下载到系统下载目录并打开文件夹，由用户退出后手动替换。
+  便携包必须包含 `RUN-ME.bat` 或 `portable.marker`，避免被误判为 NSIS 安装版。
 - 发布 tag 仍为 `desktop-v<version>`；`electron-builder.yml` 的 `publish.tagNamePrefix`
   必须与之匹配；`latest*.yml` 必须是该 Release 的资产。
 

@@ -41,12 +41,80 @@ export function compareVersions(left: string, right: string): number {
   return a.prerelease > b.prerelease ? 1 : -1
 }
 
-interface GitHubRelease {
+export interface GitHubAsset {
+  name?: string
+  browser_download_url?: string
+  size?: number
+}
+
+export interface GitHubRelease {
   tag_name?: string
   html_url?: string
   name?: string
   draft?: boolean
   prerelease?: boolean
+  assets?: GitHubAsset[]
+}
+
+export interface ReleaseAsset {
+  name: string
+  url: string
+  size?: number
+}
+
+/** Pick the right zip for a portable/manual update; never an installer/blockmap. */
+export function selectReleaseAsset(
+  release: GitHubRelease | null,
+  platform: NodeJS.Platform = process.platform
+): ReleaseAsset | null {
+  if (!release?.assets) return null
+  const zips = release.assets
+    .filter(
+      (asset) =>
+        typeof asset.name === 'string' &&
+        typeof asset.browser_download_url === 'string' &&
+        /\.zip$/i.test(asset.name) &&
+        !/blockmap/i.test(asset.name)
+    )
+    .map((asset) => ({
+      name: asset.name as string,
+      url: asset.browser_download_url as string,
+      size: asset.size
+    }))
+  if (platform === 'win32') {
+    return zips.find((asset) => /portable/i.test(asset.name)) || null
+  }
+  if (platform === 'darwin') {
+    return (
+      zips.find((asset) => /(arm64|universal|mac)/i.test(asset.name)) ||
+      zips[0] ||
+      null
+    )
+  }
+  return zips.find((asset) => /(linux|x86_64|amd64)/i.test(asset.name)) || zips[0] || null
+}
+
+/** Fetch the newest desktop release including its assets (for manual downloads). */
+export async function fetchLatestDesktopRelease(): Promise<GitHubRelease | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 12000)
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${REPO}/releases?per_page=30`,
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'claude-code-notify'
+        },
+        signal: controller.signal
+      }
+    )
+    if (!response.ok) throw new Error(`GitHub 返回 ${response.status}`)
+    const data = (await response.json()) as GitHubRelease[]
+    return newestDesktopRelease(Array.isArray(data) ? data : [])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
