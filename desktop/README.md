@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.3.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.3.0)。
+当前版本 **0.4.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.4.0)。
 
 ## 运行
 
@@ -14,7 +14,7 @@ pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
 pnpm capture    # 离屏截图：onboarding / main / status / inbox / history / logs / settings / settings-reminder / deploy / deploy-dialog / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
-pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 126 个，以 pnpm test 输出为准）
+pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 132 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ```
 
@@ -94,9 +94,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.3.0-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.3.0.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.3.0-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.4.0-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.4.0.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.4.0-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。

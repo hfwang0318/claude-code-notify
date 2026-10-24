@@ -54,12 +54,12 @@ pnpm test
 pnpm dist:win
 ```
 
-产物：`release/Claude Notify Setup <version>.exe`（NSIS，x64）。
+产物：`release/Claude.Notify.Setup.<version>.exe`（NSIS，x64）。
 
 ### 发布顺序
 
 1. 确认版本号已更新，提交并推送 `main`
-2. 创建并推送 annotated tag `desktop-v0.3.0`
+2. 创建并推送 annotated tag `desktop-v0.4.0`
 3. workflow 会在 tag 上自动创建 GitHub Release（如果不存在），随后上传：
    - macOS `*.dmg` + `SHA256SUMS-macos.txt`
    - Windows `*Setup*.exe`、portable zip、`SHA256SUMS-windows.txt`
@@ -97,8 +97,8 @@ pnpm dist:win
 
 ## 5. 产物
 
-- macOS：`release/Claude Notify-<version>-arm64.dmg`
-- Windows：`release/Claude Notify Setup <version>.exe`
+- macOS：`release/Claude.Notify-<version>-arm64.dmg`
+- Windows：`release/Claude.Notify.Setup.<version>.exe`
 - Windows 免安装：`Claude-Notify-<version>-win-x64-portable.zip`
 - 校验：`SHA256SUMS-macos.txt` / `SHA256SUMS-windows.txt`
 - 以上产物由 `.github/workflows/desktop-release.yml` 自动上传到对应 Release
