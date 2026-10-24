@@ -47,6 +47,10 @@ export class Store {
       localIp: options.localIp,
       admissionControl: true,
       maxPending: 8,
+      quietHoursEnabled: false,
+      quietHoursStart: '22:00',
+      quietHoursEnd: '08:00',
+      autoUpdate: true,
       ...options.prefs
     }
     this.state = {

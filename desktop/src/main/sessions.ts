@@ -15,6 +15,7 @@ import {
 } from './config'
 
 const IDLE_RETENTION_MS = 24 * 60 * 60 * 1000
+const ENDED_RETENTION_MS = 30 * 60 * 1000
 const MAX_SESSIONS = 16
 const PERSIST_DEBOUNCE_MS = 200
 
@@ -85,7 +86,8 @@ export class SessionRegistry {
       topic,
       branch: branch || previous.branch,
       firstSeen: previous.firstSeen || item.createdAt || Date.now(),
-      lastSeen: Math.max(previous.lastSeen || 0, item.createdAt)
+      lastSeen: Math.max(previous.lastSeen || 0, item.createdAt),
+      endedAt: undefined
     }
     if (!previous.color) {
       const used = new Set(
@@ -169,6 +171,17 @@ export class SessionRegistry {
     return key
   }
 
+  /** SessionEnd hook: keep the session visible briefly, then age it out. */
+  end(key: string, at = Date.now()): void {
+    if (!key) return
+    this.meta[key] = {
+      ...(this.meta[key] || {}),
+      endedAt: at,
+      lastSeen: Math.max(this.meta[key]?.lastSeen || 0, at)
+    }
+    this.persist()
+  }
+
   rename(key: string, label: string): void {
     const trimmed = label.trim().slice(0, 60)
     if (!trimmed) return
@@ -198,9 +211,15 @@ export class SessionRegistry {
       const recent = history.find((record) => record.sessionKey === key)
       const lastSeen = Math.max(
         meta.lastSeen || 0,
+        meta.endedAt || 0,
         latest?.createdAt || 0,
         recent?.ts || 0
       )
+      if (!waiting && meta.endedAt && now - meta.endedAt > ENDED_RETENTION_MS) {
+        // Keep the metadata so a matching history row cannot resurrect the
+        // session as "idle" on the next refresh; just stop listing it.
+        continue
+      }
       if (!waiting && lastSeen > 0 && now - lastSeen > IDLE_RETENTION_MS) {
         delete this.meta[key]
         removedExpired = true
@@ -242,7 +261,7 @@ export class SessionRegistry {
         terminal: meta.terminal || latest?.terminal || '',
         lastSeen,
         waiting,
-        state: waiting > 0 ? 'waiting' : 'idle',
+        state: waiting > 0 ? 'waiting' : meta.endedAt ? 'ended' : 'idle',
         color: meta.color || sessionColor(key),
         mutedUntil: meta.mutedUntil && meta.mutedUntil > now ? meta.mutedUntil : null
       })

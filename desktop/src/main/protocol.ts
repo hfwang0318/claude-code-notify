@@ -181,14 +181,30 @@ export function buildNotification(
   const task = safeString(payload.task).trim()
   const branch = safeString(payload.branch).trim()
   const notificationType = safeString(payload.notification_type)
-  const isStop = notificationType === 'Stop' || safeString(payload.matcher) === 'Stop'
+  const matcher = safeString(payload.matcher)
+  const event = notificationType || matcher
+  const isStop = event === 'Stop' || matcher === 'Stop'
+  const isIdle =
+    /idle|waiting_for_input|waiting.?for.?input/i.test(event) ||
+    matcher === 'idle_prompt'
+  const isQuestion = /elicitation|question/i.test(event)
   const title = isStop
     ? `Claude Code 已完成 · ${project}`
-    : `Claude Code 等待审批 · ${project}`
-  const bodyParts = [
-    message ||
-      (isStop ? 'Claude Code 已完成当前回合。' : 'Claude Code 正在等待权限审批。')
-  ]
+    : isIdle
+      ? `Claude Code 等待输入 · ${project}`
+      : isQuestion
+        ? `Claude Code 需要回答 · ${project}`
+        : event === 'auth_success'
+          ? `Claude Code 认证成功 · ${project}`
+          : `Claude Code 等待审批 · ${project}`
+  const fallbackBody = isStop
+    ? 'Claude Code 已完成当前回合。'
+    : isIdle
+      ? 'Claude Code 正在等待你的输入。'
+      : isQuestion
+        ? 'Claude Code 需要你回答一个问题。'
+        : 'Claude Code 正在等待权限审批。'
+  const bodyParts = [message || fallbackBody]
   if (task) bodyParts.push(`任务：${task}`)
   bodyParts.push(`来源：${origin}${branch ? ` · ${branch}` : ''}${cwd ? ` · ${cwd}` : ''}`)
   if (notificationType) bodyParts.push(`类型：${notificationType}`)

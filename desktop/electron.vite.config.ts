@@ -54,6 +54,15 @@ export default defineConfig({
         '@shared': resolve('src/shared')
       }
     },
-    plugins: [react(), productionCspPlugin()]
+    plugins: [react(), productionCspPlugin()],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            react: ['react', 'react-dom']
+          }
+        }
+      }
+    }
   }
 })

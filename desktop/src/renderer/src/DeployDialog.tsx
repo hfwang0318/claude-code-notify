@@ -358,37 +358,69 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
               <div className="form-section-title">最近目标</div>
               <div className="profile-list">
                 {profiles.slice(0, 5).map((profile) => (
-                  <button
-                    className="profile-row"
-                    key={profile.id}
-                    onClick={() => {
-                      setForm((current) => ({
-                        ...current,
-                        host: profile.host,
-                        sshPort: profile.sshPort,
-                        username: profile.username,
-                        authMethod: profile.authMethod,
-                        mode: profile.mode,
-                        callbackIp: profile.callbackIp,
-                        callbackPort: profile.callbackPort,
-                        hookTimeout: profile.hookTimeout,
-                        toolMatcher: profile.toolMatcher,
-                        origin: profile.origin
-                      }))
-                      setTestResult(null)
-                      setError('')
-                    }}
-                  >
-                    <span className={`deploy-dot ${profile.status === 'deployed' ? 'ok' : 'idle'}`} />
-                    <b>{profile.origin || profile.name}</b>
-                    <span>
-                      {profile.username}@{profile.host}:{profile.sshPort}
-                    </span>
-                    <em>{profile.mode === 'popup' ? '弹窗' : '通知'}</em>
-                    <time>
-                      {profile.lastDeployAt ? formatRelative(profile.lastDeployAt) : '未部署'}
-                    </time>
-                  </button>
+                  <div className="profile-row-wrap" key={profile.id}>
+                    <button
+                      className="profile-row"
+                      onClick={() => {
+                        setForm((current) => ({
+                          ...current,
+                          host: profile.host,
+                          sshPort: profile.sshPort,
+                          username: profile.username,
+                          authMethod: profile.authMethod,
+                          keyPath: profile.keyPath || current.keyPath,
+                          mode: profile.mode,
+                          callbackIp: profile.callbackIp,
+                          callbackPort: profile.callbackPort,
+                          hookTimeout: profile.hookTimeout,
+                          toolMatcher: profile.toolMatcher,
+                          origin: profile.origin
+                        }))
+                        setTestResult(null)
+                        setError('')
+                      }}
+                    >
+                      <span className={`deploy-dot ${profile.status === 'deployed' ? 'ok' : 'idle'}`} />
+                      <b>{profile.origin || profile.name}</b>
+                      <span>
+                        {profile.username}@{profile.host}:{profile.sshPort}
+                      </span>
+                      <em>{profile.mode === 'popup' ? '弹窗' : '通知'}</em>
+                      <time>
+                        {profile.lastDeployAt ? formatRelative(profile.lastDeployAt) : '未部署'}
+                      </time>
+                    </button>
+                    <div className="profile-row-actions">
+                      <button
+                        className="link"
+                        title={profile.lastError || '检查 SSH 与回调连通性'}
+                        onClick={() =>
+                          void api.checkDeployProfile(profile.id).then((result) => {
+                            setLogs((current) => [
+                              ...current,
+                              { level: result.success ? 'notify' : 'warn', message: result.summary }
+                            ])
+                          })
+                        }
+                      >
+                        检查
+                      </button>
+                      <button
+                        className="link danger"
+                        onClick={() => {
+                          if (!window.confirm(`删除部署目标 ${profile.origin || profile.name}？`)) return
+                          void api.removeDeployProfile(profile.id)
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
+                    {profile.lastError ? (
+                      <span className="profile-error" title={profile.lastError}>
+                        {profile.lastError}
+                      </span>
+                    ) : null}
+                  </div>
                 ))}
               </div>
             </div>

@@ -1,6 +1,15 @@
 import { safeStorage } from 'electron'
 import { randomBytes } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type {
@@ -51,6 +60,10 @@ export interface UiConfig {
   localIp?: string
   admissionControl?: boolean
   maxPending?: number
+  quietHoursEnabled?: boolean
+  quietHoursStart?: string
+  quietHoursEnd?: string
+  autoUpdate?: boolean
   onboardingDone?: boolean
   /** Legacy top-left position; migrated to popupAnchor on next launch. */
   popupPosition?: { x: number; y: number } | null
@@ -80,6 +93,8 @@ export interface SessionMeta {
   topic?: string
   /** Last git branch reported by the hook. */
   branch?: string
+  /** Set by the SessionEnd hook; used to mark the session as ended and age it out. */
+  endedAt?: number
 }
 
 export type SessionMetaMap = Record<string, SessionMeta>
@@ -137,10 +152,27 @@ export function readJsonFile<T>(file: string, fallback: T): T {
 
 export function writeJsonFile(file: string, value: unknown): void {
   ensureDataDir()
-  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, {
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, {
     encoding: 'utf-8',
     mode: 0o600
   })
+  try {
+    chmodSync(temp, 0o600)
+  } catch {
+    // Windows and some filesystems do not honor POSIX modes
+  }
+  try {
+    renameSync(temp, file)
+  } catch {
+    // Windows cannot always replace an existing file atomically.
+    copyFileSync(temp, file)
+    try {
+      unlinkSync(temp)
+    } catch {
+      // best-effort cleanup
+    }
+  }
   try {
     chmodSync(file, 0o600)
   } catch {
@@ -181,7 +213,14 @@ export function saveSessionMeta(meta: SessionMetaMap): void {
 
 export function loadRules(): ApprovalRule[] {
   const rules = readJsonFile<ApprovalRule[]>(join(appDataDir(), 'rules.json'), [])
-  return Array.isArray(rules) ? rules.filter((rule) => rule && typeof rule.id === 'string') : []
+  if (!Array.isArray(rules)) return []
+  const now = Date.now()
+  return rules.filter(
+    (rule) =>
+      rule &&
+      typeof rule.id === 'string' &&
+      (typeof rule.expiresAt !== 'number' || rule.expiresAt > now)
+  )
 }
 
 export function saveRules(rules: ApprovalRule[]): void {

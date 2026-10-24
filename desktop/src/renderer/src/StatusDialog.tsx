@@ -27,7 +27,9 @@ export default function StatusDialog({
     if (!open) setShowToken(false)
   }, [open])
 
-  const address = `http://${state.server.localIp}:${state.server.port}`
+  const address = `http://${
+    state.network.bindMode === 'loopback' ? '127.0.0.1' : state.server.localIp
+  }:${state.server.port}`
   const serviceOk = state.server.listening
   const latestProfile = state.deploy.profiles.find((profile) => profile.status === 'deployed')
   const localMode = state.deploy.localMode

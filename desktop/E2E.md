@@ -45,6 +45,23 @@ Hook 事件名回归：`PermissionRequest` 只能输出 `PermissionRequest`，`P
 
 倒计时暂停回归：`timeout` 用例在审批到达后点击“暂停”，等待 6 秒（超过服务端 10 秒窗口的一半）并断言 pending 仍在、按钮变成“继续”，再恢复并等待正常超时。hook 的 settings timeout 和脚本 socket timeout 都会加上 600 秒暂停预算，否则 hook 会在暂停期间先断开。
 
+### 0.5 审批效率改动的验证边界
+
+以下行为改变了弹窗/收件箱交互，但当前 E2E 脚本仍以“单条审批 + 暂停 + 超时”为主，新增行为由单测、`pnpm capture` 和人工验收共同覆盖：
+
+- 相同请求合并：需要同一会话并发发出两条完全相同的 PermissionRequest；E2E 的 `multi` 使用两个会话，因此合并逻辑由 `src/shared/approvals.test.ts` 覆盖。人工验收时可在同一会话并行触发两条 Bash 请求，确认只出现一张带 `相同 ×2` 的卡片，允许后两条都从 pending 消失。
+- 收件箱多选/批量：纯 renderer 行为，由 `Inbox` 的人工/截图验收覆盖；高风险不允许批量允许。
+- 稍后提醒：点击后弹窗隐藏、pending 保留、倒计时继续，到期后重新弹出；不改变 hook 的 timeout。
+- 拒绝理由：填写的文本应出现在 hook 的 `deny.message` 中；服务端有 `deny reason` 单测。
+- 规则有效期/来源绑定：`rules.test.ts` 覆盖过期与来源匹配；前缀/通配规则禁止命中复合 shell 命令。
+- SessionEnd：部署后关闭一个 Claude 会话，应用应在 30 分钟内把会话标为“已结束”并清理；E2E 的隔离 settings 尚未注入 SessionEnd，需人工或后续用例覆盖。
+- 免打扰/通知标题：纯策略单测覆盖；系统通知中心行为仍需真机验收。
+
+hook v8 起，`PreToolUse` 关联日志从 SQLite 改为私有 JSONL，部署的 matcher 默认收窄到
+`Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode|AskUserQuestion|mcp__.*`。
+E2E 的隔离 settings 仍显式写空 matcher，以保持旧用例的“所有工具都记录关联”行为。
+
+
 ### 明确不覆盖
 
 - 交互式 TUI 中的真实按键/终端焦点（E2E 使用 `claude -p` 非交互模式）

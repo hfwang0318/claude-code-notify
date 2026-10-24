@@ -74,4 +74,15 @@ describe('buildNotification', () => {
     })
     expect(notification.title).toContain('等待审批')
   })
+
+  it('labels idle prompts as waiting for input rather than approval', () => {
+    const notification = buildNotification({
+      session_id: 'session-a',
+      cwd: '/work/backend-api',
+      notification_type: 'idle_prompt'
+    })
+    expect(notification.title).toContain('等待输入')
+    expect(notification.title).not.toContain('等待审批')
+    expect(notification.body).toContain('等待你的输入')
+  })
 })

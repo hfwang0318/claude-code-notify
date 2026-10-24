@@ -244,6 +244,28 @@ describe('NotifyServer', () => {
     expect(await response.json()).toMatchObject({ status: 'ok', decision: 'suggestion', index: 0 })
   })
 
+  it('returns a user-supplied deny reason to the hook', async () => {
+    const promise = fetch(`http://127.0.0.1:${port}/claude-approval`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        request_id: 'req_deny_reason',
+        tool_name: 'Bash',
+        cwd: '/tmp/project',
+        message: 'test',
+        timeout_seconds: 30
+      })
+    })
+    const item = await waitFor(() => approvals[0] || null)
+    server.respond(item.id, 'deny', { reason: '不要修改生产配置' })
+    const response = await promise
+    expect(await response.json()).toMatchObject({
+      status: 'ok',
+      decision: 'deny',
+      reason: '不要修改生产配置'
+    })
+  })
+
   it('pauses the deadline and resumes without expiring while paused', async () => {
     const promise = fetch(`http://127.0.0.1:${port}/claude-approval`, {
       method: 'POST',

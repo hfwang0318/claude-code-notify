@@ -10,7 +10,8 @@ import {
   shortSessionId,
   sortByDeadline
 } from '../../shared/session'
-import { formatRelative } from './format'
+import { clusterApprovals } from '../../shared/approvals'
+import { formatRelative, minutesUntilTomorrow } from './format'
 import { api } from './api'
 
 interface Props {
@@ -107,6 +108,9 @@ export default function Inbox({
   const [showExpired, setShowExpired] = useState(false)
   const [query, setQuery] = useState('')
   const [riskFilter, setRiskFilter] = useState<'all' | 'high' | 'medium'>('all')
+  const [selectedGroups, setSelectedGroups] = useState<Set<string>>(new Set())
+  const [bulkAllowConfirm, setBulkAllowConfirm] = useState(false)
+  const [activeKey, setActiveKey] = useState<string | null>(null)
 
   const visible = useMemo(() => {
     const text = query.trim().toLowerCase()
@@ -131,6 +135,93 @@ export default function Inbox({
     })
   }, [query, riskFilter, state.pending, state.sessions])
   const groups = useMemo(() => groupBySession(sortByDeadline(visible)), [visible])
+  const allClusters = useMemo(() => clusterApprovals(visible), [visible])
+  const selectedClusters = useMemo(
+    () => allClusters.filter((cluster) => selectedGroups.has(cluster.key)),
+    [allClusters, selectedGroups]
+  )
+  const selectedItemIds = useMemo(
+    () => selectedClusters.flatMap((cluster) => cluster.items.map((item) => item.id)),
+    [selectedClusters]
+  )
+  const canBulkAllow =
+    selectedClusters.length > 0 &&
+    selectedClusters.every((cluster) =>
+      cluster.items.every((item) => item.risk.level === 'low')
+    )
+
+  useEffect(() => {
+    if (!bulkAllowConfirm) return
+    const timer = window.setTimeout(() => setBulkAllowConfirm(false), 4000)
+    return () => window.clearTimeout(timer)
+  }, [bulkAllowConfirm])
+
+  useEffect(() => {
+    if (allClusters.length === 0) {
+      if (activeKey) setActiveKey(null)
+      return
+    }
+    if (!activeKey || !allClusters.some((cluster) => cluster.key === activeKey)) {
+      setActiveKey(allClusters[0].key)
+    }
+  }, [activeKey, allClusters])
+
+  useEffect(() => {
+    setSelectedGroups((current) => {
+      const live = new Set(allClusters.map((cluster) => cluster.key))
+      const next = new Set([...current].filter((key) => live.has(key)))
+      return next.size === current.size ? current : next
+    })
+    setBulkAllowConfirm(false)
+  }, [allClusters])
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null
+      if (
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA' ||
+        target?.tagName === 'SELECT' ||
+        target?.isContentEditable ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        document.querySelector('.modal-backdrop')
+      ) {
+        return
+      }
+      if (allClusters.length === 0) return
+      const index = Math.max(
+        0,
+        allClusters.findIndex((cluster) => cluster.key === activeKey)
+      )
+      const focus = (next: number): void => {
+        const bounded = (next + allClusters.length) % allClusters.length
+        setActiveKey(allClusters[bounded].key)
+        const cards = document.querySelectorAll<HTMLElement>('.inbox-item')
+        cards[bounded]?.scrollIntoView({ block: 'nearest' })
+      }
+      const active = allClusters[index]
+      if (event.key === 'j' || event.key === 'J') {
+        event.preventDefault()
+        focus(index + 1)
+      } else if (event.key === 'k' || event.key === 'K') {
+        event.preventDefault()
+        focus(index - 1)
+      } else if (event.key === 'a' || event.key === 'A') {
+        event.preventDefault()
+        approve(active.items)
+      } else if (event.key === 'd' || event.key === 'D') {
+        event.preventDefault()
+        respondCluster(active.items, 'deny')
+      } else if (event.key === 't' || event.key === 'T') {
+        event.preventDefault()
+        respondCluster(active.items, 'ask')
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [activeKey, allClusters])
 
   useEffect(() => {
     if (!focusSessionKey) return
@@ -157,16 +248,56 @@ export default function Inbox({
   }
 
   const batchAsk = (items: ApprovalItem[]): void => {
-    for (const item of items) void api.respond(item.id, 'ask')
+    void api.respondMany(items.map((item) => item.id), 'ask')
     setConfirmBatch(null)
   }
 
-  const approve = (item: ApprovalItem): void => {
-    if (item.risk.level === 'high') {
+  const approve = (items: ApprovalItem[]): void => {
+    const item = items[0]
+    if (!item) return
+    if (item.kind === 'question' || item.risk.level === 'high') {
       void api.selectApproval(item.id)
       return
     }
-    void api.respond(item.id, 'allow')
+    void api.respondMany(items.map((entry) => entry.id), 'allow')
+  }
+
+  const respondCluster = (items: ApprovalItem[], decision: string): void => {
+    void api.respondMany(items.map((item) => item.id), decision)
+  }
+
+  const toggleSelect = (key: string): void => {
+    setSelectedGroups((current) => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+    setBulkAllowConfirm(false)
+  }
+
+  const clearSelection = (): void => {
+    setSelectedGroups(new Set())
+    setBulkAllowConfirm(false)
+  }
+
+  const bulkDecision = (decision: string): void => {
+    if (selectedItemIds.length === 0) return
+    void api.respondMany(selectedItemIds, decision)
+    clearSelection()
+  }
+
+  const bulkAllow = (): void => {
+    if (!canBulkAllow || selectedItemIds.length === 0) return
+    if (!bulkAllowConfirm) {
+      setBulkAllowConfirm(true)
+      return
+    }
+    bulkDecision('allow')
+  }
+
+  const snoozeCluster = (items: ApprovalItem[], minutes: number): void => {
+    for (const item of items) void api.snoozeApproval(item.id, minutes)
   }
 
   if (state.pending.length === 0) {
@@ -233,6 +364,37 @@ export default function Inbox({
           ))}
         </div>
       </div>
+
+      {selectedGroups.size > 0 ? (
+        <div className="inbox-bulk" role="region" aria-label="批量操作">
+          <div>
+            已选 <b>{selectedClusters.length}</b> 组 / <b>{selectedItemIds.length}</b> 条
+          </div>
+          <div className="inbox-bulk-actions">
+            <button className="btn subtle compact" onClick={() => bulkDecision('ask')}>
+              全部交给终端
+            </button>
+            <button className="btn compact" onClick={() => bulkDecision('deny')}>
+              全部拒绝
+            </button>
+            <button
+              className={`btn compact ${bulkAllowConfirm ? 'danger' : 'primary'}`}
+              disabled={!canBulkAllow}
+              title={
+                canBulkAllow
+                  ? '仅对低风险请求生效'
+                  : '只有全部为低风险的请求才能批量允许'
+              }
+              onClick={bulkAllow}
+            >
+              {bulkAllowConfirm ? '再点一次确认允许' : '批量允许低风险'}
+            </button>
+            <button className="link" onClick={clearSelection}>
+              取消选择
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {visible.length !== state.pending.length || state.expired.length > 0 ? (
         <div className="inbox-summary">
@@ -342,6 +504,15 @@ export default function Inbox({
                 </button>
               )}
               {meta.shortId ? <span className="session-id">#{meta.shortId}</span> : null}
+              {meta.sessionId ? (
+                <button
+                  className="link session-resume"
+                  title="复制恢复该会话的命令"
+                  onClick={() => void api.copy(`claude --resume ${meta.sessionId}`)}
+                >
+                  恢复
+                </button>
+              ) : null}
               {!meta.title.includes(meta.origin) ? (
                 <span className="session-origin">{meta.origin}</span>
               ) : null}
@@ -360,6 +531,25 @@ export default function Inbox({
                 >
                   {muted ? <BellOffIcon /> : <BellIcon />}
                 </button>
+                <select
+                  className="mute-select"
+                  value=""
+                  onChange={(event) => {
+                    const value = event.target.value
+                    const minutes =
+                      value === 'tomorrow' ? minutesUntilTomorrow() : Number(value)
+                    if (minutes > 0) void api.muteSession(group.key, minutes)
+                    event.currentTarget.value = ''
+                  }}
+                  aria-label="静音时长"
+                  title="按会话静音"
+                >
+                  <option value="">静音…</option>
+                  <option value="30">30 分钟</option>
+                  <option value="60">1 小时</option>
+                  <option value="240">4 小时</option>
+                  <option value="tomorrow">直到明天</option>
+                </select>
                 {confirmBatch === group.key ? (
                   <>
                     <button
@@ -404,24 +594,50 @@ export default function Inbox({
             ) : null}
 
             <div className="inbox-items">
-              {group.items.map((item) => {
-                const paused = Boolean(item.paused)
-                const left = paused ? 0 : remainingSeconds(item.timeoutAt, now)
+              {clusterApprovals(group.items).map((cluster) => {
+                const item = cluster.representative
+                const items = cluster.items
+                const duplicate = items.length
+                const paused = items.every((entry) => entry.paused)
+                const left = paused
+                  ? 0
+                  : Math.min(
+                      ...items
+                        .filter((entry) => !entry.paused)
+                        .map((entry) => remainingSeconds(entry.timeoutAt, now))
+                    )
                 const command = approvalCommand(item)
+                const selected = selectedGroups.has(cluster.key)
                 return (
                   <article
                     className={`inbox-item risk-${item.risk.level} ${
                       left <= 15 && !paused ? 'urgent' : ''
+                    } ${selected ? 'selected' : ''} ${
+                      activeKey === cluster.key ? 'active' : ''
                     }`}
-                    key={item.id}
+                    key={cluster.key}
+                    onClick={() => setActiveKey(cluster.key)}
                   >
                     <div className="inbox-item-top">
+                      <input
+                        type="checkbox"
+                        className="inbox-select"
+                        checked={selected}
+                        onChange={() => toggleSelect(cluster.key)}
+                        aria-label={`选择 ${command || item.message}`}
+                      />
                       <span className="tool-badge">{item.tool}</span>
                       <span className={`risk-badge risk-${item.risk.level}`}>
                         {riskLabel(item.risk.level)}
                       </span>
                       {item.kind === 'question' ? (
                         <span className="kind-badge">问答</span>
+                      ) : null}
+                      {item.snoozedUntil && item.snoozedUntil > now ? (
+                        <span className="kind-badge">已稍后</span>
+                      ) : null}
+                      {duplicate > 1 ? (
+                        <span className="kind-badge duplicate">相同 ×{duplicate}</span>
                       ) : null}
                       {item.correlation === 'unmatched' ? (
                         <span className="kind-badge warn">无法关联终端</span>
@@ -447,14 +663,35 @@ export default function Inbox({
                     <div className="inbox-item-foot">
                       <span className="inbox-created">
                         {formatRelative(item.createdAt, now)} · {item.origin}
+                        {duplicate > 1 ? ` · ${duplicate} 条相同请求` : ''}
                       </span>
                       <div className="inbox-actions">
                         <button
                           className="btn subtle compact"
-                          onClick={() => void api.pauseApproval(item.id, !item.paused)}
+                          onClick={() => {
+                            for (const entry of items) {
+                              void api.pauseApproval(entry.id, !paused)
+                            }
+                          }}
                         >
                           {paused ? '继续' : '暂停'}
                         </button>
+                        <select
+                          className="mute-select"
+                          value=""
+                          onChange={(event) => {
+                            const minutes = Number(event.target.value)
+                            if (minutes > 0) snoozeCluster(items, minutes)
+                            event.currentTarget.value = ''
+                          }}
+                          aria-label="稍后提醒"
+                          title="稍后提醒，倒计时继续"
+                        >
+                          <option value="">稍后…</option>
+                          <option value="1">1 分钟</option>
+                          <option value="5">5 分钟</option>
+                          <option value="15">15 分钟</option>
+                        </select>
                         <button
                           className="btn subtle compact"
                           onClick={() => void api.selectApproval(item.id)}
@@ -467,13 +704,13 @@ export default function Inbox({
                               className={`btn compact ${
                                 item.risk.level === 'high' ? 'danger' : 'primary'
                               }`}
-                              onClick={() => approve(item)}
+                              onClick={() => approve(items)}
                             >
                               {item.risk.level === 'high' ? '检查并允许' : '允许'}
                             </button>
                             <button
                               className="btn compact"
-                              onClick={() => void api.respond(item.id, 'deny')}
+                              onClick={() => respondCluster(items, 'deny')}
                             >
                               拒绝
                             </button>
@@ -481,7 +718,7 @@ export default function Inbox({
                         ) : null}
                         <button
                           className="btn subtle compact"
-                          onClick={() => void api.respond(item.id, 'ask')}
+                          onClick={() => respondCluster(items, 'ask')}
                         >
                           终端
                         </button>

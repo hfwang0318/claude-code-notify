@@ -1,9 +1,12 @@
 import {
   appendFileSync,
   chmodSync,
+  copyFileSync,
   existsSync,
   readFileSync,
+  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs'
 import { join } from 'node:path'
@@ -52,12 +55,34 @@ function readAll(): ApprovalRecord[] {
 
 function compact(): void {
   const file = historyFilePath()
-  const records = readAll()
+  let records: ApprovalRecord[]
+  try {
+    records = readAllStrict()
+  } catch {
+    // Never replace an unreadable history with an empty file.
+    return
+  }
   const kept = records.slice(-MAX_LINES_AFTER_COMPACT)
-  writeFileSync(file, kept.map((record) => `${JSON.stringify(record)}\n`).join(''), {
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(temp, kept.map((record) => `${JSON.stringify(record)}\n`).join(''), {
     encoding: 'utf-8',
     mode: 0o600
   })
+  try {
+    chmodSync(temp, 0o600)
+  } catch {
+    // ignore
+  }
+  try {
+    renameSync(temp, file)
+  } catch {
+    copyFileSync(temp, file)
+    try {
+      unlinkSync(temp)
+    } catch {
+      // best-effort cleanup
+    }
+  }
 }
 
 export class HistoryStore {
@@ -100,6 +125,20 @@ export class HistoryStore {
     } catch {
       // ignore
     }
+  }
+
+  exportJson(target: string): number {
+    let records: ApprovalRecord[]
+    try {
+      records = readAllStrict()
+    } catch {
+      records = []
+    }
+    if (records.length === 0 && this.records.length > 0) {
+      records = [...this.records].reverse()
+    }
+    writeFileSync(target, `${JSON.stringify(records, null, 2)}\n`, 'utf-8')
+    return records.length
   }
 
   exportCsv(target: string): number {

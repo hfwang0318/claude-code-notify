@@ -1,6 +1,7 @@
 import { StrictMode, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import ErrorBoundary from './ErrorBoundary'
 import Popup from './Popup'
 import { api } from './api'
 import { resolveFontScale } from '../../shared/typography'
@@ -57,7 +58,7 @@ function Root(): React.JSX.Element {
     }
   }, [])
 
-  return isPopup ? <Popup /> : <App />
+  return <ErrorBoundary>{isPopup ? <Popup /> : <App />}</ErrorBoundary>
 }
 
 const root = createRoot(document.getElementById('root') as HTMLElement)

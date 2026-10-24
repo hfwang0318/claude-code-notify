@@ -1,6 +1,11 @@
 appId: com.claude-notify.app
 productName: Claude Notify
 npmRebuild: false
+publish:
+  provider: github
+  owner: hfwang0318
+  repo: claude-code-notify
+  tagNamePrefix: desktop-v
 buildDependenciesFromSource: false
 directories:
   output: release
@@ -21,6 +26,7 @@ mac:
   icon: build/icon.icns
   target:
     - dmg
+    - zip
   artifactName: Claude.Notify-${version}-${arch}.${ext}
   category: public.app-category.developer-tools
   hardenedRuntime: true

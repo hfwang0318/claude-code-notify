@@ -57,6 +57,7 @@ import {
 import { buildRuleFromItem, matchingRule, validateRule } from '../shared/rules'
 import {
   canDeliverSystemNotification,
+  isWithinQuietHours,
   shouldShowCompletionPopup
 } from '../shared/notification-policy'
 import { computeDeployDrift } from '../shared/deploy-drift'
@@ -110,7 +111,13 @@ import { approvalFromPayload, safeString } from './protocol'
 import { NotifyServer } from './server'
 import { SessionRegistry } from './sessions'
 import { Store } from './store'
-import { checkLatestVersion } from './update'
+import {
+  canUseNativeUpdater,
+  checkForAppUpdate,
+  downloadAppUpdate,
+  initAutoUpdater,
+  installAppUpdate
+} from './auto-update'
 
 const APP_NAME = 'Claude Notify'
 const DEFAULT_PORT = 18765
@@ -161,7 +168,10 @@ let noticeTimer: NodeJS.Timeout | null = null
 
 const localApprovals = new Map<string, (decision: string) => void>()
 const localTimers = new Map<string, NodeJS.Timeout>()
+const snoozeTimers = new Map<string, NodeJS.Timeout>()
 const decisionSources = new Map<string, DecisionSource>()
+const decisionRules = new Map<string, string>()
+const decisionReasons = new Map<string, string>()
 const itemCache = new Map<string, ApprovalItem>()
 const settledIds = new Set<string>()
 
@@ -619,7 +629,11 @@ function createPopupWindow(): BrowserWindow {
 
 function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   const state = store.get()
-  const hasApproval = state.pending.length > 0 || state.expired.length > 0
+  const now = Date.now()
+  const visiblePending = state.pending.filter(
+    (item) => !item.snoozedUntil || item.snoozedUntil <= now
+  )
+  const hasApproval = visiblePending.length > 0 || state.expired.length > 0
   const hasNotice = Boolean(state.notice)
   if (!hasApproval && !hasNotice) {
     if (popupWindow && !popupWindow.isDestroyed()) popupWindow.hide()
@@ -644,7 +658,9 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
   popupWindow.setAlwaysOnTop(true, 'screen-saver', 1)
   popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   const wasVisible = popupWindow.isVisible()
-  const muted = state.pending[0] ? sessions.isMuted(state.pending[0].sessionKey) : false
+  const muted = visiblePending[0]
+    ? sessions.isMuted(visiblePending[0].sessionKey)
+    : false
   const policy = state.prefs.focusPolicy
   let shouldFocus =
     hasApproval &&
@@ -706,7 +722,8 @@ function updateBadge(): void {
 
 function copyConnectCommand(): void {
   const state = store.get()
-  const address = `http://${state.server.localIp}:${state.server.port}`
+  const host = state.network.bindMode === 'loopback' ? '127.0.0.1' : state.server.localIp
+  const address = `http://${host}:${state.server.port}`
   clipboard.writeText(
     `curl -X POST ${address}/claude-notify \\\n` +
       `  -H "Authorization: Bearer ${state.server.token}" \\\n` +
@@ -894,17 +911,40 @@ function refreshSessions(): void {
   if (!store) return
   const next = sessions.list(store.get().pending, store.get().history)
   store.setSessions(next)
+  pruneExpiredRules()
+}
+
+/** Drop expired time-boxed rules and session rules whose session is gone. */
+function pruneExpiredRules(): void {
+  if (!store) return
+  const now = Date.now()
+  // Include metadata for sessions beyond the 16-item visible window so their
+  // session rules are not deleted just because the list is capped.
+  const meta = sessions.getMeta()
+  const live = new Set([
+    ...store.get().sessions.map((session) => session.key),
+    ...Object.keys(meta)
+  ])
+  const next = rules.filter((rule) => {
+    if (typeof rule.expiresAt === 'number' && rule.expiresAt <= now) return false
+    if (rule.scope === 'session' && rule.sessionKey) {
+      if (!live.has(rule.sessionKey)) return false
+      const endedAt = meta[rule.sessionKey]?.endedAt
+      if (endedAt && now - endedAt > 30 * 60 * 1000) return false
+    }
+    return true
+  })
+  if (next.length === rules.length) return
+  const removed = rules.length - next.length
+  rules = next
+  saveRules(rules)
+  store.setRules(rules)
+  log('info', `已清理 ${removed} 条过期/失效规则`)
 }
 
 function computeModeMismatch(): boolean {
   const state = store.get()
-  const localMismatch = Boolean(
-    state.deploy.localMode && state.deploy.localMode !== state.prefs.mode
-  )
-  const remoteMismatch = state.deploy.profiles.some(
-    (profile) => profile.status === 'deployed' && profile.mode !== state.prefs.mode
-  )
-  return localMismatch || remoteMismatch
+  return Boolean(state.deploy.localMode && state.deploy.localMode !== state.prefs.mode)
 }
 
 function fingerprintToken(token: string): string {
@@ -957,9 +997,14 @@ function decisionLevel(decision: string, source: DecisionSource): LogLevel {
 
 function finishItem(item: ApprovalItem, decision: string, source: DecisionSource): void {
   // Always drop per-item bookkeeping, even for ids that were already settled.
+  const ruleId = decisionRules.get(item.id)
+  const reason = decisionReasons.get(item.id)
   decisionSources.delete(item.id)
+  decisionRules.delete(item.id)
+  decisionReasons.delete(item.id)
   itemCache.delete(item.id)
   clearLocalTimeout(item.id)
+  clearSnoozeTimer(item.id)
   if (settledIds.has(item.id)) return
   settledIds.add(item.id)
   if (settledIds.size > 1000) settledIds.clear()
@@ -996,7 +1041,9 @@ function finishItem(item: ApprovalItem, decision: string, source: DecisionSource
     decision,
     source,
     latencyMs: Math.max(0, Date.now() - item.createdAt),
-    risk: item.risk.level
+    risk: item.risk.level,
+    ...(ruleId ? { ruleId } : {}),
+    ...(reason ? { reason } : {})
   }
   history.append(record)
   store.addHistory(record)
@@ -1034,6 +1081,7 @@ function respond(
   if (item) {
     itemCache.set(item.id, item)
     decisionSources.set(item.id, source)
+    if (extra?.reason?.trim()) decisionReasons.set(item.id, extra.reason.trim().slice(0, 2000))
   }
   const handledByServer = server.respond(itemId, decision, extra)
   if (handledByServer) return
@@ -1047,6 +1095,64 @@ function respond(
     finishItem(item, decision, source)
   }
   syncPopup()
+}
+
+/** Apply one decision to every request in an identical-request cluster. */
+function respondMany(
+  itemIds: string[],
+  decision: string,
+  extra?: ApprovalExtra,
+  source: DecisionSource = 'popup'
+): void {
+  const unique = [...new Set(itemIds.filter(Boolean))]
+  for (const itemId of unique) {
+    respond(itemId, decision, extra, source)
+  }
+}
+
+function clearSnoozeTimer(itemId: string): void {
+  const timer = snoozeTimers.get(itemId)
+  if (!timer) return
+  clearTimeout(timer)
+  snoozeTimers.delete(itemId)
+}
+
+/**
+ * Hide an approval for a while without changing its deadline. The hook keeps
+ * waiting and the countdown keeps running; when the timer fires the popup is
+ * shown again and a fresh notification is delivered.
+ */
+function snoozeApproval(itemId: string, minutes: number): void {
+  const item = store.get().pending.find((entry) => entry.id === itemId)
+  if (!item) return
+  const clamped = Math.max(1, Math.min(60, Math.round(minutes)))
+  const until = Date.now() + clamped * 60_000
+  clearSnoozeTimer(itemId)
+  store.patch((draft) => {
+    draft.pending = draft.pending.map((entry) =>
+      entry.id === itemId ? { ...entry, snoozedUntil: until } : entry
+    )
+  })
+  const timer = setTimeout(() => {
+    snoozeTimers.delete(itemId)
+    const fresh = store.get().pending.find((entry) => entry.id === itemId)
+    if (!fresh) return
+    store.patch((draft) => {
+      draft.pending = draft.pending.map((entry) => {
+        if (entry.id !== itemId) return entry
+        const { snoozedUntil: _snoozedUntil, ...rest } = entry
+        return rest
+      })
+    })
+    log('info', `稍后提醒已到期 · ${item.sessionLabel} · ${item.tool}`)
+    syncPopup('new')
+    notifyApproval(fresh)
+  }, clamped * 60_000)
+  timer.unref?.()
+  snoozeTimers.set(itemId, timer)
+  log('info', `审批已稍后 ${clamped} 分钟 · ${item.sessionLabel} · ${item.tool}`)
+  syncPopup('none')
+  updateBadge()
 }
 
 function pauseApproval(itemId: string, paused: boolean): void {
@@ -1111,6 +1217,12 @@ function muted(key: string): boolean {
   return sessions.isMuted(key)
 }
 
+function inQuietHours(): boolean {
+  const prefs = store.get().prefs
+  if (!prefs.quietHoursEnabled) return false
+  return isWithinQuietHours(Date.now(), prefs.quietHoursStart, prefs.quietHoursEnd)
+}
+
 /** Popup/notification identity helpers: prefer the registry's stable title. */
 function sessionTitleFor(item: ApprovalItem): string {
   return (
@@ -1160,7 +1272,9 @@ function notifyApproval(item: ApprovalItem): void {
     log('info', `${item.sessionLabel} 已静音提醒；审批仍在队列中`)
     return
   }
-  if (!headless && state.prefs.sound && Date.now() - lastBeepAt > 1200) {
+  const quiet = inQuietHours()
+  const highRisk = item.risk.level === 'high'
+  if (!headless && state.prefs.sound && (!quiet || highRisk) && Date.now() - lastBeepAt > 1200) {
     lastBeepAt = Date.now()
     shell.beep()
   }
@@ -1170,11 +1284,15 @@ function notifyApproval(item: ApprovalItem): void {
       headless,
       enabled: state.prefs.systemNotifications,
       muted: sessionMuted,
-      supported
+      supported,
+      quietHours: quiet,
+      highRisk
     })
   ) {
     if (!headless && !state.prefs.systemNotifications) {
       log('info', `${item.sessionLabel} 系统通知已关闭；审批仍在队列中`)
+    } else if (!headless && quiet) {
+      log('info', `${item.sessionLabel} 当前处于免打扰时段；审批仍在队列中`)
     }
     return
   }
@@ -1191,7 +1309,9 @@ function notifyTimeout(item: ApprovalItem): void {
       headless,
       enabled: state.prefs.systemNotifications,
       muted: muted(item.sessionKey),
-      supported: Notification.isSupported()
+      supported: Notification.isSupported(),
+      quietHours: inQuietHours(),
+      highRisk: false
     })
   ) {
     return
@@ -1240,6 +1360,7 @@ function handleApproval(item: ApprovalItem): void {
   const rule = matchingRule(state.rules, item)
   if (rule && item.risk.level !== 'high') {
     decisionSources.set(item.id, 'rule')
+    decisionRules.set(item.id, rule.id)
     log('rule', `规则命中：${item.sessionLabel} · ${item.tool} · ${rule.pattern}`)
     server.respond(item.id, 'allow')
     return
@@ -1404,6 +1525,14 @@ function createNotifyServer(): NotifyServer {
         task: typeof payload.task === 'string' ? payload.task : '',
         branch: typeof payload.branch === 'string' ? payload.branch : ''
       })
+      const notificationType = safeString(payload.notification_type)
+      const notificationMatcher = safeString(payload.matcher)
+      if (notificationType === 'SessionEnd' || notificationMatcher === 'SessionEnd') {
+        if (key) sessions.end(key)
+        refreshSessions()
+        log('info', `会话已结束 · ${projectName(cwd) || '未知项目'} · ${sessionId.slice(0, 8)}`)
+        return
+      }
       store.patch((draft) => {
         draft.server.notified += 1
       })
@@ -1414,16 +1543,16 @@ function createNotifyServer(): NotifyServer {
         headless,
         enabled: state.prefs.systemNotifications,
         muted: sessionMuted,
-        supported
+        supported,
+        quietHours: inQuietHours(),
+        highRisk: false
       })
       log('notify', `通知 · ${projectName(cwd) || '未知项目'} · ${title}`)
       refreshSessions()
       const sessionInfo = key
         ? store.get().sessions.find((session) => session.key === key)
         : undefined
-      const notificationType = safeString(payload.notification_type)
-      const isStop =
-        notificationType === 'Stop' || safeString(payload.matcher) === 'Stop'
+      const isStop = notificationType === 'Stop' || notificationMatcher === 'Stop'
       const effectiveTitle =
         isStop && sessionInfo?.title ? `${sessionInfo.title} 已完成` : title
       const hasPending =
@@ -1856,6 +1985,7 @@ function upsertProfile(form: DeployFormConfig, result: DeployResult): DeployProf
     sshPort: Number(form.sshPort),
     username: form.username.trim(),
     authMethod: form.authMethod,
+    ...(form.authMethod === 'key' && form.keyPath ? { keyPath: form.keyPath } : {}),
     mode: form.mode,
     callbackIp: form.callbackIp.trim(),
     callbackPort: Number(form.callbackPort),
@@ -1865,7 +1995,8 @@ function upsertProfile(form: DeployFormConfig, result: DeployResult): DeployProf
     status: result.success ? 'deployed' : 'failed',
     hooks: result.success ? (form.mode === 'popup' ? 2 : 1) : 0,
     hookVersion: HOOK_VERSION,
-    tokenFingerprint: fingerprintToken(store.get().server.token)
+    tokenFingerprint: fingerprintToken(store.get().server.token),
+    ...(result.success ? {} : { lastError: result.summary })
   }
   profiles = [profile, ...profiles.filter((entry) => entry.id !== id)].slice(0, 20)
   saveDeployProfiles(profiles)
@@ -2137,8 +2268,17 @@ function registerIpc(): void {
       respond(id, decision, extra, 'popup')
     }
   )
+  ipcMain.handle(
+    'approval:respond-many',
+    (_event, ids: string[], decision: string, extra?: ApprovalExtra) => {
+      respondMany(Array.isArray(ids) ? ids : [], decision, extra, 'popup')
+    }
+  )
   ipcMain.handle('approval:pause', (_event, id: string, paused: boolean) => {
     pauseApproval(id, Boolean(paused))
+  })
+  ipcMain.handle('approval:snooze', (_event, id: string, minutes: number) => {
+    snoozeApproval(id, Number(minutes))
   })
   ipcMain.handle('approval:acknowledge', (_event, id?: string) => {
     acknowledgeExpired(id)
@@ -2238,6 +2378,70 @@ function registerIpc(): void {
       finishDeployOperation(operation.controller)
     }
   })
+  ipcMain.handle('deploy:profile-remove', (_event, id: string) => {
+    const target = profiles.find((profile) => profile.id === id)
+    if (!target) return
+    profiles = profiles.filter((profile) => profile.id !== id)
+    saveDeployProfiles(profiles)
+    store.setDeploy({
+      profiles,
+      status: profiles.some((profile) => profile.status === 'deployed') ? 'deployed' : 'idle',
+      message: `已删除部署目标 ${target.origin || target.name}`
+    })
+    refreshDeployHealth()
+    log('info', `已删除部署目标 ${target.id}`)
+  })
+  ipcMain.handle('deploy:profile-check', async (_event, id: string): Promise<DeployResult> => {
+    const profile = profiles.find((entry) => entry.id === id)
+    if (!profile) return { success: false, summary: '部署目标不存在', connectivity: false }
+    const cache = loadDeployCache()
+    const sameCache =
+      cache.host === profile.host && cache.username === profile.username
+    const config = {
+      ...profile,
+      password: sameCache ? decryptSecret(cache.passwordEncrypted) : undefined,
+      keyPath: sameCache ? cache.keyPath : profile.keyPath,
+      keyPassphrase: undefined,
+      approvalTimeout: Math.max(5, profile.hookTimeout - 60),
+      envImport: false,
+      envShells: [],
+      token: store.get().server.token,
+      hostFingerprint: knownFingerprintFor(profile.host, profile.sshPort)
+    }
+    if (profile.authMethod === 'password' && !config.password) {
+      return {
+        success: false,
+        summary: '请先选中该目标并重新填写密码，再检查连接',
+        connectivity: false
+      }
+    }
+    if (profile.authMethod === 'key' && !config.keyPath) {
+      return {
+        success: false,
+        summary: '请先选中该目标并重新选择私钥，再检查连接',
+        connectivity: false
+      }
+    }
+    try {
+      const result = await testSshConnection(config)
+      const summary = result.ok
+        ? result.connectivity === false
+          ? `SSH 正常，但回调不可达${result.connectivityMessage ? `：${result.connectivityMessage}` : ''}`
+          : 'SSH 与回调均正常'
+        : result.message
+      profiles = profiles.map((entry) =>
+        entry.id === id
+          ? { ...entry, lastError: result.ok ? undefined : summary, status: result.ok ? entry.status : 'failed' }
+          : entry
+      )
+      saveDeployProfiles(profiles)
+      store.setDeploy({ profiles })
+      return { success: result.ok, summary, connectivity: Boolean(result.connectivity) }
+    } catch (error) {
+      const summary = humanizeSshError(error)
+      return { success: false, summary, connectivity: false }
+    }
+  })
   ipcMain.handle('deploy:cancel', (): { ok: boolean; message?: string } => {
     if (!activeDeployController) {
       return { ok: false, message: '当前没有进行中的部署' }
@@ -2283,6 +2487,7 @@ function registerIpc(): void {
         project?: string
         sessionKey?: string
         origin?: string
+        expiresAt?: number
       }
     ) => {
       const message = validateRule(input)
@@ -2296,6 +2501,9 @@ function registerIpc(): void {
         project: input.project,
         sessionKey: input.sessionKey,
         ...(origin ? { origin } : {}),
+        ...(typeof input.expiresAt === 'number' && input.expiresAt > Date.now()
+          ? { expiresAt: input.expiresAt }
+          : {}),
         createdAt: Date.now(),
         enabled: true
       }
@@ -2333,6 +2541,20 @@ function registerIpc(): void {
       return { ok: false, message: `导出失败：${(error as Error).message}` }
     }
   })
+  ipcMain.handle('history:export-json', async () => {
+    const result = await dialog.showSaveDialog({
+      title: '导出审批历史 JSON',
+      defaultPath: join(app.getPath('downloads'), 'claude-notify-history.json'),
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    })
+    if (result.canceled || !result.filePath) return { ok: false, message: '已取消' }
+    try {
+      const count = history.exportJson(result.filePath)
+      return { ok: true, message: `已导出 ${count} 条记录` }
+    } catch (error) {
+      return { ok: false, message: `导出失败：${(error as Error).message}` }
+    }
+  })
   ipcMain.handle('history:clear', async () => {
     const confirmed = await confirm({
       type: 'warning',
@@ -2352,6 +2574,17 @@ function registerIpc(): void {
   ipcMain.handle('logs:clear', () => {
     store.clearLogs()
   })
+  ipcMain.handle('file:open', async (_event, target: string) => {
+    if (typeof target !== 'string' || !target.trim()) return
+    const expanded = target.startsWith('~')
+      ? join(app.getPath('home'), target.slice(1))
+      : target
+    if (!existsSync(expanded)) {
+      store.setToast('文件不存在或已被移动')
+      return
+    }
+    await shell.openPath(expanded)
+  })
   ipcMain.handle('logs:open', () => {
     if (logFile && existsSync(logFile)) shell.showItemInFolder(logFile)
   })
@@ -2363,10 +2596,18 @@ function registerIpc(): void {
   })
   ipcMain.handle('update:check', async () => {
     store.setUpdate({ status: 'checking' })
-    const result = await checkLatestVersion(app.getVersion())
+    const result = await checkForAppUpdate(app.getVersion())
     store.setUpdate(result)
     if (result.status === 'available') store.setToast(result.message || '发现新版本')
     return result
+  })
+  ipcMain.handle('update:download', async () => {
+    const result = await downloadAppUpdate()
+    store.setUpdate(result)
+    return result
+  })
+  ipcMain.handle('update:install', () => {
+    installAppUpdate()
   })
   ipcMain.handle('onboarding:finish', () => {
     store.setOnboarding(true)
@@ -2433,7 +2674,7 @@ async function runSelfTest(): Promise<void> {
       session_id: 'selftest-session',
       origin: 'self-test',
       tool_name: 'Bash',
-      cwd: '/Users/hfwang/workspace/claude-code-notify',
+      cwd: '/tmp/claude-notify-selftest',
       message: 'Claude 请求执行权限',
       tool_input: { command: 'git push --force-with-lease' },
       options: [
@@ -2489,7 +2730,7 @@ async function runSelfTest(): Promise<void> {
     origin: 'self-test',
     kind: 'question',
     tool_name: 'AskUserQuestion',
-    cwd: '/Users/hfwang/workspace/claude-code-notify',
+    cwd: '/tmp/claude-notify-selftest',
     message: 'Claude 想问你一个问题',
     tool_input: {
       questions: [
@@ -2529,7 +2770,7 @@ async function runSelfTest(): Promise<void> {
     session_id: 'selftest-suggestion',
     origin: 'self-test',
     tool_name: 'Bash',
-    cwd: '/Users/hfwang/workspace/claude-code-notify',
+    cwd: '/tmp/claude-notify-selftest',
     message: 'Claude 请求执行权限',
     tool_input: { command: 'git status' },
     options: [
@@ -2555,7 +2796,7 @@ async function runSelfTest(): Promise<void> {
     session_id: 'selftest-terminal',
     origin: 'self-test',
     tool_name: 'Edit',
-    cwd: '/Users/hfwang/workspace/claude-code-notify',
+    cwd: '/tmp/claude-notify-selftest',
     message: 'Claude 请求修改文件',
     timeout_seconds: 120
   })
@@ -2587,7 +2828,7 @@ async function runSelfTest(): Promise<void> {
     session_id: 'selftest-timeout',
     origin: 'self-test',
     tool_name: 'Bash',
-    cwd: '/Users/hfwang/workspace/claude-code-notify',
+    cwd: '/tmp/claude-notify-selftest',
     message: 'timeout test',
     timeout_seconds: 5
   })
@@ -3038,7 +3279,11 @@ async function bootstrap(): Promise<void> {
     port: initialPort,
     localIp: preferred,
     admissionControl: ui.admissionControl !== false,
-    maxPending: typeof ui.maxPending === 'number' ? ui.maxPending : 8
+    maxPending: typeof ui.maxPending === 'number' ? ui.maxPending : 8,
+    quietHoursEnabled: ui.quietHoursEnabled === true,
+    quietHoursStart: typeof ui.quietHoursStart === 'string' ? ui.quietHoursStart : '22:00',
+    quietHoursEnd: typeof ui.quietHoursEnd === 'string' ? ui.quietHoursEnd : '08:00',
+    autoUpdate: ui.autoUpdate !== false
   }
   // Legacy configs only stored a top-left corner. Without the matching height
   // we cannot recover the real bottom edge, so drop it and fall back to the
@@ -3152,6 +3397,11 @@ async function bootstrap(): Promise<void> {
   refreshSessions()
   store.subscribe(broadcast)
 
+  initAutoUpdater(
+    (update) => store.setUpdate(update),
+    (level, message) => log(level, message)
+  )
+
   server = createNotifyServer()
   await startServer()
   registerIpc()
@@ -3181,6 +3431,17 @@ async function bootstrap(): Promise<void> {
     applyWindowTheme()
   })
   if (!headless) showMainWindow()
+
+  if (!headless && store.get().prefs.autoUpdate && canUseNativeUpdater()) {
+    const timer = setTimeout(() => {
+      if (!store.get().prefs.autoUpdate) return
+      void checkForAppUpdate(app.getVersion()).then((result) => {
+        store.setUpdate(result)
+        if (result.status === 'available') log('notify', result.message || '发现新版本')
+      })
+    }, 5000)
+    timer.unref?.()
+  }
 
   if (local.stale) {
     if (local.mode && !isDemo) {

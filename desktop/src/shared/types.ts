@@ -156,11 +156,15 @@ export interface ApprovalItem {
   paused?: boolean
   /** Remaining milliseconds captured when the countdown was paused. */
   pausedRemainingMs?: number
+  /** When set, the popup stays hidden until this timestamp; the timeout keeps running. */
+  snoozedUntil?: number
 }
 
 export interface ApprovalExtra {
   index?: number
   answers?: ApprovalAnswer[]
+  /** Optional message forwarded to Claude when the user denies a request. */
+  reason?: string
 }
 
 export interface ApprovalRecord {
@@ -177,6 +181,10 @@ export interface ApprovalRecord {
   source: DecisionSource
   latencyMs: number
   risk: RiskLevel
+  /** Rule that produced an automatic decision, for audit and analytics. */
+  ruleId?: string
+  /** User-supplied deny explanation. */
+  reason?: string
 }
 
 export type RuleScope = 'session' | 'project' | 'global'
@@ -192,6 +200,8 @@ export interface ApprovalRule {
   pattern: string
   createdAt: number
   enabled: boolean
+  /** Optional expiry for time-boxed "remember this" rules. */
+  expiresAt?: number
 }
 
 export interface DeployFormConfig {
@@ -237,6 +247,8 @@ export interface DeployProfile {
   sshPort: number
   username: string
   authMethod: 'password' | 'key'
+  /** Remembered for key-auth profiles so multi-server deployments do not re-pick it. */
+  keyPath?: string
   mode: DeployMode
   callbackIp: string
   callbackPort: number
@@ -248,6 +260,8 @@ export interface DeployProfile {
   hookVersion: string
   /** Short hash of the token used at deploy time; absent on older profiles. */
   tokenFingerprint?: string
+  /** Last failure or health-check message, for the profile list. */
+  lastError?: string
 }
 
 export interface DeployResult {
@@ -291,10 +305,21 @@ export interface NetworkInfo {
 }
 
 export interface AppUpdateInfo {
-  status: 'idle' | 'checking' | 'available' | 'latest' | 'error'
+  status:
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'downloaded'
+    | 'latest'
+    | 'error'
   latest?: string
   url?: string
   message?: string
+  /** 0-100 while a package is downloading. */
+  progress?: number
+  /** True when only the release page is available (unsigned/dev build). */
+  manual?: boolean
 }
 
 export interface Prefs {
@@ -313,6 +338,13 @@ export interface Prefs {
   localIp: string
   admissionControl: boolean
   maxPending: number
+  quietHoursEnabled: boolean
+  /** Local time in HH:mm, inclusive start. */
+  quietHoursStart: string
+  /** Local time in HH:mm, exclusive end; may be before start for overnight windows. */
+  quietHoursEnd: string
+  /** Check GitHub for a newer packaged build on launch. */
+  autoUpdate: boolean
 }
 
 export interface AppState {
@@ -349,7 +381,9 @@ export interface DesktopApi {
   getState(): Promise<AppState>
   onState(callback: (state: AppState) => void): () => void
   respond(id: string, decision: string, extra?: ApprovalExtra): Promise<void>
+  respondMany(ids: string[], decision: string, extra?: ApprovalExtra): Promise<void>
   pauseApproval(id: string, paused: boolean): Promise<void>
+  snoozeApproval(id: string, minutes: number): Promise<void>
   acknowledgeExpired(id?: string): Promise<void>
   dismissNotice(): Promise<void>
   selectApproval(id: string): Promise<void>
@@ -386,16 +420,23 @@ export interface DesktopApi {
     project?: string
     sessionKey?: string
     origin?: string
+    expiresAt?: number
   }): Promise<void>
   removeRule(id: string): Promise<void>
   toggleRule(id: string): Promise<void>
   historyExport(): Promise<{ ok: boolean; message: string }>
+  historyExportJson(): Promise<{ ok: boolean; message: string }>
   historyClear(): Promise<void>
   logsClear(): Promise<void>
   openLogs(): Promise<void>
   openLogFile(): Promise<void>
   openExternal(url: string): Promise<void>
+  openFile(path: string): Promise<void>
   checkUpdate(): Promise<AppUpdateInfo>
+  downloadUpdate(): Promise<AppUpdateInfo>
+  installUpdate(): Promise<void>
+  removeDeployProfile(id: string): Promise<void>
+  checkDeployProfile(id: string): Promise<DeployResult>
   finishOnboarding(): Promise<void>
   hideWindow(): Promise<void>
   resizePopup(height: number): void

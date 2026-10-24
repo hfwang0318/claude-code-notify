@@ -291,4 +291,17 @@ describe('SessionRegistry persistence', () => {
       listed.find((session) => session.key === '本机:1111')?.title
     )
   })
+
+  it('marks SessionEnd sessions as ended and ages them out quickly', () => {
+    const now = 1_700_000_000_000
+    const registry = new SessionRegistry()
+    registry.observe(makeItem({ createdAt: now }))
+    registry.end('本机:session-a', now)
+
+    const ended = registry.list([], [], now + 1000)
+    expect(ended.find((session) => session.key === '本机:session-a')?.state).toBe('ended')
+
+    const later = registry.list([], [], now + 31 * 60 * 1000)
+    expect(later.find((session) => session.key === '本机:session-a')).toBeUndefined()
+  })
 })

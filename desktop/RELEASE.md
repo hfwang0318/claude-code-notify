@@ -4,14 +4,15 @@
 
 - 更新 `desktop/package.json` 的 `version`
 - `pnpm typecheck`
-- `pnpm test`（当前 132 个测试，以 `pnpm test` 输出为准）
+- `pnpm test`（当前 152 个测试，以 `pnpm test` 输出为准）
 - `pnpm e2e:claude`（真实 Claude Code：双会话 / resolved / timeout；没有 Claude 认证的 CI 会自动跳过）
 - `pnpm self-test`
 - `pnpm build`
 
 ## 2. macOS
 
-产物：`release/Claude Notify-<version>-arm64.dmg`
+产物：`release/Claude.Notify-<version>-arm64.dmg` + `release/Claude.Notify-<version>-arm64.zip`
+- `latest-mac.yml`（自动更新 feed；zip 是实际更新包）
 
 签名 / 公证所需环境变量：
 
@@ -54,15 +55,15 @@ pnpm test
 pnpm dist:win
 ```
 
-产物：`release/Claude.Notify.Setup.<version>.exe`（NSIS，x64）。
+产物：`release/Claude.Notify.Setup.<version>.exe`（NSIS，x64）+ `latest.yml`。
 
 ### 发布顺序
 
 1. 确认版本号已更新，提交并推送 `main`
 2. 创建并推送 annotated tag `desktop-v0.4.0`
 3. workflow 会在 tag 上自动创建 GitHub Release（如果不存在），随后上传：
-   - macOS `*.dmg` + `SHA256SUMS-macos.txt`
-   - Windows `*Setup*.exe`、portable zip、`SHA256SUMS-windows.txt`
+   - macOS `*.dmg`、`*.zip`、`latest-mac.yml`、`SHA256SUMS-macos.txt`
+   - Windows `*Setup*.exe`、portable zip、`latest.yml`、`SHA256SUMS-windows.txt`
 4. 如果 Release 已手动创建，workflow 会复用并 `--clobber` 上传产物
 
 > GitHub 的 `gh` 命令在 workflow 内使用 `${{ github.token }}`；本地发布不需要登录 `gh`。
@@ -94,8 +95,23 @@ pnpm dist:win
 - [ ] 两端：字体可读性（0.1.2 起 +2px）
 - [ ] 两端：Token 重新生成后重新部署提示
 - [ ] 升级后重新部署能更新 `claude_approval_hook.py`
+- [ ] Windows NSIS：自动检查发现新版本、下载、重启安装
+- [ ] macOS 已签名：自动检查/下载/安装；未签名：回退到发布页
+- [ ] 自动更新关闭后不再后台检查
 
-## 5. 产物
+## 5. 自动更新说明
+
+- `electron-builder.yml` 配置了 GitHub `publish`；`--publish never` 只生成
+  `latest*.yml`，由 workflow 手动上传，不在构建阶段发布。
+- 客户端用 `electron-updater` 读取打包内的 `app-update.yml` 和 Release 中的
+  `latest*.yml`。
+- macOS 更新包是 zip（`dmg` 用于安装分发），且安装更新要求签名/公证；
+  未签名时 UI 会显示“自动更新不可用”并提供发布页。
+- Windows portable zip 不支持自动更新；NSIS 安装版支持。
+- 发布 tag 仍为 `desktop-v<version>`；`electron-builder.yml` 的 `publish.tagNamePrefix`
+  必须与之匹配；`latest*.yml` 必须是该 Release 的资产。
+
+## 6. 产物
 
 - macOS：`release/Claude.Notify-<version>-arm64.dmg`
 - Windows：`release/Claude.Notify.Setup.<version>.exe`

@@ -101,4 +101,16 @@ describe('HistoryStore.exportCsv', () => {
     expect(lines[1].startsWith(new Date(makeRecord(0).ts).toISOString())).toBe(true)
     expect(lines[2].startsWith(new Date(makeRecord(1).ts).toISOString())).toBe(true)
   })
+
+  it('exports the on-disk history as JSON', () => {
+    const writer = new HistoryStore()
+    writer.append(makeRecord(0))
+    writer.append(makeRecord(1))
+    const target = join(dataDir, 'history.json')
+    expect(writer.exportJson(target)).toBe(2)
+    const parsed = JSON.parse(readFileSync(target, 'utf-8')) as ApprovalRecord[]
+    expect(parsed).toHaveLength(2)
+    expect(parsed[0].id).toBe('record-0')
+    expect(parsed[1].id).toBe('record-1')
+  })
 })

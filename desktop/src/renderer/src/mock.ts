@@ -157,7 +157,11 @@ export const mockState: AppState = {
     port: 18765,
     localIp: '192.168.1.20',
     admissionControl: true,
-    maxPending: 8
+    maxPending: 8,
+    quietHoursEnabled: false,
+    quietHoursStart: '22:00',
+    quietHoursEnd: '08:00',
+    autoUpdate: true
   },
   onboarding: { done: true },
   update: { status: 'idle' },

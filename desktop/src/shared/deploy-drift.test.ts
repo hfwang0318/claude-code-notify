@@ -58,11 +58,8 @@ describe('deploy drift', () => {
     expect(drift[0]).toContain('本机钩子模式需重新应用')
   })
 
-  it('reports a remote profile mode mismatch with the target name', () => {
-    const drift = computeDeployDrift(input({ prefsMode: 'notify' }))
-    expect(drift).toHaveLength(1)
-    expect(drift[0]).toContain('prod-api')
-    expect(drift[0]).toContain('钩子模式')
+  it('does not report a remote profile that intentionally uses another mode', () => {
+    expect(computeDeployDrift(input({ prefsMode: 'notify' }))).toEqual([])
   })
 
   it('reports a stale remote hook version with the target name', () => {
@@ -122,7 +119,8 @@ describe('deploy drift', () => {
         id: `deploy@10.0.0.${index}:22`,
         name: `server-${index}`,
         origin: `server-${index}`,
-        host: `10.0.0.${index}`
+        host: `10.0.0.${index}`,
+        hookVersion: '1'
       })
     )
     const drift = computeDeployDrift(input({ prefsMode: 'notify', profiles }))
@@ -131,10 +129,10 @@ describe('deploy drift', () => {
 
     const duplicated = computeDeployDrift(
       input({
-        prefsMode: 'notify',
-        profiles: [profile(), profile({ id: 'duplicate-id' })]
+        profiles: [profile({ hookVersion: '1' }), profile({ id: 'duplicate-id', hookVersion: '1' })]
       })
     )
-    expect(duplicated).toEqual(['prod-api 的钩子模式需重新应用（弹窗 → 系统通知）'])
+    expect(duplicated).toHaveLength(1)
+    expect(duplicated[0]).toContain('钩子版本')
   })
 })

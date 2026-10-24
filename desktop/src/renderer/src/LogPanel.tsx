@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { LogEntry } from '../../shared/types'
 import { LEVEL_LABEL, formatTime } from './format'
 import { api } from './api'
@@ -20,7 +20,7 @@ const LEVEL_FILTERS = [
   { id: 'deploy', label: '部署' }
 ]
 
-export default function LogPanel({ logs }: Props): React.JSX.Element {
+function LogPanel({ logs }: Props): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [level, setLevel] = useState('all')
   const [stick, setStick] = useState(true)
@@ -149,3 +149,5 @@ export default function LogPanel({ logs }: Props): React.JSX.Element {
     </div>
   )
 }
+
+export default memo(LogPanel)

@@ -44,11 +44,9 @@ export function computeDeployDrift(input: DeployDriftInput): string[] {
     if (profile.status !== 'deployed') continue
     const label = profileLabel(profile)
 
-    if (profile.mode !== input.prefsMode) {
-      drift.push(
-        `${label} 的钩子模式需重新应用（${modeLabel(profile.mode)} → ${modeLabel(input.prefsMode)}）`
-      )
-    }
+    // Remote targets may intentionally use a different mode (for example a
+    // production server that only sends notifications). Only the local hook
+    // follows the global preference.
 
     if (profile.hookVersion !== input.hookVersion) {
       drift.push(

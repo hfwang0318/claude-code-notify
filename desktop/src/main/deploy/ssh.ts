@@ -6,6 +6,7 @@ import type { LogLevel } from '../../shared/types'
 import { hooksDirectory, quoteShell as shellQuote, timestamp } from './paths'
 import {
   APPROVAL_SCRIPT_NAME,
+  DEFAULT_PRE_TOOL_MATCHER,
   HOOK_VERSION,
   HOOK_VERSION_KEY,
   NOTIFY_SCRIPT_NAME,
@@ -511,7 +512,9 @@ export async function deployToServer(
         hookEntry: { type: 'command', command: hookCommand },
         hookTimeout: config.hookTimeout,
         questionEntry: { type: 'command', command: hookCommand },
-        stopEntry: { type: 'command', command: stopCommand }
+        stopEntry: { type: 'command', command: stopCommand },
+        sessionEndEntry: { type: 'command', command: stopCommand },
+        preToolMatcher: DEFAULT_PRE_TOOL_MATCHER
       })
       await sftpWrite(sftp, settingsPath, merged)
       await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)

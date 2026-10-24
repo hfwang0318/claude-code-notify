@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeFileSync
@@ -144,7 +145,23 @@ function ensureDir(directory: string): void {
 }
 
 function writePrivate(file: string, content: string): void {
-  writeFileSync(file, content, { encoding: 'utf-8', mode: 0o600 })
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(temp, content, { encoding: 'utf-8', mode: 0o600 })
+  try {
+    chmodSync(temp, 0o600)
+  } catch {
+    // Windows does not support POSIX modes
+  }
+  try {
+    renameSync(temp, file)
+  } catch {
+    writeFileSync(file, content, { encoding: 'utf-8', mode: 0o600 })
+    try {
+      unlinkSync(temp)
+    } catch {
+      // best-effort cleanup
+    }
+  }
   try {
     chmodSync(file, 0o600)
   } catch {
@@ -239,7 +256,8 @@ export function deployLocal(
     hookEntry,
     hookTimeout: 300,
     questionEntry: hookEntry,
-    stopEntry
+    stopEntry,
+    sessionEndEntry: stopEntry
   })
   writePrivate(settingsPath, merged)
   onProgress(

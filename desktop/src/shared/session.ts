@@ -221,6 +221,62 @@ export function extractEditDiff(toolInput: Record<string, unknown>): {
   return { filePath, oldText, newText }
 }
 
+/** MultiEdit carries several replacements under one file path. */
+export function extractEditDiffs(toolInput: Record<string, unknown>): Array<{
+  filePath: string
+  oldText: string
+  newText: string
+}> {
+  const edits = toolInput.edits
+  if (Array.isArray(edits)) {
+    const filePath =
+      typeof toolInput.file_path === 'string'
+        ? toolInput.file_path
+        : typeof toolInput.path === 'string'
+          ? toolInput.path
+          : ''
+    const diffs = edits
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+        const record = entry as Record<string, unknown>
+        const oldText =
+          typeof record.old_string === 'string'
+            ? record.old_string
+            : typeof record.old_str === 'string'
+              ? record.old_str
+              : ''
+        const newText =
+          typeof record.new_string === 'string'
+            ? record.new_string
+            : typeof record.new_str === 'string'
+              ? record.new_str
+              : ''
+        if (!oldText && !newText) return null
+        return {
+          filePath:
+            typeof record.file_path === 'string' && record.file_path
+              ? record.file_path
+              : filePath,
+          oldText,
+          newText
+        }
+      })
+      .filter((diff): diff is { filePath: string; oldText: string; newText: string } => Boolean(diff))
+    if (diffs.length > 0) return diffs
+  }
+  const single = extractEditDiff(toolInput)
+  return single ? [single] : []
+}
+
+/** Extract a human-readable plan from ExitPlanMode-style tool input. */
+export function planText(toolInput: Record<string, unknown>): string {
+  for (const key of ['plan', 'plan_text', 'content', 'markdown']) {
+    const value = toolInput[key]
+    if (typeof value === 'string' && value.trim()) return value
+  }
+  return ''
+}
+
 export function assessRisk(
   tool: string,
   toolInput: Record<string, unknown>

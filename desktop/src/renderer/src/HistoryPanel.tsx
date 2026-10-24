@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { ApprovalRecord } from '../../shared/types'
 import { DECISION_LABEL, RISK_LABEL, SOURCE_LABEL, formatDateTime, formatRelative } from './format'
 import { sessionColor } from '../../shared/session'
+import { formatLatency, summarizeHistory } from '../../shared/analytics'
 import { api } from './api'
 
 interface Props {
@@ -39,7 +40,7 @@ const TIME_FILTERS = [
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-export default function HistoryPanel({ history, now, onOpenInbox }: Props): React.JSX.Element {
+function HistoryPanel({ history, now, onOpenInbox }: Props): React.JSX.Element {
   const [query, setQuery] = useState('')
   const [decision, setDecision] = useState('all')
   const [risk, setRisk] = useState('all')
@@ -47,6 +48,7 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
   const [timeRange, setTimeRange] = useState('all')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const filtered = useMemo(() => {
     const text = query.trim().toLowerCase()
@@ -73,10 +75,21 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
     })
   }, [decision, history, now, query, risk, source, timeRange])
 
+  const analytics = useMemo(() => summarizeHistory(history), [history])
+  const selected = history.find((record) => record.id === selectedId) || null
+
   const exportCsv = async (): Promise<void> => {
     setBusy(true)
     setMessage('')
     const result = await api.historyExport()
+    setBusy(false)
+    setMessage(result.message)
+  }
+
+  const exportJson = async (): Promise<void> => {
+    setBusy(true)
+    setMessage('')
+    const result = await api.historyExportJson()
     setBusy(false)
     setMessage(result.message)
   }
@@ -158,6 +171,14 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
           </button>
           <button
             className="btn subtle compact"
+            disabled={busy}
+            onClick={() => void exportJson()}
+            title="导出完整 JSON，便于二次分析"
+          >
+            JSON
+          </button>
+          <button
+            className="btn subtle compact"
             onClick={() => void api.historyClear()}
             title="会先弹出确认"
           >
@@ -166,6 +187,91 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
         </div>
       </div>
       {message ? <div className="panel-message">{message}</div> : null}
+
+      {history.length > 0 ? (
+        <div className="history-analytics" aria-label="审批统计">
+          <div className="history-stat">
+            <b>{analytics.total}</b>
+            <span>最近记录</span>
+          </div>
+          <div className="history-stat allow">
+            <b>{analytics.allowed}</b>
+            <span>允许</span>
+          </div>
+          <div className="history-stat deny">
+            <b>{analytics.denied}</b>
+            <span>拒绝</span>
+          </div>
+          <div className="history-stat warn">
+            <b>{analytics.timedOut}</b>
+            <span>超时</span>
+          </div>
+          <div className="history-stat">
+            <b>{analytics.ruleHits}</b>
+            <span>规则命中</span>
+          </div>
+          <div className="history-stat">
+            <b>{formatLatency(analytics.p50LatencyMs)}</b>
+            <span>P50 响应</span>
+          </div>
+          <div className="history-stat">
+            <b>{formatLatency(analytics.p95LatencyMs)}</b>
+            <span>P95 响应</span>
+          </div>
+          <div className="history-stat risk">
+            <b>{analytics.highRisk}</b>
+            <span>高风险</span>
+          </div>
+        </div>
+      ) : null}
+
+      {selected ? (
+        <section className="history-detail" aria-label="审批详情">
+          <header>
+            <b>{selected.tool} · {selected.sessionLabel}</b>
+            <div>
+              <button
+                className="link"
+                onClick={() => void api.copy(selected.command || selected.message)}
+              >
+                复制命令
+              </button>
+              <button className="link" onClick={() => setSelectedId(null)}>
+                关闭
+              </button>
+            </div>
+          </header>
+          <dl>
+            <dt>时间</dt>
+            <dd>{formatDateTime(selected.ts)}</dd>
+            <dt>结果</dt>
+            <dd>{DECISION_LABEL[selected.decision] || selected.decision}</dd>
+            <dt>来源</dt>
+            <dd>{SOURCE_LABEL[selected.source] || selected.source}</dd>
+            <dt>项目</dt>
+            <dd>{selected.project || '—'}</dd>
+            <dt>来源主机</dt>
+            <dd>{selected.origin || '—'}</dd>
+            <dt>风险</dt>
+            <dd>{RISK_LABEL[selected.risk] || selected.risk}</dd>
+            <dt>响应</dt>
+            <dd>{formatLatency(selected.latencyMs)}</dd>
+            {selected.ruleId ? (
+              <>
+                <dt>规则</dt>
+                <dd>{selected.ruleId}</dd>
+              </>
+            ) : null}
+            {selected.reason ? (
+              <>
+                <dt>拒绝理由</dt>
+                <dd>{selected.reason}</dd>
+              </>
+            ) : null}
+          </dl>
+          <pre>{selected.command || selected.message}</pre>
+        </section>
+      ) : null}
 
       {history.length === 0 ? (
         <div className="inbox-empty history-empty">
@@ -188,7 +294,21 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
           </div>
           <div className="history-list">
             {filtered.map((record) => (
-              <div className={`history-row decision-${record.decision}`} key={record.id}>
+              <div
+                className={`history-row decision-${record.decision} ${
+                  selectedId === record.id ? 'selected' : ''
+                }`}
+                key={record.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedId(record.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setSelectedId(record.id)
+                  }
+                }}
+              >
                 <div className="history-time">
                   <b>{formatDateTime(record.ts)}</b>
                   <span>{formatRelative(record.ts, now)}</span>
@@ -227,3 +347,5 @@ export default function HistoryPanel({ history, now, onOpenInbox }: Props): Reac
     </div>
   )
 }
+
+export default memo(HistoryPanel)

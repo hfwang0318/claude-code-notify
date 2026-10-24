@@ -37,6 +37,21 @@ function createBrowserFallback(): DesktopApi {
     respond: async () => {
       toast('浏览器预览模式：请在 Electron 中测试审批')
     },
+    respondMany: async () => {
+      toast('浏览器预览模式：请在 Electron 中测试审批')
+    },
+    snoozeApproval: async (id, minutes) => {
+      state = {
+        ...state,
+        pending: state.pending.map((item) =>
+          item.id === id
+            ? { ...item, snoozedUntil: Date.now() + minutes * 60_000 }
+            : item
+        )
+      }
+      toast(`已稍后提醒 ${minutes} 分钟（预览）`)
+      emit()
+    },
     pauseApproval: async (id, paused) => {
       state = {
         ...state,
@@ -213,6 +228,7 @@ function createBrowserFallback(): DesktopApi {
       emit()
     },
     historyExport: async () => ({ ok: false, message: '浏览器预览模式：无法导出' }),
+    historyExportJson: async () => ({ ok: false, message: '浏览器预览模式：无法导出' }),
     historyClear: async () => {
       state = { ...state, history: [] }
       emit()
@@ -230,9 +246,27 @@ function createBrowserFallback(): DesktopApi {
     openExternal: async (url: string) => {
       window.open(url, '_blank', 'noopener,noreferrer')
     },
+    openFile: async () => {
+      toast('浏览器预览模式：无法打开本地文件')
+    },
     checkUpdate: async (): Promise<AppUpdateInfo> => ({
       status: 'error',
       message: '浏览器预览模式：无法检查更新'
+    }),
+    downloadUpdate: async (): Promise<AppUpdateInfo> => ({
+      status: 'error',
+      message: '浏览器预览模式：无法下载更新'
+    }),
+    installUpdate: async () => {
+      toast('浏览器预览模式：无法安装更新')
+    },
+    removeDeployProfile: async () => {
+      toast('浏览器预览模式：无法删除部署目标')
+    },
+    checkDeployProfile: async (): Promise<DeployResult> => ({
+      success: false,
+      summary: '浏览器预览模式：无法检查服务器',
+      connectivity: false
     }),
     finishOnboarding: async () => {
       state = { ...state, onboarding: { done: true } }

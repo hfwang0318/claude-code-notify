@@ -29,6 +29,25 @@ describe('mergeSettingsJson', () => {
     expect(merged.hooks.PermissionRequest[0].matcher).toBe('')
     expect(merged.hooks.PreToolUse).toHaveLength(1)
     expect(merged.hooks.PreToolUse[0].hooks[0].timeout).toBe(300 + HOOK_PAUSE_BUDGET_SEC)
+    expect(merged.hooks.PreToolUse[0].matcher).toContain('Bash')
+    expect(merged.hooks.SessionEnd).toBeUndefined()
+  })
+
+  it('installs a SessionEnd hook and honours a custom PreToolUse matcher', () => {
+    const merged = JSON.parse(
+      mergeSettingsJson('', {
+        mode: 'popup',
+        hookEntry: hook,
+        hookTimeout: 300,
+        questionEntry: hook,
+        stopEntry: hook,
+        sessionEndEntry: hook,
+        preToolMatcher: 'Bash|AskUserQuestion'
+      })
+    )
+    expect(merged.hooks.PreToolUse[0].matcher).toBe('Bash|AskUserQuestion')
+    expect(merged.hooks.SessionEnd).toHaveLength(1)
+    expect(merged.hooks.SessionEnd[0].hooks[0].timeout).toBe(30)
   })
 
   it('preserves third-party hooks and is idempotent', () => {

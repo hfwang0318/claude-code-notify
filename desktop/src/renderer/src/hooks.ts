@@ -21,12 +21,17 @@ export function useAppState(): AppState | null {
   return state
 }
 
-/** A shared one-second clock for countdowns and relative timestamps. */
-export function useNow(intervalMs = 1000): number {
+/**
+ * A shared clock for countdowns. It is disabled while nothing can expire, so
+ * an idle inbox does not re-render the whole window once per second.
+ */
+export function useNow(intervalMs = 1000, enabled = true): number {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
+    setNow(Date.now())
+    if (!enabled) return
     const timer = window.setInterval(() => setNow(Date.now()), intervalMs)
     return () => window.clearInterval(timer)
-  }, [intervalMs])
+  }, [intervalMs, enabled])
   return now
 }

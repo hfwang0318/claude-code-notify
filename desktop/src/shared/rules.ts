@@ -5,13 +5,25 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * Prefix/glob rules must never auto-allow a compound shell command. Without
+ * this guard `git status:*` would also match `git status; curl ... | sh`.
+ * Exact patterns stay exact, so a user can still allow a command containing a
+ * pipe deliberately.
+ */
+export function hasShellControlOperators(value: string): boolean {
+  return /[;&|`$<>\n\r]/.test(value)
+}
+
 export function patternMatches(pattern: string, value: string): boolean {
   const trimmed = pattern.trim()
   if (!trimmed || trimmed === '*') return true
   if (trimmed.endsWith(':*')) {
+    if (hasShellControlOperators(value)) return false
     return value.toLowerCase().startsWith(trimmed.slice(0, -2).toLowerCase())
   }
   if (trimmed.includes('*')) {
+    if (hasShellControlOperators(value)) return false
     const source = `^${trimmed.split('*').map(escapeRegExp).join('.*')}$`
     try {
       return new RegExp(source, 'i').test(value)
@@ -24,6 +36,7 @@ export function patternMatches(pattern: string, value: string): boolean {
 
 export function ruleMatches(rule: ApprovalRule, item: ApprovalItem): boolean {
   if (!rule.enabled) return false
+  if (typeof rule.expiresAt === 'number' && rule.expiresAt <= Date.now()) return false
   if (rule.scope === 'session' && rule.sessionKey !== item.sessionKey) return false
   if (rule.scope === 'project') {
     if (rule.project !== item.project && rule.project !== item.cwd) return false
@@ -55,6 +68,7 @@ export function buildRuleFromItem(
     scope,
     project: scope === 'project' ? item.project : undefined,
     sessionKey: scope === 'session' ? item.sessionKey : undefined,
+    origin: scope === 'global' ? undefined : item.origin,
     tool: item.tool,
     pattern: command.trim() || '*',
     createdAt: now,
@@ -70,7 +84,11 @@ export function describeRule(rule: ApprovalRule): string {
         ? `项目 ${rule.project || '?'}`
         : '当前会话'
   const origin = rule.origin ? ` · 来源 ${rule.origin}` : ''
-  return `${scope}${origin} · ${rule.tool} · ${rule.pattern}`
+  const expiry =
+    typeof rule.expiresAt === 'number'
+      ? ` · ${new Date(rule.expiresAt).toLocaleString('zh-CN')} 过期`
+      : ''
+  return `${scope}${origin} · ${rule.tool} · ${rule.pattern}${expiry}`
 }
 
 export function validateRule(rule: {

@@ -6,8 +6,9 @@ import type {
 } from '../../shared/types'
 import {
   approvalCommand,
-  extractEditDiff,
+  extractEditDiffs,
   groupBySession,
+  planText,
   prettyToolInput,
   remainingSeconds,
   riskLabel,
@@ -18,7 +19,12 @@ import {
   shortSessionId,
   sortByDeadline
 } from '../../shared/session'
-import { describeSuggestion } from '../../shared/suggestions'
+import {
+  describeSuggestion,
+  isKnownSuggestionType,
+  suggestionNeedsConfirmation
+} from '../../shared/suggestions'
+import { clusterApprovals, clusterFor } from '../../shared/approvals'
 import {
   buildAnswers,
   validateDrafts,
@@ -125,6 +131,10 @@ export default function Popup(): React.JSX.Element | null {
   const [showQueue, setShowQueue] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [confirmHighRisk, setConfirmHighRisk] = useState(false)
+  const [denyOpen, setDenyOpen] = useState(false)
+  const [denyReason, setDenyReason] = useState('')
+  const [suggestionConfirm, setSuggestionConfirm] = useState<number | null>(null)
+  const [ruleTtl, setRuleTtl] = useState<'1h' | '24h' | 'forever'>('forever')
   const [copied, setCopied] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
@@ -153,8 +163,15 @@ export default function Popup(): React.JSX.Element | null {
   }, [])
 
   const pending = useMemo(
-    () => (state ? sortByDeadline(state.pending) : []),
-    [state]
+    () =>
+      state
+        ? sortByDeadline(
+            state.pending.filter(
+              (entry) => !entry.snoozedUntil || entry.snoozedUntil <= now
+            )
+          )
+        : [],
+    [state, now]
   )
   const selected = useMemo(() => {
     if (!state) return null
@@ -167,6 +184,14 @@ export default function Popup(): React.JSX.Element | null {
   const expired = selected ? null : state?.expired[0] || null
   const item = selected || expired
   const isExpired = Boolean(expired && !selected)
+  const allClusters = useMemo(
+    () => (state ? clusterApprovals(state.pending) : []),
+    [state?.pending]
+  )
+  const actionItems = useMemo(
+    () => (item && !isExpired ? clusterFor(allClusters, item.id) : []),
+    [allClusters, item?.id, isExpired]
+  )
   const colorFor = (key: string): string =>
     state?.sessions.find((session) => session.key === key)?.color || sessionColor(key)
   const titleFor = (key: string, fallback: string): string =>
@@ -176,6 +201,9 @@ export default function Popup(): React.JSX.Element | null {
     if (!item) return
     setDetailsOpen(false)
     setConfirmHighRisk(false)
+    setDenyOpen(false)
+    setDenyReason('')
+    setSuggestionConfirm(null)
     setAnswerErrors([])
     setActiveQuestion(0)
     setRenaming(false)
@@ -216,14 +244,15 @@ export default function Popup(): React.JSX.Element | null {
   const questionMode = item?.kind === 'question' && !isExpired
   const highRisk = item?.risk.level === 'high'
   const command = item ? approvalCommand(item) : ''
-  const diff = item && !questionMode ? extractEditDiff(item.toolInput) : null
+  const diffs = item && !questionMode ? extractEditDiffs(item.toolInput) : []
+  const plan = item && item.tool === 'ExitPlanMode' ? planText(item.toolInput) : ''
   const canRememberRule =
     item &&
     !questionMode &&
     !highRisk &&
-    item.risk.level === 'medium' &&
     Boolean(command) &&
     item.tool !== 'AskUserQuestion'
+  const duplicateCount = actionItems.length
 
   const waitingSessions = useMemo(() => {
     const groups = new Map<
@@ -284,6 +313,13 @@ export default function Popup(): React.JSX.Element | null {
     })
   }
 
+  const respondGroup = (decision: string, extra?: { reason?: string }): void => {
+    if (!item) return
+    const ids = actionItems.length > 0 ? actionItems.map((entry) => entry.id) : [item.id]
+    if (ids.length === 1) void api.respond(ids[0], decision, extra)
+    else void api.respondMany(ids, decision, extra)
+  }
+
   const allow = (): void => {
     if (!item) return
     const allowOption = item.options.find((option) => option.id === 'allow')
@@ -292,12 +328,24 @@ export default function Popup(): React.JSX.Element | null {
       setConfirmHighRisk(true)
       return
     }
-    void api.respond(item.id, allowOption.id)
+    respondGroup(allowOption.id)
   }
 
   const ask = (): void => {
     if (!item) return
-    void api.respond(item.id, 'ask')
+    respondGroup('ask')
+  }
+
+  const submitDeny = (withReason: boolean): void => {
+    if (!item) return
+    const reason = withReason ? denyReason.trim().slice(0, 2000) : ''
+    respondGroup('deny', reason ? { reason } : undefined)
+  }
+
+  const snoozeGroup = (minutes: number): void => {
+    if (!item) return
+    const ids = actionItems.length > 0 ? actionItems.map((entry) => entry.id) : [item.id]
+    for (const id of ids) void api.snoozeApproval(id, minutes)
   }
 
   const togglePause = (): void => {
@@ -362,17 +410,42 @@ export default function Popup(): React.JSX.Element | null {
 
   const rememberRule = (): void => {
     if (!item) return
+    const expiresAt =
+      ruleTtl === '1h'
+        ? Date.now() + 60 * 60 * 1000
+        : ruleTtl === '24h'
+          ? Date.now() + 24 * 60 * 60 * 1000
+          : undefined
     void api.addRule({
       scope: 'project',
       tool: item.tool,
       pattern: command,
-      project: item.project
+      project: item.project,
+      origin: item.origin,
+      ...(expiresAt ? { expiresAt } : {})
     })
   }
 
   const copyDetail = (): void => {
     if (!item) return
-    void api.copy(detailsOpen ? prettyToolInput(item.toolInput) : command)
+    let text = command
+    if (detailsOpen) text = prettyToolInput(item.toolInput)
+    else if (plan) text = plan
+    else if (diffs.length > 0) {
+      text = diffs
+        .map(
+          (diff) =>
+            `${diff.filePath}\n${diff.oldText
+              .split('\n')
+              .map((line: string) => `- ${line}`)
+              .join('\n')}\n${diff.newText
+              .split('\n')
+              .map((line: string) => `+ ${line}`)
+              .join('\n')}`
+        )
+        .join('\n\n')
+    }
+    void api.copy(text)
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1500)
   }
@@ -487,7 +560,8 @@ export default function Popup(): React.JSX.Element | null {
         if (!option) return
         event.preventDefault()
         if (option.id === 'allow') allow()
-        else void api.respond(item.id, option.id)
+        else if (option.id === 'deny') setDenyOpen(true)
+        else respondGroup(option.id)
       }
     }
     window.addEventListener('keydown', handler)
@@ -738,7 +812,15 @@ export default function Popup(): React.JSX.Element | null {
               <span className="popup-request-kind">
                 {item.kind === 'question' ? '问答请求' : '权限请求'}
               </span>
+              {duplicateCount > 1 ? (
+                <span className="popup-duplicate">相同请求 ×{duplicateCount}</span>
+              ) : null}
             </div>
+            {duplicateCount > 1 ? (
+              <div className="popup-duplicate-note">
+                这些请求的工具和参数完全一致；本次允许/拒绝/交给终端会同时处理 {duplicateCount} 条。
+              </div>
+            ) : null}
 
             {waitingSessions.length > 1 ? (
               <div className="session-strip" role="tablist" aria-label="等待中的会话">
@@ -882,26 +964,56 @@ export default function Popup(): React.JSX.Element | null {
               </div>
             ) : (
               <div className="popup-detail-block">
-                {diff ? (
-                  <div className="popup-diff">
+                {plan ? (
+                  <div className="popup-plan">
                     <div className="popup-diff-head">
-                      <span className="popup-diff-path">{diff.filePath}</span>
+                      <span className="popup-diff-path">计划内容</span>
                       <button className="link" onClick={copyDetail}>
-                        {copied ? '已复制' : '复制diff'}
+                        {copied ? '已复制' : '复制计划'}
                       </button>
                     </div>
-                    {diff.oldText ? (
-                      <pre className="diff-old">
-                        {diff.oldText.split('\n').map((line) => `- ${line}`).join('\n')}
-                      </pre>
-                    ) : null}
-                    {diff.newText ? (
-                      <pre className="diff-new">
-                        {diff.newText.split('\n').map((line) => `+ ${line}`).join('\n')}
-                      </pre>
-                    ) : null}
+                    <pre>{plan}</pre>
                   </div>
-                ) : (
+                ) : null}
+                {diffs.length > 0 ? (
+                  <div className="popup-diffs">
+                    {diffs.map((diff, index) => (
+                      <div className="popup-diff" key={`${diff.filePath}-${index}`}>
+                        <div className="popup-diff-head">
+                          <span className="popup-diff-path">{diff.filePath}</span>
+                          <span className="popup-diff-actions">
+                            {diffs.length > 1 ? <em>#{index + 1}</em> : null}
+                            <button
+                              className="link"
+                              onClick={() => void api.openFile(diff.filePath)}
+                            >
+                              打开文件
+                            </button>
+                            <button className="link" onClick={copyDetail}>
+                              {copied ? '已复制' : '复制diff'}
+                            </button>
+                          </span>
+                        </div>
+                        {diff.oldText ? (
+                          <pre className="diff-old">
+                            {diff.oldText
+                              .split('\n')
+                              .map((line: string) => `- ${line}`)
+                              .join('\n')}
+                          </pre>
+                        ) : null}
+                        {diff.newText ? (
+                          <pre className="diff-new">
+                            {diff.newText
+                              .split('\n')
+                              .map((line: string) => `+ ${line}`)
+                              .join('\n')}
+                          </pre>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : plan ? null : (
                   <pre className="popup-command-block" title={command}>
                     {riskSegments(command).map((segment, index) =>
                       segment.danger ? (
@@ -962,6 +1074,22 @@ export default function Popup(): React.JSX.Element | null {
               </button>
             </div>
 
+            {!isExpired ? (
+              <div className="popup-snooze">
+                <span>稍后提醒</span>
+                {[1, 5, 15].map((minutes) => (
+                  <button
+                    key={minutes}
+                    className="link"
+                    onClick={() => snoozeGroup(minutes)}
+                    title={`${minutes} 分钟后重新弹出，倒计时继续`}
+                  >
+                    {minutes} 分钟
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             {questionMode ? (
               <div className="popup-actions stack">
                 {answerErrors.length > 0 ? (
@@ -996,38 +1124,110 @@ export default function Popup(): React.JSX.Element | null {
                     onClick={() =>
                       option.id === 'allow'
                         ? allow()
-                        : void api.respond(item.id, option.id)
+                        : option.id === 'deny'
+                          ? setDenyOpen(true)
+                          : respondGroup(option.id)
                     }
                   >
-                    {option.id === 'allow' && confirmHighRisk ? '仍然允许' : option.label}
+                    {option.id === 'allow' && confirmHighRisk
+                      ? '仍然允许'
+                      : option.id === 'allow' && item.tool === 'ExitPlanMode'
+                        ? '批准计划并退出计划模式'
+                        : option.label}
                   </button>
                 ))}
                 <button className="popup-terminal" onClick={ask}>
                   交给终端
                 </button>
+                {denyOpen ? (
+                  <div className="deny-box">
+                    <label htmlFor="deny-reason">拒绝理由（可选，会回传给 Claude）</label>
+                    <textarea
+                      id="deny-reason"
+                      className="deny-reason"
+                      value={denyReason}
+                      maxLength={2000}
+                      autoFocus
+                      placeholder="例如：不要修改这个文件，先说明你的方案"
+                      onChange={(event) => setDenyReason(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault()
+                          submitDeny(true)
+                        }
+                      }}
+                    />
+                    <div className="deny-actions">
+                      <button className="popup-btn deny" onClick={() => submitDeny(true)}>
+                        拒绝并说明
+                      </button>
+                      <button className="popup-terminal" onClick={() => submitDeny(false)}>
+                        直接拒绝
+                      </button>
+                      <button className="link" onClick={() => setDenyOpen(false)}>
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             )}
 
             {item.suggestions.length > 0 ? (
               <div className="popup-suggestions">
                 <div className="popup-suggestions-title">权限建议</div>
-                {item.suggestions.map((suggestion, index) => (
-                  <button
-                    key={`${describeSuggestion(suggestion)}-${index}`}
-                    className="popup-btn suggestion"
-                    title={JSON.stringify(suggestion, null, 2)}
-                    onClick={() => void api.respond(item.id, 'suggestion', { index })}
-                  >
-                    {describeSuggestion(suggestion)}
-                  </button>
-                ))}
+                {item.suggestions.map((suggestion, index) => {
+                  const known = isKnownSuggestionType(suggestion)
+                  const dangerous = suggestionNeedsConfirmation(suggestion)
+                  const confirming = suggestionConfirm === index
+                  return (
+                    <button
+                      key={`${describeSuggestion(suggestion)}-${index}`}
+                      className={`popup-btn suggestion ${confirming ? 'confirm' : ''}`}
+                      disabled={!known}
+                      title={
+                        known
+                          ? JSON.stringify(suggestion, null, 2)
+                          : '未知建议类型，请交给终端处理'
+                      }
+                      onClick={() => {
+                        if (!known) return
+                        if (dangerous && !confirming) {
+                          setSuggestionConfirm(index)
+                          return
+                        }
+                        setSuggestionConfirm(null)
+                        void api.respond(item.id, 'suggestion', { index })
+                      }}
+                    >
+                      {confirming ? '再点一次确认：' : ''}
+                      {describeSuggestion(suggestion)}
+                      {!known ? '（未知类型，请交给终端）' : ''}
+                    </button>
+                  )
+                })}
               </div>
             ) : null}
 
             {canRememberRule ? (
-              <button className="popup-remember" onClick={rememberRule}>
-                以后允许此命令（项目 {item.project}）
-              </button>
+              <div className="popup-remember-row">
+                <select
+                  className="popup-rule-ttl"
+                  value={ruleTtl}
+                  onChange={(event) =>
+                    setRuleTtl(event.target.value as '1h' | '24h' | 'forever')
+                  }
+                  aria-label="规则有效期"
+                  title="规则有效期"
+                >
+                  <option value="1h">1 小时</option>
+                  <option value="24h">24 小时</option>
+                  <option value="forever">永久</option>
+                </select>
+                <button className="popup-remember" onClick={rememberRule}>
+                  以后允许此命令（{item.project} · {item.origin}）
+                </button>
+              </div>
             ) : null}
 
             <div className="popup-queue-row">

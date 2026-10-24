@@ -9,6 +9,7 @@ import type {
   ThemeMode
 } from '../../shared/types'
 import { describeRule } from '../../shared/rules'
+import { minutesUntilTomorrow } from './format'
 import { api } from './api'
 import { useFocusTrap } from './useFocusTrap'
 
@@ -107,6 +108,7 @@ export default function Preferences({
   const [ruleProject, setRuleProject] = useState('')
   const [ruleSessionKey, setRuleSessionKey] = useState('')
   const [ruleOrigin, setRuleOrigin] = useState('')
+  const [ruleExpiry, setRuleExpiry] = useState<'forever' | '1h' | '24h'>('forever')
   const [ruleMessage, setRuleMessage] = useState('')
   const dialogRef = useRef<HTMLElement>(null)
 
@@ -172,13 +174,20 @@ export default function Preferences({
       return
     }
     try {
+      const expiresAt =
+        ruleExpiry === '1h'
+          ? Date.now() + 60 * 60 * 1000
+          : ruleExpiry === '24h'
+            ? Date.now() + 24 * 60 * 60 * 1000
+            : undefined
       await api.addRule({
         scope: ruleScope,
         tool: ruleTool,
         pattern: rulePattern,
         project: ruleScope === 'project' ? ruleProject.trim() : undefined,
         sessionKey: ruleScope === 'session' ? targetSession?.key : undefined,
-        origin: ruleScope === 'project' && ruleOrigin ? ruleOrigin : undefined
+        origin: ruleScope === 'project' && ruleOrigin ? ruleOrigin : undefined,
+        ...(expiresAt ? { expiresAt } : {})
       })
       setRulePattern('')
       setRuleMessage('规则已保存')
@@ -192,11 +201,15 @@ export default function Preferences({
       ? '检查中…'
       : state.update.status === 'available'
         ? state.update.message || `发现 ${state.update.latest}`
-        : state.update.status === 'latest'
-          ? state.update.message || '已是最新版本'
-          : state.update.status === 'error'
-            ? state.update.message || '检查失败'
-            : ''
+        : state.update.status === 'downloading'
+          ? `下载中 ${state.update.progress ?? 0}%`
+          : state.update.status === 'downloaded'
+            ? state.update.message || '更新已下载，重启后安装'
+            : state.update.status === 'latest'
+              ? state.update.message || '已是最新版本'
+              : state.update.status === 'error'
+                ? state.update.message || '检查失败'
+                : ''
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -298,7 +311,7 @@ export default function Preferences({
               </div>
 
               <div className="form-section">
-                <div className="form-section-title">提醒</div>
+                <div className="form-section-title">通知</div>
                 <Toggle
                   checked={state.prefs.sound}
                   onChange={(value) => save({ sound: value })}
@@ -323,6 +336,32 @@ export default function Preferences({
                   label="队列准入控制"
                   hint="当排队时间可能超过剩余审批时间时，直接回退终端，避免“弹了却看不见”"
                 />
+                <Toggle
+                  checked={state.prefs.quietHoursEnabled}
+                  onChange={(value) => save({ quietHoursEnabled: value })}
+                  label="免打扰时段"
+                  hint="时段内只静默系统通知；高风险审批仍会提醒"
+                />
+                {state.prefs.quietHoursEnabled ? (
+                  <div className="form-grid two quiet-hours">
+                    <label className="field">
+                      <span>开始</span>
+                      <input
+                        type="time"
+                        value={state.prefs.quietHoursStart}
+                        onChange={(event) => save({ quietHoursStart: event.target.value })}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>结束</span>
+                      <input
+                        type="time"
+                        value={state.prefs.quietHoursEnd}
+                        onChange={(event) => save({ quietHoursEnd: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                ) : null}
               </div>
 
               <div className="form-section">
@@ -360,7 +399,13 @@ export default function Preferences({
                           />
                           <b title={session.task || session.label}>{session.title}</b>
                           <span>{session.origin}</span>
-                          <em>{session.waiting > 0 ? `${session.waiting} 条等待` : '空闲'}</em>
+                          <em>
+                            {session.waiting > 0
+                              ? `${session.waiting} 条等待`
+                              : session.state === 'ended'
+                                ? '已结束'
+                                : '空闲'}
+                          </em>
                           <button
                             className={`icon-btn ${muted ? 'active' : ''}`}
                             title={muted ? '取消静音提醒' : '静音提醒 30 分钟'}
@@ -368,6 +413,28 @@ export default function Preferences({
                           >
                             {muted ? '🔕' : '🔔'}
                           </button>
+                          <select
+                            className="mute-select"
+                            value=""
+                            onChange={(event) => {
+                              const value = event.target.value
+                              const minutes =
+                                value === 'tomorrow'
+                                  ? minutesUntilTomorrow()
+                                  : Number(value)
+                              if (minutes > 0) void api.muteSession(session.key, minutes)
+                              event.currentTarget.value = ''
+                            }}
+                            aria-label="静音时长"
+                            title="按会话静音"
+                          >
+                            <option value="">静音…</option>
+                            <option value="30">30 分钟</option>
+                            <option value="60">1 小时</option>
+                            <option value="240">4 小时</option>
+                            <option value="1440">24 小时</option>
+                            <option value="tomorrow">直到明天 8:00</option>
+                          </select>
                         </div>
                       )
                     })}
@@ -614,6 +681,19 @@ export default function Preferences({
                       </select>
                     </label>
                   ) : null}
+                  <label className="field">
+                    <span>有效期</span>
+                    <select
+                      value={ruleExpiry}
+                      onChange={(event) =>
+                        setRuleExpiry(event.target.value as 'forever' | '1h' | '24h')
+                      }
+                    >
+                      <option value="forever">永久</option>
+                      <option value="24h">24 小时</option>
+                      <option value="1h">1 小时</option>
+                    </select>
+                  </label>
                   {ruleScope === 'project' ? (
                     <>
                       <label className="field">
@@ -719,10 +799,30 @@ export default function Preferences({
                   <span>数据目录</span>
                   <b>~/.claude-notify</b>
                 </div>
+                <Toggle
+                  checked={state.prefs.autoUpdate}
+                  onChange={(value) => save({ autoUpdate: value })}
+                  label="启动时自动检查更新"
+                  hint="仅打包版本生效；下载与安装仍需要你确认"
+                />
                 <div className="row">
                   <button className="btn" onClick={() => void api.checkUpdate()}>
                     检查更新
                   </button>
+                  {!state.update.manual &&
+                  (state.update.status === 'available' ||
+                    state.update.status === 'downloading') ? (
+                    <button className="btn primary" onClick={() => void api.downloadUpdate()}>
+                      {state.update.status === 'downloading'
+                        ? `下载中 ${state.update.progress ?? 0}%`
+                        : '下载更新'}
+                    </button>
+                  ) : null}
+                  {state.update.status === 'downloaded' ? (
+                    <button className="btn primary" onClick={() => void api.installUpdate()}>
+                      重启并安装
+                    </button>
+                  ) : null}
                   {updateStatus ? <span className="form-note">{updateStatus}</span> : null}
                   {state.update.url ? (
                     <button

@@ -24,8 +24,12 @@ const api: DesktopApi = {
   },
   respond: (id: string, decision: string, extra?: ApprovalExtra) =>
     ipcRenderer.invoke('approval:respond', id, decision, extra),
+  respondMany: (ids: string[], decision: string, extra?: ApprovalExtra) =>
+    ipcRenderer.invoke('approval:respond-many', ids, decision, extra),
   pauseApproval: (id: string, paused: boolean) =>
     ipcRenderer.invoke('approval:pause', id, paused),
+  snoozeApproval: (id: string, minutes: number) =>
+    ipcRenderer.invoke('approval:snooze', id, minutes),
   acknowledgeExpired: (id?: string) => ipcRenderer.invoke('approval:acknowledge', id),
   dismissNotice: () => ipcRenderer.invoke('notice:dismiss'),
   selectApproval: (id: string) => ipcRenderer.invoke('approval:select', id),
@@ -97,16 +101,24 @@ const api: DesktopApi = {
     project?: string
     sessionKey?: string
     origin?: string
+    expiresAt?: number
   }) => ipcRenderer.invoke('rules:add', rule),
   removeRule: (id: string) => ipcRenderer.invoke('rules:remove', id),
   toggleRule: (id: string) => ipcRenderer.invoke('rules:toggle', id),
   historyExport: () => ipcRenderer.invoke('history:export'),
+  historyExportJson: () => ipcRenderer.invoke('history:export-json'),
   historyClear: () => ipcRenderer.invoke('history:clear'),
   logsClear: () => ipcRenderer.invoke('logs:clear'),
   openLogs: () => ipcRenderer.invoke('logs:open'),
   openLogFile: () => ipcRenderer.invoke('logs:open-file'),
   openExternal: (url: string) => ipcRenderer.invoke('external:open', url),
+  openFile: (path: string) => ipcRenderer.invoke('file:open', path),
   checkUpdate: (): Promise<AppUpdateInfo> => ipcRenderer.invoke('update:check'),
+  downloadUpdate: (): Promise<AppUpdateInfo> => ipcRenderer.invoke('update:download'),
+  installUpdate: (): Promise<void> => ipcRenderer.invoke('update:install'),
+  removeDeployProfile: (id: string) => ipcRenderer.invoke('deploy:profile-remove', id),
+  checkDeployProfile: (id: string): Promise<DeployResult> =>
+    ipcRenderer.invoke('deploy:profile-check', id),
   finishOnboarding: () => ipcRenderer.invoke('onboarding:finish'),
   hideWindow: () => ipcRenderer.invoke('window:hide'),
   resizePopup: (height: number) => ipcRenderer.send('popup:resize', height),

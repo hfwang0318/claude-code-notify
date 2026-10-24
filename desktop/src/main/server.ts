@@ -35,6 +35,7 @@ type ApprovalResult = {
   decision: string
   index?: number
   answers?: ApprovalAnswer[]
+  reason?: string
 }
 
 interface PendingRequest {
@@ -154,12 +155,19 @@ export class NotifyServer {
     })
   }
 
-  respond(itemId: string, decision: string, extra?: { index?: number; answers?: ApprovalAnswer[] }): boolean {
+  respond(
+    itemId: string,
+    decision: string,
+    extra?: { index?: number; answers?: ApprovalAnswer[]; reason?: string }
+  ): boolean {
     const pending = this.pending.get(itemId)
     if (!pending) return false
     const resolved: ApprovalResult = { status: 'ok', decision }
     if (typeof extra?.index === 'number') resolved.index = extra.index
     if (extra?.answers?.length) resolved.answers = extra.answers
+    if (typeof extra?.reason === 'string' && extra.reason.trim()) {
+      resolved.reason = extra.reason.trim().slice(0, 2000)
+    }
     this.finish(pending, resolved)
     return true
   }

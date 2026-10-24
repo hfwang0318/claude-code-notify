@@ -67,18 +67,15 @@ PreToolUse 在每次工具调用时都触发（包括不需要审批的调用）
     PermissionRequest 等。平时保持关闭。
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
-import re
-import socket
-import sqlite3
 import sys
-import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
+from contextlib import contextmanager
 from typing import Optional
 
 CONFIG_PATH = os.path.join(
@@ -123,7 +120,7 @@ TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 # in settings.json gets the same budget added by the deploy code.
 PAUSE_BUDGET_SEC = 600
 SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
-HOOK_VERSION = "7"
+HOOK_VERSION = "8"
 CURRENT_EVENT = ""
 
 TASK_MAX_CHARS = 60
@@ -132,6 +129,8 @@ TASK_TAIL_BYTES = 256 * 1024
 
 def _clean_task_text(text: str) -> str:
     """把一条用户输入压成适合弹窗单行展示的摘要。"""
+    import re
+
     text = re.sub(
         r"<system-reminder>.*?</system-reminder>", " ", text, flags=re.S | re.I
     )
@@ -245,6 +244,8 @@ def git_branch(cwd: str) -> str:
 
 def session_environment() -> dict:
     """尽量在不依赖外部命令的情况下识别终端，便于多会话区分。"""
+    import socket
+
     term = os.environ.get("TERM", "")
     if term.lower() in ("dumb", "unknown"):
         term = ""
@@ -278,22 +279,33 @@ def note(message: str) -> None:
     print(f"[claude-approval-hook] {message}", file=sys.stderr)
 
 
+def _ensure_private_dir(path: str) -> None:
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
 def data_dir() -> str:
     """返回稳定的本机状态目录；Windows 不受 Git Bash HOME 影响。"""
     override = os.environ.get("CLAUDE_NOTIFY_DATA_DIR")
     if override:
-        os.makedirs(override, exist_ok=True)
+        _ensure_private_dir(override)
         return override
     if os.name == "nt":
         home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
     else:
         home = os.path.expanduser("~")
     path = os.path.join(home, ".claude-notify")
-    os.makedirs(path, exist_ok=True)
+    _ensure_private_dir(path)
     return path
 
 
-SYNC_DB_PATH = os.path.join(data_dir(), "approval-sync.sqlite3")
+SYNC_JOURNAL_PATH = os.path.join(data_dir(), "approval-sync.jsonl")
+SYNC_LOCK_PATH = os.path.join(data_dir(), "approval-sync.lock")
+SYNC_MAX_BYTES = 512 * 1024
+SYNC_RETENTION_SEC = 3600
 
 
 def tool_input_hash(tool_input: dict) -> str:
@@ -306,36 +318,74 @@ def tool_input_hash(tool_input: dict) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def open_sync_db() -> sqlite3.Connection:
-    connection = sqlite3.connect(SYNC_DB_PATH, timeout=5)
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS pending_tool_uses (
-            request_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            prompt_id TEXT NOT NULL,
-            tool_name TEXT NOT NULL,
-            input_hash TEXT NOT NULL,
-            tool_use_id TEXT NOT NULL,
-            transcript_path TEXT NOT NULL,
-            created_at REAL NOT NULL,
-            claimed INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS pending_tool_uses_lookup
-        ON pending_tool_uses(
-            session_id, prompt_id, tool_name, input_hash, claimed, created_at
-        )
-        """
-    )
-    return connection
+def _read_journal() -> list:
+    entries = []
+    try:
+        with open(SYNC_JOURNAL_PATH, "r", encoding="utf-8") as file:
+            for line in file:
+                try:
+                    entry = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(entry, dict) and entry.get("request_id"):
+                    entries.append(entry)
+    except OSError:
+        return []
+    return entries
+
+
+def _write_journal(entries: list) -> None:
+    temp = f"{SYNC_JOURNAL_PATH}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    with open(temp, "w", encoding="utf-8") as file:
+        for entry in entries:
+            file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(temp, 0o600)
+    except OSError:
+        pass
+    os.replace(temp, SYNC_JOURNAL_PATH)
+
+
+@contextmanager
+def journal_lock():
+    """Cross-platform exclusive lock; the journal is only touched on approval events."""
+    deadline = time.time() + 2
+    while True:
+        try:
+            fd = os.open(SYNC_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(SYNC_LOCK_PATH) > 5:
+                    os.unlink(SYNC_LOCK_PATH)
+                    continue
+            except OSError:
+                pass
+            if time.time() >= deadline:
+                yield False
+                return
+            time.sleep(0.02)
+    try:
+        yield True
+    finally:
+        try:
+            os.unlink(SYNC_LOCK_PATH)
+        except OSError:
+            pass
+
+
+def _compact_journal(entries: list) -> list:
+    cutoff = time.time() - SYNC_RETENTION_SEC
+    return [
+        entry
+        for entry in entries
+        if float(entry.get("created_at") or 0) >= cutoff
+    ]
 
 
 def record_pretooluse(hook_input: dict, tool_input: dict) -> Optional[str]:
-    """记录官方 tool_use_id；字段缺失时不伪造，直接禁用自动同步。"""
+    """Append the official tool_use_id to a tiny journal; no sqlite dependency."""
     tool_use_id = str(hook_input.get("tool_use_id") or "").strip()
     if not tool_use_id:
         note(
@@ -345,47 +395,39 @@ def record_pretooluse(hook_input: dict, tool_input: dict) -> Optional[str]:
         return None
 
     request_id = uuid.uuid4().hex
-    now = time.time()
+    entry = {
+        "request_id": request_id,
+        "session_id": str(hook_input.get("session_id") or ""),
+        "prompt_id": str(hook_input.get("prompt_id") or ""),
+        "tool_name": str(hook_input.get("tool_name") or ""),
+        "input_hash": tool_input_hash(tool_input),
+        "tool_use_id": tool_use_id,
+        "transcript_path": str(hook_input.get("transcript_path") or ""),
+        "created_at": time.time(),
+    }
     try:
-        with open_sync_db() as connection:
-            connection.execute(
-                "DELETE FROM pending_tool_uses WHERE created_at < ?",
-                (now - 3600,),
-            )
-            connection.execute(
-                """
-                INSERT INTO pending_tool_uses(
-                    request_id, session_id, prompt_id, tool_name, input_hash,
-                    tool_use_id, transcript_path, created_at, claimed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
-                """,
-                (
-                    request_id,
-                    str(hook_input.get("session_id") or ""),
-                    str(hook_input.get("prompt_id") or ""),
-                    str(hook_input.get("tool_name") or ""),
-                    tool_input_hash(tool_input),
-                    tool_use_id,
-                    str(hook_input.get("transcript_path") or ""),
-                    now,
-                ),
-            )
-    except sqlite3.Error as exc:
+        try:
+            if os.path.getsize(SYNC_JOURNAL_PATH) > SYNC_MAX_BYTES:
+                with journal_lock() as locked:
+                    if locked:
+                        _write_journal(_compact_journal(_read_journal()))
+        except OSError:
+            pass
+        fd = os.open(
+            SYNC_JOURNAL_PATH,
+            os.O_APPEND | os.O_CREAT | os.O_WRONLY,
+            0o600,
+        )
+        with os.fdopen(fd, "a", encoding="utf-8") as file:
+            file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
         note(f"保存 tool_use_id 关联失败：{exc}")
         return None
     return request_id
 
 
-def claim_pretooluse(
-    hook_input: dict,
-    tool_input: dict,
-) -> Optional[dict]:
-    """
-    原子认领最近一次匹配的 PreToolUse。
-
-    PermissionRequest 官方不含 tool_use_id，因此使用 session/prompt/tool/input
-    定位候选；claimed 保证连续相同调用不会复用同一条记录。
-    """
+def claim_pretooluse(hook_input: dict, tool_input: dict) -> Optional[dict]:
+    """Atomically claim the newest matching PreToolUse record."""
     session_id = str(hook_input.get("session_id") or "")
     prompt_id = str(hook_input.get("prompt_id") or "")
     tool_name = str(hook_input.get("tool_name") or "")
@@ -393,66 +435,62 @@ def claim_pretooluse(
     cutoff = time.time() - 120
 
     try:
-        connection = open_sync_db()
-        with connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT request_id, tool_use_id, transcript_path
-                FROM pending_tool_uses
-                WHERE session_id = ?
-                  AND tool_name = ?
-                  AND input_hash = ?
-                  AND claimed = 0
-                  AND created_at >= ?
-                  AND (prompt_id = ? OR prompt_id = '')
-                ORDER BY (prompt_id = ?) DESC, created_at DESC
-                LIMIT 1
-                """,
-                (
-                    session_id,
-                    tool_name,
-                    input_hash,
-                    cutoff,
-                    prompt_id,
-                    prompt_id,
-                ),
-            ).fetchone()
-            if row is None:
+        with journal_lock() as locked:
+            if not locked:
+                note("关联日志被占用，本次审批按 unmatched 处理")
                 return None
-            connection.execute(
-                """
-                UPDATE pending_tool_uses
-                SET claimed = 1
-                WHERE request_id = ? AND claimed = 0
-                """,
-                (row[0],),
+            entries = _read_journal()
+            candidates = [
+                entry
+                for entry in entries
+                if entry.get("session_id") == session_id
+                and entry.get("tool_name") == tool_name
+                and entry.get("input_hash") == input_hash
+                and float(entry.get("created_at") or 0) >= cutoff
+                and (
+                    entry.get("prompt_id") == prompt_id
+                    or entry.get("prompt_id") == ""
+                )
+            ]
+            if not candidates:
+                _write_journal(_compact_journal(entries))
+                return None
+            candidates.sort(
+                key=lambda entry: (
+                    entry.get("prompt_id") == prompt_id,
+                    float(entry.get("created_at") or 0),
+                ),
+                reverse=True,
             )
-        return {
-            "request_id": row[0],
-            "tool_use_id": row[1],
-            "transcript_path": row[2],
-        }
-    except sqlite3.Error as exc:
+            chosen = candidates[0]
+            remaining = [
+                entry for entry in entries if entry.get("request_id") != chosen.get("request_id")
+            ]
+            _write_journal(_compact_journal(remaining))
+            return {
+                "request_id": chosen.get("request_id"),
+                "tool_use_id": chosen.get("tool_use_id"),
+                "transcript_path": chosen.get("transcript_path"),
+            }
+    except OSError as exc:
         note(f"读取 tool_use_id 关联失败：{exc}")
         return None
-    finally:
-        try:
-            connection.close()
-        except (NameError, sqlite3.Error):
-            pass
 
 
 def delete_correlation(request_id: str) -> None:
     if not request_id:
         return
     try:
-        with open_sync_db() as connection:
-            connection.execute(
-                "DELETE FROM pending_tool_uses WHERE request_id = ?",
-                (request_id,),
-            )
-    except sqlite3.Error:
+        with journal_lock() as locked:
+            if not locked:
+                return
+            entries = _read_journal()
+            remaining = [
+                entry for entry in entries if entry.get("request_id") != request_id
+            ]
+            if len(remaining) != len(entries):
+                _write_journal(remaining)
+    except OSError:
         pass
 
 
@@ -479,9 +517,12 @@ def contains_tool_result(value, tool_use_id: str) -> bool:
 def notify_terminal_resolved(
     request_id: str,
     tool_use_id: str,
-    stop_event: threading.Event,
+    stop_event,
 ) -> None:
     """通知桌面端关闭对应弹窗；注册竞态时短暂重试。"""
+    import urllib.error
+    import urllib.request
+
     payload = json.dumps(
         {
             "request_id": request_id,
@@ -516,7 +557,7 @@ def watch_transcript(
     transcript_path: str,
     request_id: str,
     tool_use_id: str,
-    stop_event: threading.Event,
+    stop_event,
 ) -> None:
     """监听当前调用的 tool_result；终端允许和拒绝都会产生该 block。"""
     if not transcript_path or not tool_use_id:
@@ -583,7 +624,8 @@ def maybe_dump(hook_input: dict) -> None:
             "raw": hook_input,
         }
         dump_path = os.path.join(dump_dir, "hook-stdin.jsonl")
-        with open(dump_path, "a", encoding="utf-8") as file:
+        fd = os.open(dump_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as file:
             file.write(json.dumps(record, ensure_ascii=False) + "\n")
         note(f"dump → {dump_path}")
     except Exception:
@@ -695,7 +737,14 @@ def handle_result(
         else:
             emit_allow()
     elif decision == "deny":
-        emit_deny("用户在桌面通知端拒绝了此操作")
+        reason = result.get("reason")
+        message = (
+            "用户在桌面通知端拒绝了此操作。用户说明："
+            + str(reason).strip()
+            if isinstance(reason, str) and reason.strip()
+            else "用户在桌面通知端拒绝了此操作"
+        )
+        emit_deny(message[:2000])
     elif decision == "suggestion":
         # 用户点了某个“始终允许”：原样 echo 对应 suggestion
         index = result.get("index")
@@ -834,6 +883,12 @@ def main() -> None:
     if event == "PreToolUse" and tool_name != "AskUserQuestion":
         record_pretooluse(hook_input, tool_input)
         sys.exit(0)
+
+    # Heavy imports stay off the per-tool PreToolUse path; approvals are rare
+    # enough that a few extra milliseconds here are irrelevant.
+    import threading
+    import urllib.error
+    import urllib.request
 
     # ---- 场景识别：AskUserQuestion 提问 vs 普通权限审批 ----
     suggestions = hook_input.get("permission_suggestions")

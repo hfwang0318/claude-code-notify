@@ -2,10 +2,13 @@ export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
 export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
-export const HOOK_VERSION = '7'
+export const HOOK_VERSION = '8'
 /** Extra time the hook process may stay alive while a popup countdown is paused. */
 export const HOOK_PAUSE_BUDGET_SEC = 600
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
+
+export const DEFAULT_PRE_TOOL_MATCHER =
+  'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode|AskUserQuestion|mcp__.*'
 
 export const ENV_MARK_BEGIN = '# >>> claude-notify >>>'
 export const ENV_MARK_END = '# <<< claude-notify <<<'
@@ -32,6 +35,10 @@ export interface MergeOptions {
   matcher?: string
   questionEntry?: HookEntry
   stopEntry?: HookEntry
+  /** Optional SessionEnd entry; the notify script already understands the event. */
+  sessionEndEntry?: HookEntry
+  /** Restrict the PreToolUse correlation hook to tools that can need approval. */
+  preToolMatcher?: string
 }
 
 function quoteShellValue(value: string): string {
@@ -178,8 +185,22 @@ export function mergeSettingsJson(
     const preSection = Array.isArray(hooks.PreToolUse)
       ? (hooks.PreToolUse as unknown[])
       : []
-    preSection.push({ matcher: '', hooks: [questionEntry] })
+    preSection.push({
+      matcher: options.preToolMatcher ?? DEFAULT_PRE_TOOL_MATCHER,
+      hooks: [questionEntry]
+    })
     hooks.PreToolUse = preSection
+  }
+
+  if (options.sessionEndEntry) {
+    const endSection = Array.isArray(hooks.SessionEnd)
+      ? (hooks.SessionEnd as unknown[])
+      : []
+    endSection.push({
+      matcher: '',
+      hooks: [{ ...options.sessionEndEntry, timeout: 30 }]
+    })
+    hooks.SessionEnd = endSection
   }
 
   return `${JSON.stringify(settings, null, 2)}\n`

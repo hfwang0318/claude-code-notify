@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased — approval efficiency / runtime / auto-update
+
+### 新增
+
+- 相同请求合并：同会话、同工具、同参数的并行审批合并为一张卡片，一次决定应用到整组
+- 收件箱多选：批量拒绝、批量交给终端、低风险批量允许（二次确认）
+- 稍后提醒：1/5/15 分钟后重新弹出；倒计时继续，不改变超时语义
+- 拒绝理由：可填写说明并通过 hook 的 `deny.message` 回传 Claude
+- 规则有效期（1 小时/24 小时/永久）、来源绑定、规则命中写入历史；low risk 也支持“以后允许”
+- 免打扰时段；审批/等待输入/需要回答/完成通知使用不同标题；静音支持 30m/1h/4h/直到明天
+- SessionEnd 会话结束态、30 分钟自动清理、`claude --resume` 命令复制
+- ExitPlanMode 计划正文预览；MultiEdit/Write 多段 diff 与打开文件
+- 历史详情、JSON 导出、P50/P95/规则命中/风险统计
+- 部署目标删除/检查、keyPath 持久化、per-profile 模式不再被误判为 drift
+- 打包版自动更新（electron-updater）：启动检查、手动下载、重启安装；未签名 macOS 回退发布页
+
+### 性能
+
+- 审批 hook：SQLite 关联改为私有 append-only JSONL，惰性加载重模块；实测 PreToolUse 约 27–32ms（原 57–73ms）
+- PreToolUse matcher 收窄到可能触发审批的工具
+- 主窗口无待审批时停止 1s 时钟；日志/历史面板 memo；设置/部署/状态模态改为懒加载分包
+- React vendor 拆包；页面级 chunk 减少首屏主包
+
+### 修复
+
+- 更新检查从 `/releases/latest` 改为过滤 `desktop-v*`，避免把其他 Release 当成桌面更新
+- 本机/历史 JSON 写入改为临时文件 + rename；历史压缩在读取失败时不再清空文件
+- loopback 模式下状态页/接入命令显示 127.0.0.1
+- 规则前缀/通配不再命中包含 `; & | $() > <` 的复合命令
+
+### 测试
+
+- 152 个单元/集成测试；新增规则复合命令、免打扰、hook 版本一致性、hook 关联日志、历史统计、更新版本解析、SessionEnd 结束态、拒绝理由
+- 真实 Claude Code E2E（2026-10-24）：最终一轮 `stop`、`resolved`、`timeout`（含暂停/恢复）通过；`bypass`、`multi` 因当前 Claude 会话未暴露 Bash/Write/Edit 跳过（`multi` 在上一轮通过；跳过不是失败，也没有伪造 PASS）
+
 ## 0.4.0 — 2026-10-24
 
 ### 变更

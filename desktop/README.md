@@ -14,7 +14,7 @@ pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
 pnpm capture    # 离屏截图：onboarding / main / status / inbox / history / logs / settings / settings-reminder / deploy / deploy-dialog / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
-pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 132 个，以 pnpm test 输出为准）
+pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 152 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ```
 
@@ -39,6 +39,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - AskUserQuestion：单选、多选、多问题、自由输入，返回 `answers: [{question, selected, text}]`
 - 队列计数、倒计时、超时回退、Enter / Esc、动态高度、置顶与跨 Space
 - 倒计时可**暂停/继续**：问答场景打字时间不够时暂停，服务端超时和进度条一起冻结；会话条/队列显示“已暂停”
+- **相同请求合并**：同会话、同工具、同参数的并行审批显示为一张卡片，一次允许/拒绝/交给终端应用到整组
+- **稍后提醒**：1/5/15 分钟后重新弹出；倒计时继续，不改变超时语义
+- **拒绝理由**：拒绝时可填写说明，通过 hook 的 `deny.message` 回传给 Claude
 - 超时后弹窗保留“已回退终端”提示，需点“我知道了”或按 Enter/Esc 关闭
 - `bypassPermissions` / `dontAsk` 下钩子直接跳过，不产生幽灵审批；0.2.1 起启动时自动备份并升级过期 hook
 - 回合结束通过 Stop hook 发送“已完成”通知；弹窗模式显示应用内完成弹窗，通知模式发送系统通知
@@ -55,7 +58,8 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - 队列按**剩余时间**排序（EDF），不是简单 FIFO；会话条两行显示名称 + 任务摘要，可直接切换
 - 弹窗显示“N 个会话 · M 条待审批”和按会话分组的完整队列；某条排队审批剩余 ≤15s 时会提示切换
 - 键盘：`⌘/Ctrl + 1–9` 切会话，`⌘/Ctrl + ↑/↓` 切同一会话的多条请求；点击会话名可重命名
-- 主窗口待审批收件箱：按会话分组、显示任务/分支，直接允许/拒绝/交给终端、按会话批量回退、静音提醒
+- 主窗口待审批收件箱：按会话分组、显示任务/分支，直接允许/拒绝/交给终端、按会话批量回退、静音提醒；
+  支持多选批量拒绝/回退、低风险批量允许（需二次确认）、J/K/A/D/T 键盘操作
 - 超时不再只保留最后一条：`expired[]` 保留最近 20 条，弹窗和收件箱都能查看并逐条/全部确认
 - 队列准入控制：排队时间可能超过请求剩余时间时直接回退终端，避免“弹了却看不见”
 - 多服务器：部署时写入 `origin` 来源标签，弹窗/收件箱/历史/日志/系统通知/托盘都会显示来源与任务
@@ -75,6 +79,14 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
   `settings.json`；POSIX 用 shell form，Windows 用 exec form（解释器绝对路径）
 - Token 复用并持久化到 `~/.claude-notify/token`，重新生成会立即更新 HTTP 服务并提示重新部署
 
+### 自动更新
+
+- `electron-updater` + GitHub Releases（`publish` 配置在 `electron-builder.yml`）
+- 打包版启动 5 秒后检查（可在设置关闭）；发现更新后手动下载，下载完成重启安装
+- macOS 需要 Developer ID 签名/公证才能安装更新；未签名时自动回退到发布页
+- Windows NSIS 安装版支持自动更新；portable zip 不能自动更新
+- 发布流程会生成并上传 `latest-mac.yml` / `latest.yml`，macOS 同时产出 zip（更新包）
+
 ### 桌面能力
 
 - 本机/远端部署都支持弹窗与通知两种模式；切换模式会提示重新接入/部署，不再假装“立即生效”
@@ -85,8 +97,14 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - 首次使用引导；主窗口以待审批 / 历史 / 日志三个 tab 为主信息面板，标题栏只保留“状态 / 部署 / 设置 / 隐藏到托盘”；状态、部署与设置以模糊模态覆盖在主窗口上，部署页把本机接入与远程服务器部署并列呈现，状态页只保留服务、连接凭证和运行诊断，设置页新增“提醒”分类（位置 / 焦点 / 模式 / 超时）
 - 日志支持级别筛选、搜索、复制、清空、打开文件、粘底/暂停；文件超过 5MB 自动轮转
 - 崩溃/重启后提示上次未处理的审批数量；数据文件权限 600
-- 审批历史持久化到 `history.jsonl`，可按会话/项目/工具/结果筛选，导出 CSV
-- 自动规则：按会话/项目/全局匹配工具与命令，直接允许；高风险命令永不自动应用
+- 审批历史持久化到 `history.jsonl`，可按会话/项目/工具/结果筛选，导出 CSV/JSON；
+  提供允许/拒绝/超时、P50/P95 响应、规则命中和风险统计，支持详情面板与命令复制
+- 通知支持免打扰时段，审批/等待输入/需要回答/完成使用不同标题；按会话静音支持 30 分钟/1 小时/4 小时/直到明天
+- SessionEnd 会话结束态、30 分钟自动清理、`claude --resume` 命令复制
+- ExitPlanMode 计划正文预览；MultiEdit/Write 多段 diff 与“打开文件”
+- 打包版自动更新：启动检查、手动下载/重启安装；未签名 macOS 回退到发布页
+- 自动规则：按会话/项目/全局匹配工具与命令，直接允许；支持 1 小时/24 小时/永久有效期、来源绑定、
+  规则命中审计；前缀/通配规则不会命中包含 shell 连接符的复合命令；高风险命令永不自动应用
 - 日志同时写 `~/.claude-notify/claude-notify.log`
 - macOS `vibrancy: 'hud'`；Windows 11 22H2+ `backgroundMaterial: 'acrylic'` + 隐藏标题栏
 - Windows 托盘使用 `resources/app.ico`；已设置 AppUserModelID
@@ -107,7 +125,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：当前 132 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
+- `pnpm test`：当前 152 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
 - `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口）、Stop 回合通知、双会话并发、终端已处理、真实超时回退；工具未暴露时明示 SKIP，约 60–130s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)
@@ -123,9 +141,11 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 ## 尚未完成
 
 - Windows 真机安装/运行验证（Acrylic、标题栏 overlay、焦点窗口定位）
-- macOS Developer ID 签名 / 公证；Windows 代码签名
+- macOS Developer ID 签名 / 公证；Windows 代码签名（macOS 自动更新安装依赖签名）
 - 远端 SSH 部署目前由单测/人工验证覆盖；真实服务器/防火墙场景仍需人工验收
 - 非全屏的多 Space 切换人工验证（全屏覆盖已用 NSPanel 验证通过）
+- Windows NSIS 自动更新的真机升级验证；portable zip 不支持自动更新
+- 主进程 `index.ts` 的 controller 完整拆分（目前先拆出了 shared 逻辑与 auto-update/update 模块）
 
 ## 结构
 

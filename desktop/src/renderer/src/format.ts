@@ -84,3 +84,11 @@ export const RISK_LABEL: Record<string, string> = {
   medium: '需留意',
   high: '高风险'
 }
+
+/** Minutes until 08:00 tomorrow, used by the "until tomorrow" mute preset. */
+export function minutesUntilTomorrow(now = Date.now()): number {
+  const target = new Date(now)
+  target.setDate(target.getDate() + 1)
+  target.setHours(8, 0, 0, 0)
+  return Math.max(1, Math.round((target.getTime() - now) / 60_000))
+}

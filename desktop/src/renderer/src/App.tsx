@@ -1,19 +1,25 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
-import DeployPanel from './DeployPanel'
 import HistoryPanel from './HistoryPanel'
 import Inbox from './Inbox'
 import LogPanel from './LogPanel'
-import Preferences, { type SettingsSection } from './Preferences'
-import StatusDialog from './StatusDialog'
+import type { SettingsSection } from './Preferences'
 import { useAppState, useNow } from './hooks'
+
+const DeployPanel = lazy(() => import('./DeployPanel'))
+const Preferences = lazy(() => import('./Preferences'))
+const StatusDialog = lazy(() => import('./StatusDialog'))
 
 type Tab = 'inbox' | 'history' | 'logs'
 
 export default function App(): React.JSX.Element {
   const state = useAppState()
-  const now = useNow()
   const [tab, setTab] = useState<Tab>('inbox')
+  const hasCountdown = Boolean(
+    state &&
+      (state.pending.some((item) => !item.snoozedUntil) || state.expired.length > 0)
+  )
+  const now = useNow(1000, hasCountdown)
   const [focusKey, setFocusKey] = useState<string | null>(null)
   const [statusOpen, setStatusOpen] = useState(false)
   const [deployOpen, setDeployOpen] = useState(false)
@@ -69,6 +75,11 @@ export default function App(): React.JSX.Element {
       if ((event.metaKey || event.ctrlKey) && event.key === ',') {
         event.preventDefault()
         openSettings()
+        return
+      }
+      if ((event.metaKey || event.ctrlKey) && ['1', '2', '3'].includes(event.key)) {
+        event.preventDefault()
+        setTab(event.key === '1' ? 'inbox' : event.key === '2' ? 'history' : 'logs')
       }
     }
     window.addEventListener('keydown', handler)
@@ -302,32 +313,46 @@ export default function App(): React.JSX.Element {
               <kbd>Esc</kbd> 交给终端
               <kbd>1–9</kbd> 选项
             </span>
-            <span className="panel-foot-hint">⌘/Ctrl + , 打开设置</span>
+            <span className="panel-foot-hint">
+              J/K 选择 · A 允许 · D 拒绝 · T 终端 · ⌘/Ctrl + 1/2/3 切页
+            </span>
           </footer>
         </section>
       </main>
 
-      <StatusDialog
-        open={statusOpen}
-        state={state}
-        onClose={() => setStatusOpen(false)}
-        onOpenSettings={openSettings}
-      />
+      {statusOpen ? (
+        <Suspense fallback={null}>
+          <StatusDialog
+            open
+            state={state}
+            onClose={() => setStatusOpen(false)}
+            onOpenSettings={openSettings}
+          />
+        </Suspense>
+      ) : null}
 
-      <DeployPanel
-        open={deployOpen}
-        state={state}
-        onClose={() => setDeployOpen(false)}
-        onOpenSettings={openSettings}
-      />
+      {deployOpen ? (
+        <Suspense fallback={null}>
+          <DeployPanel
+            open
+            state={state}
+            onClose={() => setDeployOpen(false)}
+            onOpenSettings={openSettings}
+          />
+        </Suspense>
+      ) : null}
 
-      <Preferences
-        open={settingsOpen}
-        state={state}
-        section={settingsSection}
-        onSection={setSettingsSection}
-        onClose={() => setSettingsOpen(false)}
-      />
+      {settingsOpen ? (
+        <Suspense fallback={null}>
+          <Preferences
+            open
+            state={state}
+            section={settingsSection}
+            onSection={setSettingsSection}
+            onClose={() => setSettingsOpen(false)}
+          />
+        </Suspense>
+      ) : null}
 
       {state.toast ? (
         <div className="toast" role="status" aria-live="polite" aria-atomic="true">

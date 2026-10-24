@@ -93,6 +93,34 @@ export function describeSuggestion(suggestion: ApprovalSuggestion): string {
   return '始终允许（细则见终端）'
 }
 
+/** Suggestions that widen permissions beyond the current request. */
+export function suggestionNeedsConfirmation(suggestion: ApprovalSuggestion): boolean {
+  const type = text(suggestion.type)
+  if (type === 'setMode') {
+    const mode = text(suggestion.mode).toLowerCase()
+    return mode === 'bypasspermissions' || mode === 'dontask' || mode === 'bypass'
+  }
+  if (type === 'addRules' || type === 'replaceRules') {
+    const destination = text(suggestion.destination)
+    const behavior = text(suggestion.behavior) || 'allow'
+    return destination === 'userSettings' && behavior === 'allow'
+  }
+  return false
+}
+
+export function isKnownSuggestionType(suggestion: ApprovalSuggestion): boolean {
+  return KNOWN_SUGGESTION_TYPES.has(text(suggestion.type))
+}
+
+const KNOWN_SUGGESTION_TYPES = new Set([
+  'setMode',
+  'addRules',
+  'replaceRules',
+  'removeRules',
+  'addDirectories',
+  'removeDirectories'
+])
+
 export function unknownSuggestionTypes(
   suggestions: ApprovalSuggestion[]
 ): string[] {
