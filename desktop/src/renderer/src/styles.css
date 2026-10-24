@@ -5310,3 +5310,140 @@ kbd {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
+
+/* ---------------- layout fixes: settings + approval popup ---------------- */
+
+/* `.row` is used both in deploy dialogs (inset) and inside settings sections
+   (flush with the form grid). The global 16px padding made network/rules/about
+   controls look indented and added 15px of dead space below rule buttons. */
+.settings-body .row {
+  padding: 0;
+  align-items: center;
+}
+
+.settings-body .row .form-note {
+  flex-basis: 100%;
+  margin-top: 2px;
+  line-height: 1.45;
+}
+
+.settings-body .rule-row .row {
+  flex: none;
+  padding: 0;
+}
+
+.rule-row > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.rule-row b,
+.about-grid b {
+  overflow-wrap: anywhere;
+}
+
+.field select {
+  width: 100%;
+}
+
+/* Settings sections use flush rows; add breathing room between a form grid and
+   its action row (rule creation, network apply, about actions). */
+.settings-body .row {
+  margin-top: 10px;
+}
+
+.settings-body .rule-row .row {
+  margin-top: 0;
+}
+
+.form-note + .form-grid {
+  margin-top: 10px;
+}
+
+/* Keep the segmented bind control the same height as the adjacent input. */
+.mini-seg {
+  min-height: 34px;
+  align-items: center;
+  padding: 3px;
+}
+
+.mini-seg button {
+  height: 26px;
+}
+
+/* Popup rows must share the 23px content gutter used by the rest of the card. */
+.popup-snooze {
+  margin: 2px 23px 10px;
+  flex-wrap: wrap;
+}
+
+.popup-duplicate-note {
+  margin: 7px 23px 2px;
+}
+
+.popup-duplicate {
+  margin-left: 0;
+}
+
+.popup-remember-row {
+  margin: 8px 23px 0;
+}
+
+.popup-remember-row .popup-remember {
+  margin: 0;
+}
+
+/* A deny reason is a full-width panel, not a third button squeezed beside
+   allow/deny. Without wrapping it was rendered to the right and clipped. */
+.popup-actions {
+  flex-wrap: wrap;
+}
+
+.popup-actions.stack .deny-box {
+  grid-column: 1 / -1;
+}
+
+.deny-box {
+  flex: 1 0 100%;
+  width: 100%;
+}
+
+/* The settings modal needs a little more vertical room for the about page;
+   otherwise its last action row is clipped by the footer. */
+.settings-modal {
+  max-height: min(92vh, 900px);
+}
+
+.settings-body {
+  padding-bottom: 20px;
+}
+
+/* Rules: keep the compact expiry control on the action row instead of
+   spending a full grid row on it. */
+.rule-actions {
+  gap: 8px;
+}
+
+.rule-expiry-label {
+  color: var(--faint);
+  font-size: calc(12px * var(--font-scale));
+}
+
+.rule-expiry {
+  width: 108px;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: calc(12px * var(--font-scale));
+}
+
+.rule-list {
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}

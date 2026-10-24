@@ -681,19 +681,6 @@ export default function Preferences({
                       </select>
                     </label>
                   ) : null}
-                  <label className="field">
-                    <span>有效期</span>
-                    <select
-                      value={ruleExpiry}
-                      onChange={(event) =>
-                        setRuleExpiry(event.target.value as 'forever' | '1h' | '24h')
-                      }
-                    >
-                      <option value="forever">永久</option>
-                      <option value="24h">24 小时</option>
-                      <option value="1h">1 小时</option>
-                    </select>
-                  </label>
                   {ruleScope === 'project' ? (
                     <>
                       <label className="field">
@@ -726,7 +713,20 @@ export default function Preferences({
                     当前没有等待中的会话，无法添加会话规则；请改用项目或全局作用域。
                   </div>
                 ) : null}
-                <div className="row">
+                <div className="row rule-actions">
+                  <span className="rule-expiry-label">有效期</span>
+                  <select
+                    className="rule-expiry"
+                    value={ruleExpiry}
+                    onChange={(event) =>
+                      setRuleExpiry(event.target.value as 'forever' | '1h' | '24h')
+                    }
+                    aria-label="规则有效期"
+                  >
+                    <option value="forever">永久</option>
+                    <option value="24h">24 小时</option>
+                    <option value="1h">1 小时</option>
+                  </select>
                   <button
                     className="btn primary"
                     disabled={ruleScope === 'session' && waitingSessions.length === 0}

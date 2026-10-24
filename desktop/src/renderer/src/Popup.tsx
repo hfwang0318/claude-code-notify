@@ -224,7 +224,7 @@ export default function Popup(): React.JSX.Element | null {
     })
     observer.observe(card)
     return () => observer.disconnect()
-  }, [item?.id, detailsOpen, showQueue, popupPadding])
+  }, [item?.id, detailsOpen, showQueue, denyOpen, suggestionConfirm, popupPadding])
 
   useEffect(() => {
     const card = cardRef.current
