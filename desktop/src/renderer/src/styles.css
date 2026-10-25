@@ -858,6 +858,15 @@ kbd {
   display: none;
 }
 
+/* The completion notice is short and never scrolls. Its height is measured
+   (scrollHeight + stage padding) to size the window, so it must not depend on
+   the window height: with the shared viewport clamp, every window resize
+   re-clamps the card, the re-measured height comes back 2px shorter, and the
+   popup spirals down 2px per frame until the 300px floor. */
+.popup-card.notice-card {
+  max-height: none;
+}
+
 .popup-card::before {
   content: '';
   position: absolute;

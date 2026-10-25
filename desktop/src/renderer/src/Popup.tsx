@@ -73,15 +73,36 @@ function CompletionNotice({
     const card = cardRef.current
     if (!card) return
     const report = (): void => {
-      // The main process keeps the window hidden until this first measurement,
-      // so the previous (taller) card never flashes behind the notice. Later
-      // measurements only resize the already-visible notice.
       api.noticeReady(notice.id, Math.ceil(card.scrollHeight + padding * 2))
     }
-    report()
+    // The main process keeps the window hidden until this first measurement,
+    // so the previous (taller) card never flashes behind the notice. But the
+    // effect runs after commit, before the compositor has painted the notice:
+    // reporting here would reveal the window with the old (taller) frame still
+    // on screen. Wait two rAFs so the notice is painted before it is revealed;
+    // the timeout is a fallback for hidden windows where rAF could stall, at
+    // worst degrading to the old reveal timing. Later measurements only resize
+    // the already-visible notice.
     const observer = new ResizeObserver(report)
-    observer.observe(card)
-    return () => observer.disconnect()
+    let frame = 0
+    let timer = 0
+    const first = (): void => {
+      cancelAnimationFrame(frame)
+      window.clearTimeout(timer)
+      report()
+      // Observing fires an initial callback; starting it here keeps that
+      // callback after the reveal-triggering report instead of racing it.
+      observer.observe(card)
+    }
+    frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(first)
+    })
+    timer = window.setTimeout(first, 120)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.clearTimeout(timer)
+      observer.disconnect()
+    }
   }, [notice.id, padding])
 
   useEffect(() => {
