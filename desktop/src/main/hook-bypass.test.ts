@@ -212,7 +212,7 @@ print(json.dumps({
   "task": module.task_summary(${JSON.stringify(transcript)}),
   "intent": module.assistant_intent(${JSON.stringify(transcript)}),
   "confirmation": module._is_confirmation_prompt("好的！"),
-}, ensure_ascii=False))
+}))
 `
     try {
       const result = spawnSync(python, ['-c', script], { encoding: 'utf-8' })
@@ -235,18 +235,18 @@ print(json.dumps({
       JSON.stringify({ type: 'last-prompt', lastPrompt: '继续修复登录重定向的失败用例' })
     )
     const script = `
-import importlib.util
+import importlib.util, json
 spec = importlib.util.spec_from_file_location("notify_hook", ${JSON.stringify(
       join(process.cwd(), 'resources', 'hooks', 'claude_notify_hook.py')
     )})
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-print(module.task_summary(${JSON.stringify(transcript)}))
+print(json.dumps(module.task_summary(${JSON.stringify(transcript)})))
 `
     try {
       const result = spawnSync(python, ['-c', script], { encoding: 'utf-8' })
       expect(result.status, result.stderr).toBe(0)
-      expect(result.stdout.trim()).toBe('继续修复登录重定向的失败用例')
+      expect(JSON.parse(result.stdout.trim())).toBe('继续修复登录重定向的失败用例')
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
     }
