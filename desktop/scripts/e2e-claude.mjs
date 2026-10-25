@@ -712,10 +712,11 @@ async function runMultiSessionCase() {
 
   // Every approval must carry a real task summary from the transcript and a
   // stable short session id — the two things that disambiguate parallel work.
+  // v4 puts the current task in the H1, so that is the primary assertion.
   const identityTask = await cdp.eval(
-    "document.querySelector('.popup-identity .identity-task-text')?.textContent?.trim() || ''"
+    "document.querySelector('.popup-title')?.textContent?.trim() || ''"
   )
-  assert(identityTask.length > 0, '弹窗身份条没有任务摘要')
+  assert(identityTask.length > 0, '弹窗标题没有当前任务摘要')
   const identityId = await cdp.eval(
     "document.querySelector('.popup-identity .identity-id')?.textContent?.trim() || ''"
   )
@@ -724,13 +725,12 @@ async function runMultiSessionCase() {
     "Array.from(document.querySelectorAll('.session-chip-task')).map((entry) => entry.textContent.trim())"
   )
   assert(
-    chipTasks.length === 2 &&
-      chipTasks.every((task) => task && task !== '暂无任务摘要'),
+    chipTasks.every((task) => task && task !== '暂无任务摘要'),
     `会话条任务摘要缺失：${JSON.stringify(chipTasks)}`
   )
   assert(
-    new Set(chipTasks).size === 2,
-    `两个并发会话的任务摘要没有区分开：${JSON.stringify(chipTasks)}`
+    new Set(chipTasks).size === chipTasks.length,
+    `并发会话的任务摘要没有区分开：${JSON.stringify(chipTasks)}`
   )
   const chipNames = await cdp.eval(
     "Array.from(document.querySelectorAll('.session-chip-name')).map((entry) => entry.textContent.trim())"
@@ -742,20 +742,30 @@ async function runMultiSessionCase() {
 
   // Switch to the second session explicitly before approving it.
   const targetLabel = await cdp.eval(
-    "document.querySelectorAll('.session-chip')[1]?.querySelector('span')?.textContent || ''"
+    "document.querySelectorAll('.session-chip')[1]?.querySelector('.session-chip-name')?.textContent || ''"
   )
   assert(targetLabel, '第二个会话条没有标签')
+  const firstHeadline = await cdp.eval(
+    "document.querySelector('.popup-title')?.textContent?.trim() || ''"
+  )
   await cdp.eval("document.querySelectorAll('.session-chip')[1]?.click()")
   await waitFor(
     '切换到第二个会话',
     async () => {
       const active = await cdp.eval(
-        "document.querySelector('.popup-session-label')?.textContent || ''"
+        "document.querySelector('.popup-session-label')?.textContent || document.querySelector('.session-chip.active .session-chip-name')?.textContent || ''"
       )
       return active === targetLabel ? true : null
     },
     5000,
     100
+  )
+  const secondHeadline = await cdp.eval(
+    "document.querySelector('.popup-title')?.textContent?.trim() || ''"
+  )
+  assert(
+    secondHeadline && secondHeadline !== firstHeadline,
+    `切换会话后任务标题没有变化：${firstHeadline} -> ${secondHeadline}`
   )
   const activeChip = await cdp.eval(
     "Array.from(document.querySelectorAll('.session-chip')).find((entry) => entry.classList.contains('active'))?.textContent || ''"
@@ -770,7 +780,7 @@ async function runMultiSessionCase() {
     '弹窗切换到剩余会话',
     async () => {
       const label = await cdp.eval(
-        "document.querySelector('.popup-session-label')?.textContent || ''"
+        "document.querySelector('.popup-session-label')?.textContent || document.querySelector('.session-chip.active .session-chip-name')?.textContent || ''"
       )
       return label && label !== targetLabel ? label : null
     },

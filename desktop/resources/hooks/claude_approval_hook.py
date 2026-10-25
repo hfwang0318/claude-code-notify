@@ -72,6 +72,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -120,17 +121,16 @@ TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 # in settings.json gets the same budget added by the deploy code.
 PAUSE_BUDGET_SEC = 600
 SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
-HOOK_VERSION = "8"
+HOOK_VERSION = "9"
 CURRENT_EVENT = ""
 
 TASK_MAX_CHARS = 60
+INTENT_MAX_CHARS = 160
 TASK_TAIL_BYTES = 256 * 1024
 
 
 def _clean_task_text(text: str) -> str:
     """把一条用户输入压成适合弹窗单行展示的摘要。"""
-    import re
-
     text = re.sub(
         r"<system-reminder>.*?</system-reminder>", " ", text, flags=re.S | re.I
     )
@@ -153,10 +153,55 @@ def _is_noise_prompt(text: str) -> bool:
     )
 
 
-def task_summary(transcript_path: str) -> str:
-    """从 transcript 末尾取最近一条真实用户输入，作为“这个会话在做什么”。"""
+# "继续/ok" is a real user message, but a terrible task title: the popup would
+# say the session is working on "继续". Skip confirmation-only prompts and keep
+# scanning for the last substantive request instead.
+_CONFIRMATION_PROMPTS = {
+    "继续",
+    "继续吧",
+    "继续执行",
+    "继续做",
+    "接着",
+    "好的",
+    "好的继续",
+    "好",
+    "好继续",
+    "可以",
+    "可以继续",
+    "行",
+    "嗯",
+    "嗯嗯",
+    "对",
+    "是",
+    "是的",
+    "没问题",
+    "辛苦了",
+    "谢谢",
+    "ok",
+    "okay",
+    "sure",
+    "yes",
+    "y",
+    "go",
+    "go on",
+    "continue",
+    "proceed",
+    "run it",
+    "do it",
+    "sounds good",
+    "lgtm",
+}
+
+
+def _is_confirmation_prompt(text: str) -> bool:
+    probe = re.sub(r"[!！。,.，?？~～、；;：:]+", "", text)
+    probe = re.sub(r"\s+", " ", probe).strip().lower()
+    return probe in _CONFIRMATION_PROMPTS
+
+
+def _read_transcript_lines(transcript_path: str) -> list[str]:
     if not transcript_path:
-        return ""
+        return []
     try:
         size = os.path.getsize(transcript_path)
         with open(transcript_path, "rb") as file:
@@ -164,11 +209,16 @@ def task_summary(transcript_path: str) -> str:
                 file.seek(size - TASK_TAIL_BYTES)
             data = file.read().decode("utf-8", "ignore")
     except (OSError, ValueError):
-        return ""
+        return []
+    return data.splitlines()
+
+
+def task_summary(transcript_path: str) -> str:
+    """从 transcript 末尾取最近一条真实用户输入，作为“这个会话在做什么”。"""
     # Claude Code 会在 transcript 末尾写一条 last-prompt；它比原始 user 消息
     # 更靠近文件尾部，不会被大量 tool_result/api-request 挤出读取窗口。
     # 找不到时再退回最后一条字符串 content 的 user 消息。
-    for raw_line in reversed(data.splitlines()):
+    for raw_line in reversed(_read_transcript_lines(transcript_path)):
         try:
             entry = json.loads(raw_line)
         except (TypeError, ValueError):
@@ -177,7 +227,11 @@ def task_summary(transcript_path: str) -> str:
             continue
         if entry.get("type") == "last-prompt":
             prompt = entry.get("lastPrompt")
-            if isinstance(prompt, str) and not _is_noise_prompt(prompt):
+            if (
+                isinstance(prompt, str)
+                and not _is_noise_prompt(prompt)
+                and not _is_confirmation_prompt(prompt)
+            ):
                 cleaned = _clean_task_text(prompt)
                 if cleaned:
                     return cleaned[:TASK_MAX_CHARS]
@@ -190,11 +244,52 @@ def task_summary(transcript_path: str) -> str:
         if not isinstance(message, dict):
             continue
         content = message.get("content")
-        if not isinstance(content, str) or _is_noise_prompt(content):
+        if (
+            not isinstance(content, str)
+            or _is_noise_prompt(content)
+            or _is_confirmation_prompt(content)
+        ):
             continue
         cleaned = _clean_task_text(content)
         if cleaned:
             return cleaned[:TASK_MAX_CHARS]
+    return ""
+
+
+def assistant_intent(transcript_path: str) -> str:
+    """最近一条 assistant 文本，作为“为什么现在要做这次操作”的说明。
+
+    只看最后一条 assistant 消息：更早的 assistant 文本属于上一轮，拿来当
+    当前审批的背景会误导用户。没有文本（只有 tool_use）时返回空。
+    """
+    for raw_line in reversed(_read_transcript_lines(transcript_path)):
+        try:
+            entry = json.loads(raw_line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isMeta") or entry.get("isSidechain"):
+            continue
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        texts: list[str] = []
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                ):
+                    texts.append(block["text"])
+        cleaned = _clean_task_text(" ".join(texts))
+        if cleaned and not _is_noise_prompt(cleaned):
+            return cleaned[:INTENT_MAX_CHARS]
+        return ""
     return ""
 
 
@@ -949,6 +1044,7 @@ def main() -> None:
         "transcript_path": transcript_path,
         # 多会话区分：任务摘要 + 分支，全部在钩子侧生成，只有短文本过网。
         "task": task_summary(transcript_path),
+        "intent": assistant_intent(transcript_path),
         "branch": git_branch(cwd),
         "tool_name": tool_name,
         "tool_input": tool_input,

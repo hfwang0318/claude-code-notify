@@ -139,6 +139,8 @@ export interface ApprovalItem {
   terminal: string
   /** Task summary forwarded by the hook (last human prompt of this session). */
   task: string
+  /** Last assistant explanation before the tool call, when the hook can read it. */
+  intent?: string
   /** Git branch forwarded by the hook. */
   branch: string
   message: string
@@ -472,5 +474,7 @@ export interface DesktopApi {
   finishOnboarding(): Promise<void>
   hideWindow(): Promise<void>
   resizePopup(height: number): void
+  /** The completion notice has rendered; reveal/resize it after this measurement. */
+  noticeReady(id: string, height: number): void
   quit(): Promise<void>
 }

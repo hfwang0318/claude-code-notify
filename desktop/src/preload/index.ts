@@ -127,6 +127,8 @@ const api: DesktopApi = {
   finishOnboarding: () => ipcRenderer.invoke('onboarding:finish'),
   hideWindow: () => ipcRenderer.invoke('window:hide'),
   resizePopup: (height: number) => ipcRenderer.send('popup:resize', height),
+  noticeReady: (id: string, height: number) =>
+    ipcRenderer.send('popup:notice-ready', id, height),
   quit: () => ipcRenderer.invoke('app:quit')
 }
 

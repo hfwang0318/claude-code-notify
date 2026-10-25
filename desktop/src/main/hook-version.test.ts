@@ -14,4 +14,12 @@ describe('hook version sync', () => {
     expect(pythonVersion('claude_approval_hook.py')).toBe(HOOK_VERSION)
     expect(pythonVersion('claude_notify_hook.py')).toBe(HOOK_VERSION)
   })
+
+  it('keeps the confirmation-prompt filter in both standalone hooks', () => {
+    for (const file of ['claude_approval_hook.py', 'claude_notify_hook.py']) {
+      const text = readFileSync(join(process.cwd(), 'resources', 'hooks', file), 'utf-8')
+      expect(text, file).toContain('def _is_confirmation_prompt')
+      expect(text, file).toContain('_CONFIRMATION_PROMPTS')
+    }
+  })
 })

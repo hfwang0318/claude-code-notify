@@ -25,7 +25,7 @@ E2E PASS · all · 80.5s
 |---|---|---|
 | `bypass` | 真实 Claude 分别用 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions` 启动，执行 Bash 并写入/编辑文件（Write/Edit 可用时优先） | 全程 pending=0；Bash + 文件结果真实产生；history 没有审批记录 |
 | `stop` | 真实 Claude 完成一轮（`-p`） | 应用日志收到 `type=Stop` 通知；标题是“已完成”而不是“等待审批” |
-| `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；身份条有真实任务摘要与 4 位短码；两个会话条的任务摘要和会话名都不同；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
+| `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；H1 是当前任务摘要且切换会话后变化；身份条有 4 位短码；两个会话条名称不同；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
 | `resolved` | 一路真实 Claude 请求权限，然后模拟终端侧已处理 | 调用 `/claude-approval-resolved` 返回 `resolved`；pending 清空；history 为 `cancelled/terminal` |
 | `timeout` | 一路真实 Claude 请求权限，使用 20s hook 超时（服务端 10s），并先暂停 6s 再恢复 | 不做决定时 pending 清空；`expired` 出现；history 为 `timeout/timeout`；调用确认后 `expired` 清空 |
 
@@ -39,7 +39,7 @@ Hook 事件名回归：`PermissionRequest` 只能输出 `PermissionRequest`，`P
 
 `AskUserQuestion` 重复弹窗回归：问答由 PreToolUse 通道负责；旧部署缺少 `CLAUDE_ASKUSER_CHANNEL` 时，随后的 PermissionRequest 会再弹一次。服务端现在直接拒绝这种重复 PermissionRequest（回退终端），hook 测试也验证通道存在时不会发送。真实 `AskUserQuestion` 在当前 `-p` 模型工具集不可用，因此该路径由 self-test + hook/server 单测覆盖，而不是本脚本的真实 Claude 用例。
 
-会话身份回归（hook v7）：审批/通知钩子会从 `transcript_path` 末尾优先读取 Claude Code 写入的 `last-prompt`，找不到再回退最后一条字符串 `content` 的 user 消息；同时读取工作目录的 `.git/HEAD` 得到分支（`branch`）。`multi` 用例断言身份条有非空任务摘要、短码符合 `#xxxx`、两个并发会话的任务摘要与会话名都互不相同。旧 hook 不上报这两个字段时弹窗自动退化为“短码 + 分支/路径”，不会显示伪造摘要。
+会话身份回归（hook v9）：审批/通知钩子会从 `transcript_path` 末尾优先读取 Claude Code 写入的 `last-prompt`，找不到再回退最后一条字符串 `content` 的 user 消息；同时读取工作目录的 `.git/HEAD` 得到分支（`branch`）。v9 起会跳过“继续 / 好的 / ok”等纯确认词，避免把任务摘要污染成“继续”；审批钩子还会读取最后一条 assistant 文本作为 `intent`，在弹窗里回答“为什么现在要做这次操作”。`multi` 用例断言 H1 是非空当前任务、切换会话后 H1 变化、短码符合 `#xxxx`、两个并发会话的会话名互不相同。旧 hook 不上报 `task` / `branch` / `intent` 时弹窗自动退化为“会话名 + 分支/路径”，不会显示伪造摘要。
 
 工具暴露回归：部分路由模型只有在存在显式权限规则时才把 Bash/Write/Edit 放进工具表。E2E 的隔离 settings 因此写入 `permissions.ask: ["Bash","Write","Edit"]` —— `ask` 既能让工具可见，又会真实触发 PermissionRequest（`allow` 会直接跳过弹窗）。如果模型仍然只暴露 ToolSearch/Web，用例按 SKIP 处理而不是伪造通过。
 
@@ -61,7 +61,6 @@ hook v8 起，`PreToolUse` 关联日志从 SQLite 改为私有 JSONL，部署的
 `Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode|AskUserQuestion|mcp__.*`。
 E2E 的隔离 settings 仍显式写空 matcher，以保持旧用例的“所有工具都记录关联”行为。
 
-
 ### 0.6 多会话分诊的验证边界
 
 当前真实 Claude E2E 仍以“并发到达 → 弹窗出现 → 逐条点击允许”为主。`multi` 用例会检查会话条数量、会话名/任务摘要、点击切换、逐条允许和 history，因此覆盖了多会话身份与基本切换；`stop`、`resolved` 覆盖通知与终端侧关闭。以下行为目前由单测、`pnpm capture` 和人工验收覆盖：
@@ -77,7 +76,18 @@ E2E 的隔离 settings 仍显式写空 matcher，以保持旧用例的“所有�
 - **规则建议**：连续允许 2 次后的固化提示、仅本会话/本项目范围、匹配预览；由人工验收，规则匹配本身由 `rules.test.ts` 覆盖。
 - **通知深链/动作**：点击通知直达具体 request、macOS “打开”动作；系统通知中心行为无法在无头 E2E 中可靠断言。
 
-2026-10-25 多轮真实 Claude 结果：`stop` 每轮通过；`multi`（会话条切换、逐条允许）与 `timeout`（含暂停/恢复）在工具可见的轮次通过；`resolved` 在工具可见的轮次通过。全量 `pnpm e2e:claude` 的最后一次尝试中，`bypass` 的 `--dangerously-skip-permissions` 入口在 120s 内没有退出；同一时刻 `pending=0`、没有审批记录，且 Claude 输出 `unrecognized_model`（当次路由模型），说明是 Claude 侧的模型/权限行为，不是弹窗卡住。随后定向 `E2E_CASES=stop,multi,resolved,timeout` 通过（`stop`、`timeout` 实测，`multi`/`resolved` 因工具未暴露 SKIP）。跳过不是失败，工具暴露与路由模型会变化；不要用单轮 SKIP 或单轮 bypass 失败推断审批 UI 回归。新增行为落地时，如果改动了弹窗/收件箱的可见文本或 DOM 结构，需要同时更新 `pnpm capture` 截图和本节的覆盖说明。
+
+### 0.7 审批信息层级改动的验证边界
+
+v4 弹窗把“当前任务”提升为 H1，把命令/工具名收敛到唯一的内容块，并合并了风险、超时、稍后提醒和长期授权入口：
+
+- `multi` 用例覆盖：H1 任务摘要、切换会话后 H1 变化、会话短码、会话条名称、逐条允许。
+- `timeout` 用例覆盖：暂停/继续、超时回退；倒计时旁只保留一个剩余时间数字。
+- `pnpm capture` 覆盖：高风险单条、三会话、暂停、问答、回退、完成通知、`intent` 行、`更多授权方式` 折叠/展开态；完成通知截图同时验证“先按审批卡高度显示”的首帧跳动已消除；审批操作按钮的紧凑居中与快捷键徽标对齐也由该截图验收。
+- 单测覆盖：工具动词（Bash/Edit/Write/ExitPlanMode/MCP）、未知工具摘要、历史允许/拒绝计数、等待时长格式、纯确认词过滤、`assistant_intent`。
+- 仍需人工/截图验收：`更多授权方式` 展开后的权限建议与规则保存、长命令“展开全部”、会话条任务行在“任务=会话名”时的自动隐藏、浅色主题对比度；完成通知的首帧高度由 `popup-notice.png` 截图和 `popup:notice-ready` 逻辑覆盖，E2E `stop` 用例只断言 Stop 日志与停止流程。
+
+2026-10-25 v4 验证结果：全量 `pnpm e2e:claude` 在 `bypass` 用例被当次路由模型阻断 —— `--permission-mode bypassPermissions` 入口因 Claude 未暴露 Bash/Write/Edit 按 SKIP 处理，`--dangerously-skip-permissions` 入口在 120s 内未退出（输出 `[claude-code:unrecognized_model] {"model":"zhipu/glm-5.3[1m]"}`，非弹窗卡住）。随后分两轮定向运行覆盖其余用例：一轮 `E2E_CASES=stop,multi,resolved,timeout` 通过 `stop`/`multi`/`timeout`（`resolved` 当轮 SKIP），另一轮通过 `stop`/`resolved`/`timeout`（`multi` 当轮 SKIP），最后在最终代码上复跑 `E2E_CASES=multi`，输出 `E2E PASS · multi · 13.6s`。因此 `stop`、`multi`、`resolved`、`timeout` 均已至少一次在真实 Claude 上通过；由于工具暴露随路由模型变化，四个用例未能在同一轮全部同时出现。不要用 `bypass` 的这一条失败推断审批 UI 回归。
 
 ### 明确不覆盖
 

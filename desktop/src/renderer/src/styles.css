@@ -6059,3 +6059,459 @@ kbd {
 .session-chip-flag.remote {
   color: var(--faint);
 }
+
+/* ==========================================================================
+   v4 · approval information hierarchy
+   Task first, one action block, one risk/timeout statement, one decision dock.
+   ========================================================================== */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.popup-body {
+  max-height: 420px;
+}
+
+.popup-card:not(.notice-card) .popup-title {
+  margin: 8px 22px 0 23px;
+  font-size: calc(17.5px * var(--font-scale));
+  font-weight: 720;
+  line-height: 1.32;
+  letter-spacing: -0.01em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.popup-intent {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 6px 22px 0 23px;
+  color: var(--muted);
+  font-size: calc(11.5px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.popup-intent-label {
+  margin-right: 6px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.popup-time {
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+}
+
+/* Compact identity bar: the task is the headline above, so this only answers
+   "which session" and keeps rename / short id discoverable. */
+.popup-identity {
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 9px;
+  margin: 8px 34px 0 23px;
+  padding: 8px 10px;
+  border-radius: 11px;
+}
+
+.identity-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: calc(11px * var(--font-scale));
+}
+
+.popup-card .identity-name {
+  max-width: 320px;
+  color: var(--ink-2);
+  font-size: calc(12.5px * var(--font-scale));
+  font-weight: 650;
+}
+
+.identity-kind {
+  flex: none;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(10px * var(--font-scale));
+  letter-spacing: 0.08em;
+}
+
+.identity-meta {
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.identity-id {
+  color: var(--muted);
+  font-size: calc(10px * var(--font-scale));
+}
+
+.identity-pinned {
+  font-size: calc(10px * var(--font-scale));
+}
+
+/* Content: the only place the command/diff/plan is rendered. */
+.popup-content {
+  margin: 10px 23px 0;
+}
+
+.popup-content-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin-bottom: 5px;
+}
+
+.popup-content-label {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+  letter-spacing: 0.06em;
+}
+
+.popup-content-tool {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
+.popup-content-cwd {
+  margin-top: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(11px * var(--font-scale));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popup-command-block.expanded {
+  max-height: none;
+}
+
+.popup-command-expand {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: calc(11px * var(--font-scale));
+}
+
+.popup-tool-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.popup-summary-line {
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: calc(12.5px * var(--font-scale));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.popup-summary-empty {
+  color: var(--muted);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.risk-confirm-note {
+  flex: none;
+  margin-left: auto;
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.popup-context {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 23px 0;
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.popup-context-item + .popup-context-item::before {
+  content: '·';
+  margin-right: 8px;
+  color: var(--faint);
+}
+
+/* Long-term authorization choices stay behind one disclosure. */
+.popup-more {
+  margin: 10px 23px 0;
+}
+
+.popup-more-toggle {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: calc(11.5px * var(--font-scale));
+  cursor: pointer;
+}
+
+.popup-more-toggle:hover {
+  border-color: rgba(224, 122, 90, 0.4);
+  color: var(--ink-2);
+}
+
+.popup-more-toggle em {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  font-style: normal;
+}
+
+.popup-more-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.popup-more-note {
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.45;
+}
+
+.popup-more-panel .popup-suggestions,
+.popup-more-panel .rule-suggestion,
+.popup-more-panel .popup-remember-block {
+  margin: 0;
+}
+
+.popup-more-panel .popup-suggestions-title {
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+.popup-more-panel .rule-preview {
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+/* One snooze entry point instead of a row plus a duplicate dock button. */
+.popup-snooze-select {
+  height: 28px;
+  max-width: 82px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: calc(10.5px * var(--font-scale));
+  cursor: pointer;
+}
+
+.popup-snooze-select:hover {
+  border-color: var(--line-strong);
+  color: var(--ink-2);
+}
+
+.popup-snooze-select option {
+  background: #1b1b1f;
+  color: #f4f4f5;
+}
+
+.popup-consequence {
+  margin: 9px 23px 4px;
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.5;
+}
+
+.popup-help {
+  width: 24px;
+  height: 24px;
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.popup-position {
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+/* Session switcher: the task is the second line, the stable session name is
+   the first. This keeps the 44%-wide truncation from hiding the task. */
+.session-strip > .session-chip {
+  flex: 1 1 170px;
+  min-width: 0;
+  max-width: none;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  column-gap: 7px;
+  row-gap: 1px;
+  align-items: center;
+  height: auto;
+  padding: 7px 9px;
+}
+
+.session-strip > .session-chip .session-chip-name {
+  max-width: none;
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.session-strip > .session-chip .session-chip-task {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: none;
+  white-space: nowrap;
+  border: 0;
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+  text-overflow: ellipsis;
+}
+
+.popup-count {
+  gap: 8px;
+}
+
+:root[data-theme='light'] .popup-more-panel {
+  background: rgba(20, 20, 24, 0.03);
+}
+
+:root[data-theme='light'] .popup-tool-summary {
+  background: rgba(20, 20, 24, 0.04);
+}
+
+:root[data-theme='light'] .popup-snooze-select {
+  background: #fff;
+  color: var(--ink-2);
+}
+
+:root[data-theme='light'] .popup-snooze-select option {
+  background: #fff;
+  color: #1a1a1e;
+}
+
+.popup-content .risk-banner {
+  margin: 8px 0 0;
+}
+
+.popup-detail-tools .link {
+  color: var(--muted);
+  font-size: calc(11px * var(--font-scale));
+}
+
+.popup-detail-tools .link:hover {
+  color: var(--ink-2);
+}
+
+.popup-command-expand {
+  color: var(--muted);
+}
+
+.identity-rename-link {
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+  text-decoration: none;
+}
+
+.identity-rename-link:hover {
+  color: var(--ink-2);
+  text-decoration: underline;
+}
+
+.risk-banner {
+  flex-wrap: wrap;
+}
+
+.risk-banner span {
+  flex: 1 1 200px;
+}
+
+.session-strip > .session-chip b,
+.session-strip > .session-chip em {
+  color: var(--muted);
+  font-size: calc(10.5px * var(--font-scale));
+}
+
+/* Approval actions: keep the shortcut badge out of the label's centering and
+   stop the two buttons from stretching across the whole card. */
+.popup-actions.approval-actions.inline > .popup-btn {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 144px;
+  padding-left: 38px;
+  padding-right: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.popup-actions.approval-actions.inline > .popup-terminal {
+  margin-left: 0;
+}
+
+.popup-actions.approval-actions.stack > .popup-btn {
+  position: relative;
+  padding-left: 38px;
+  padding-right: 38px;
+}
+
+.popup-btn .option-key {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font-size: calc(10px * var(--font-scale));
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.popup-actions.approval-actions.inline {
+  justify-content: center;
+}

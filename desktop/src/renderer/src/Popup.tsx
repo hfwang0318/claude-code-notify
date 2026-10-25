@@ -7,6 +7,7 @@ import type {
 } from '../../shared/types'
 import {
   approvalCommand,
+  commandText,
   diffStat,
   extractEditDiffs,
   groupBySession,
@@ -21,9 +22,17 @@ import {
   shortSessionId,
   slackSeconds,
   sortForTriage,
+  taskTitle,
   URGENT_SECONDS
 } from '../../shared/session'
 import { estimateHandlingMs } from '../../shared/analytics'
+import {
+  decisionCounts,
+  formatWait,
+  isConfirmationOnly,
+  toolInputSummary,
+  toolWording
+} from '../../shared/presentation'
 import {
   describeSuggestion,
   isKnownSuggestionType,
@@ -63,9 +72,14 @@ function CompletionNotice({
   useEffect(() => {
     const card = cardRef.current
     if (!card) return
-    const observer = new ResizeObserver(() => {
-      api.resizePopup(Math.ceil(card.scrollHeight + padding * 2))
-    })
+    const report = (): void => {
+      // The main process keeps the window hidden until this first measurement,
+      // so the previous (taller) card never flashes behind the notice. Later
+      // measurements only resize the already-visible notice.
+      api.noticeReady(notice.id, Math.ceil(card.scrollHeight + padding * 2))
+    }
+    report()
+    const observer = new ResizeObserver(report)
     observer.observe(card)
     return () => observer.disconnect()
   }, [notice.id, padding])
@@ -265,7 +279,7 @@ function HelpPanel({
         <dt>Enter</dt>
         <dd>允许（高风险需再按一次）</dd>
         <dt>Esc</dt>
-        <dd>交给终端；输入框内先退出输入</dd>
+        <dd>在终端处理；输入框内先退出输入</dd>
         <dt>{modifier}1–9</dt>
         <dd>切换等待中的会话</dd>
         <dt>{modifier}↑/↓</dt>
@@ -273,7 +287,7 @@ function HelpPanel({
         <dt>J / K</dt>
         <dd>按处理顺序移到下一条 / 上一条</dd>
         <dt>A / D / T</dt>
-        <dd>允许 / 拒绝 / 交给终端</dd>
+        <dd>允许 / 拒绝 / 在终端处理</dd>
         <dt>P / S</dt>
         <dd>暂停或恢复本组倒计时 / 5 分钟后再提醒</dd>
         <dt>1–9</dt>
@@ -282,7 +296,7 @@ function HelpPanel({
         <dd>显示或关闭这份帮助</dd>
       </dl>
       <p className="popup-panel-hint">
-        合并的相同请求会作为一组一起决策；收起弹窗不会放弃审批，超时前 15 秒会重新出现。
+        “更多授权方式”里可以固定规则或采用 Claude Code 的权限建议；合并的相同请求会作为一组一起决策；收起弹窗不会放弃审批，超时前 15 秒会重新出现。
       </p>
     </div>
   )
@@ -296,6 +310,8 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
   const [activeQuestion, setActiveQuestion] = useState(0)
   const [showQueue, setShowQueue] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
+  const [commandExpanded, setCommandExpanded] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
   const [confirmHighRisk, setConfirmHighRisk] = useState(false)
   const [denyOpen, setDenyOpen] = useState(false)
   const [denyReason, setDenyReason] = useState('')
@@ -420,6 +436,8 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     setNameDraft('')
     setCrossConfirm(false)
     setExpandedDiffs(false)
+    setCommandExpanded(false)
+    setMoreOpen(false)
     setDrafts((current) => {
       if (current[item.id]) return current
       return { ...current, [item.id]: emptyDrafts(item) }
@@ -449,6 +467,16 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     const body = cardRef.current?.querySelector<HTMLElement>('.popup-body')
     if (body) body.scrollTop = 0
   }, [helpOpen, expiredOpen, skippedOpen])
+
+  useEffect(() => {
+    if (!moreOpen) return
+    const timer = window.setTimeout(() => {
+      cardRef.current
+        ?.querySelector<HTMLElement>('#popup-more-panel')
+        ?.scrollIntoView({ block: 'nearest' })
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [moreOpen])
 
   useEffect(
     () => () => {
@@ -488,6 +516,8 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     helpOpen,
     expandedDiffs,
     crossConfirm,
+    commandExpanded,
+    moreOpen,
     popupPadding
   ])
 
@@ -509,25 +539,44 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
   const questionMode = item?.kind === 'question' && !isExpired
   const highRisk = item?.risk.level === 'high'
   const command = item ? approvalCommand(item) : ''
+  const toolKey = (item?.tool || '').trim().toLowerCase()
+  const shellMode = toolKey === 'bash' || toolKey === 'shell'
+  const urlMode = toolKey === 'webfetch'
+  // A real command/path/URL forwarded by the tool. `approvalCommand` falls back
+  // to the hook's generic "Claude Code 想要使用工具 X" message, which must not
+  // be shown as the decision content (or turned into a remembered rule).
+  const directCommand = item && !questionMode ? commandText(item.toolInput) : ''
   const diffs = item && !questionMode ? extractEditDiffs(item.toolInput) : []
   const plan = item && item.tool === 'ExitPlanMode' ? planText(item.toolInput) : ''
+  const summaryLines =
+    item && !questionMode && !plan && diffs.length === 0 && !shellMode && !urlMode
+      ? toolInputSummary(item.toolInput)
+      : []
+  const wording = toolWording(item?.tool || '')
+  const diffSummary = diffStat(diffs)
+  const contentTitle = plan
+    ? '计划'
+    : diffs.length > 0
+      ? `${toolKey === 'write' ? '要写入' : '要修改'} ${diffSummary.files} 个文件`
+      : wording.content
+  const commandLong =
+    directCommand.length > 240 || directCommand.split('\n').length > 6
+  const showCommandBlock = Boolean(directCommand) && (shellMode || urlMode)
   const canRememberRule =
     item &&
     !questionMode &&
     !highRisk &&
-    Boolean(command) &&
-    item.tool !== 'AskUserQuestion'
+    Boolean(directCommand) &&
+    toolKey !== 'askuserquestion'
   const duplicateCount = actionItems.length
   const allPaused = pending.length > 0 && pending.every((entry) => entry.paused)
   const estimateMs = item
     ? estimateHandlingMs(state?.history || [], item.tool, item.risk.level)
     : 0
   const slack = item && !isExpired ? slackSeconds(remaining, estimateMs) : 0
-  const diffSummary = diffStat(diffs)
   const sameSessionItems = item
     ? pending.filter((entry) => entry.sessionKey === item.sessionKey)
     : []
-  const lastForSession = sameSessionItems.length === 1
   const crossGroup =
     item && !questionMode && !highRisk
       ? crossSessionClusters(pending).find((group) =>
@@ -537,14 +586,11 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
   const crossOthers = crossGroup
     ? crossGroup.items.filter((entry) => entry.sessionKey !== item?.sessionKey)
     : []
-  const allowCount = item
-    ? (state?.history || []).filter(
-        (record) =>
-          record.tool === item.tool &&
-          record.decision === 'allow' &&
-          record.command.trim() === command.trim()
-      ).length
-    : 0
+  const historyCounts =
+    item && !questionMode && directCommand
+      ? decisionCounts(state?.history || [], item.tool, directCommand)
+      : { allow: 0, deny: 0 }
+  const allowCount = historyCounts.allow
   const suggestRule = Boolean(
     canRememberRule &&
       allowCount >= 2 &&
@@ -552,7 +598,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
         (rule) =>
           rule.enabled &&
           rule.tool === item?.tool &&
-          rule.pattern.trim() === command.trim()
+          rule.pattern.trim() === directCommand.trim()
       )
   )
 
@@ -692,7 +738,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
         ? '已允许'
         : decision === 'deny'
           ? '已拒绝'
-          : '已交给终端'
+          : '已在终端处理'
     void applyDecision(
       ids,
       decision,
@@ -820,7 +866,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     void api.addRule({
       scope: ruleScope,
       tool: item.tool,
-      pattern: command,
+      pattern: directCommand,
       project: ruleScope === 'project' ? item.project : undefined,
       sessionKey: ruleScope === 'session' ? item.sessionKey : undefined,
       origin: item.origin,
@@ -835,7 +881,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
 
   const copyDetail = (): void => {
     if (!item) return
-    let text = command
+    let text = directCommand || summaryLines.join('\n') || command
     if (detailsOpen) text = prettyToolInput(item.toolInput)
     else if (plan) text = plan
     else if (diffs.length > 0) {
@@ -885,12 +931,13 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
       const typing = Boolean(
         target?.tagName === 'INPUT' ||
           target?.tagName === 'TEXTAREA' ||
+          target?.tagName === 'SELECT' ||
           target?.isContentEditable
       )
       const switchModifier = state?.app.platform === 'darwin' ? event.metaKey : event.ctrlKey
       if (event.key === 'Escape') {
         if (typing) {
-          // 输入框内的 Esc 先退出输入，不提交“交给终端”；再按一次才交给终端。
+          // 输入框内的 Esc 先退出输入，不提交“在终端处理”；再按一次才回终端。
           event.preventDefault()
           target?.blur()
           return
@@ -1146,9 +1193,44 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     .filter(Boolean)
     .join(' · ')
   const identityPath = shortPath(identity.cwd)
-  const sessionPosition = waitingSessions.findIndex(
-    (session) => session.key === item.sessionKey
+  const elapsed = formatWait(now - item.createdAt)
+  // The task is the decision context; the tool message is not. Falling back to
+  // the session title keeps old hooks (no task) readable.
+  const headline = isExpired
+    ? `${state.expired.length} 条审批已回退终端`
+    : identity.task.trim() && !isConfirmationOnly(identity.task)
+      ? identity.task
+      : identity.title ||
+        item.message ||
+        (questionMode ? item.questions[0]?.question : '') ||
+        'Claude 请求执行权限'
+  const intent = (item.intent || '').trim()
+  const showIntent = Boolean(
+    intent &&
+      !isConfirmationOnly(intent) &&
+      intent !== headline &&
+      intent !== directCommand &&
+      !plan &&
+      !isExpired
   )
+  const showSessionName = identity.title.trim() !== headline.trim()
+  const contextParts: string[] = []
+  if (duplicateCount > 1) {
+    contextParts.push(`相同请求 ×${duplicateCount}，一次决策处理全部`)
+  }
+  if (historyCounts.allow > 0 || historyCounts.deny > 0) {
+    const counts: string[] = []
+    if (historyCounts.allow > 0) counts.push(`允许 ${historyCounts.allow} 次`)
+    if (historyCounts.deny > 0) counts.push(`拒绝 ${historyCounts.deny} 次`)
+    contextParts.push(`此前${counts.join('、')}`)
+  }
+  const moreCount = item.suggestions.length + (canRememberRule ? 1 : 0)
+  const hasMoreAuth = !questionMode && moreCount > 0
+  const allowLabel =
+    highRisk && confirmHighRisk ? '仍然允许' : wording.allow
+  const requestSummary = questionMode
+    ? `需要回答 ${item.questions.length} 个问题`
+    : `需要授权${highRisk ? '，高风险' : ''}：${contentTitle} ${item.tool}`
   const requestPosition = sameSessionItems.findIndex((entry) => entry.id === item.id)
   const switchModifierLabel = state.app.platform === 'darwin' ? '⌘' : 'Ctrl+'
   const queueText = queueQuery.trim().toLowerCase()
@@ -1212,6 +1294,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="popup-title"
+        aria-describedby="popup-request-summary"
         tabIndex={-1}
       >
         <div className="popup-drag" aria-hidden="true">
@@ -1236,7 +1319,9 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                 ? '需要回答'
                 : '需要授权'}
           </span>
-          <span className="popup-time">{formatTime(item.createdAt)}</span>
+          <span className="popup-time" title={`创建于 ${formatTime(item.createdAt)}`}>
+            {isExpired ? formatTime(item.createdAt) : `已等待 ${elapsed}`}
+          </span>
           <button
             className="popup-help"
             aria-label="快捷键帮助"
@@ -1290,6 +1375,12 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                       : session.origin !== '本机'
                         ? '⤴'
                         : ''
+                  const chipTask =
+                    session.task &&
+                    !isConfirmationOnly(session.task) &&
+                    taskTitle(session.task) !== session.title
+                      ? session.task
+                      : ''
                   return (
                     <button
                       key={session.key}
@@ -1319,10 +1410,12 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                           {flag}
                         </span>
                       ) : null}
-                      <span className="session-chip-task">
-                        {session.hasHigh ? '⚠ ' : session.hasQuestion ? '? ' : ''}
-                        {session.task || '暂无任务摘要'}
-                      </span>
+                      {chipTask ? (
+                        <span className="session-chip-task">
+                          {session.hasHigh ? '⚠ ' : session.hasQuestion ? '? ' : ''}
+                          {chipTask}
+                        </span>
+                      ) : null}
                       {session.count > 1 ? <b>{session.count}</b> : null}
                       <em className={session.paused ? 'paused' : ''}>
                         {session.paused ? '已暂停' : `${shortcut} · ${left}s`}
@@ -1343,6 +1436,20 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
             ) : null}
 
         <div className="popup-body">
+        <h1 className="popup-title" id="popup-title">
+          {isExpired
+            ? `${state.expired.length} 条审批已回退终端`
+            : headline}
+        </h1>
+        <p id="popup-request-summary" className="sr-only">
+          {requestSummary}
+        </p>
+        {!isExpired && showIntent ? (
+          <p className="popup-intent" title={intent}>
+            <span className="popup-intent-label">Claude</span>
+            {intent}
+          </p>
+        ) : null}
         {!isExpired ? (
           <div
             className="popup-identity"
@@ -1353,6 +1460,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
             </span>
             <div className="identity-body">
               <div className="identity-line">
+                <span className="identity-kind">会话</span>
                 {renaming ? (
                   <input
                     className="identity-rename"
@@ -1374,7 +1482,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                       }
                     }}
                   />
-                ) : (
+                ) : showSessionName ? (
                   <button
                     className="popup-session-label identity-name"
                     title={`${identity.cwd || identity.title} · 点击重命名`}
@@ -1382,50 +1490,38 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                   >
                     {identity.title}
                   </button>
-                )}
+                ) : null}
                 {identity.shortId ? (
                   <span className="identity-id">#{identity.shortId}</span>
+                ) : null}
+                {!renaming && !showSessionName ? (
+                  <button
+                    className="link identity-rename-link"
+                    onClick={startRename}
+                    title="重命名这个会话"
+                  >
+                    重命名
+                  </button>
                 ) : null}
                 {identity.customLabel ? <span className="identity-pinned">已命名</span> : null}
                 {muted ? <span className="popup-muted">静音提醒</span> : null}
               </div>
               <div className="identity-meta">
                 <span>{sourceLine || identity.origin}</span>
-                {identityPath ? (
+                {questionMode && identityPath ? (
                   <span className="identity-path" title={identity.cwd}>
                     · {identityPath}
                   </span>
                 ) : null}
               </div>
-              {identity.task ? (
-                <div
-                  className={`identity-task ${
-                    identity.task === identity.title ? 'duplicate' : ''
-                  }`}
-                  title={identity.task}
-                >
-                  <span className="identity-task-label">任务</span>
-                  <span className="identity-task-text">{identity.task}</span>
-                </div>
-              ) : null}
             </div>
           </div>
         ) : null}
-
-        <h1 className="popup-title" id="popup-title">
-          {isExpired
-            ? `${state.expired.length} 条审批已回退终端`
-            : item.message || (questionMode ? 'Claude 想问你一个问题' : 'Claude 请求执行权限')}
-        </h1>
-        <p className="popup-sub">
-          {isExpired
-            ? '超时未处理，这些审批已由终端继续；桌面端不会再次提交决定。'
-            : questionMode
-              ? '选择答案后点“确认回答”；也可以交给终端继续回答。'
-              : highRisk
-                ? '高风险操作：请先确认完整命令，再决定是否允许。'
-                : '超时未处理将自动返回终端；回退不等于自动通过。'}
-        </p>
+        {isExpired ? (
+          <p className="popup-sub">
+            超时未处理，这些审批已由终端继续；桌面端不会再次提交决定。
+          </p>
+        ) : null}
 
         {helpOpen ? (
           <HelpPanel
@@ -1493,31 +1589,6 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
               </div>
             ) : null}
 
-            <div className="popup-request-row">
-              <span className="popup-chip">工具 · {item.tool}</span>
-              {item.risk.level !== 'low' ? (
-                <span className={`risk-chip risk-${item.risk.level}`}>
-                  {riskLabel(item.risk.level)}
-                </span>
-              ) : null}
-              <span className="popup-request-kind">
-                {item.kind === 'question' ? '问答请求' : '权限请求'}
-              </span>
-              {duplicateCount > 1 ? (
-                <span className="popup-duplicate">相同请求 ×{duplicateCount}</span>
-              ) : null}
-              <span
-                className={`slack-chip ${slack <= 0 ? 'urgent' : slack <= 10 ? 'tight' : ''}`}
-                title={`剩余 ${remaining}s，按历史估算处理约 ${Math.round(estimateMs / 1000)}s`}
-              >
-                余量 {slack}s
-              </span>
-            </div>
-            {duplicateCount > 1 ? (
-              <div className="popup-duplicate-note">
-                这些请求的工具和参数完全一致；本次允许/拒绝/交给终端会同时处理 {duplicateCount} 条。
-              </div>
-            ) : null}
             {crossOthers.length > 0 ? (
               <div className="popup-cross">
                 <span>
@@ -1659,15 +1730,18 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                 })}
               </div>
             ) : (
-              <div className="popup-detail-block">
+              <div className="popup-content">
+                <div className="popup-content-head">
+                  <span className="popup-content-label">{contentTitle}</span>
+                  <span className="popup-content-tool" title={item.tool}>
+                    {item.tool}
+                  </span>
+                  {item.risk.level === 'medium' ? (
+                    <span className="risk-chip risk-medium">{riskLabel('medium')}</span>
+                  ) : null}
+                </div>
                 {plan ? (
                   <div className="popup-plan">
-                    <div className="popup-diff-head">
-                      <span className="popup-diff-path">计划内容</span>
-                      <button className="link" onClick={copyDetail}>
-                        {copied ? '已复制' : '复制计划'}
-                      </button>
-                    </div>
                     <pre>{plan}</pre>
                   </div>
                 ) : null}
@@ -1675,7 +1749,6 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                   <div className="popup-diffs">
                     <div className="diff-summary">
                       <span>
-                        {diffSummary.files} 个文件 ·{' '}
                         <b className="diff-add">+{diffSummary.additions}</b> /{' '}
                         <b className="diff-del">−{diffSummary.deletions}</b>
                       </span>
@@ -1736,24 +1809,72 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                       )
                     })}
                   </div>
-                ) : plan ? null : (
-                  <pre className="popup-command-block" title={command}>
-                    {riskSegments(command).map((segment, index) =>
-                      segment.danger ? (
-                        <mark key={index}>{segment.text}</mark>
-                      ) : (
-                        <span key={index}>{segment.text}</span>
-                      )
+                ) : showCommandBlock ? (
+                  <>
+                    <pre
+                      className={`popup-command-block ${
+                        commandExpanded ? 'expanded' : ''
+                      }`}
+                      title={directCommand}
+                    >
+                      {riskSegments(directCommand).map((segment, index) =>
+                        segment.danger ? (
+                          <mark key={index}>{segment.text}</mark>
+                        ) : (
+                          <span key={index}>{segment.text}</span>
+                        )
+                      )}
+                    </pre>
+                    {commandLong ? (
+                      <button
+                        className="link popup-command-expand"
+                        onClick={() => setCommandExpanded((value) => !value)}
+                        aria-expanded={commandExpanded}
+                      >
+                        {commandExpanded
+                          ? '收起命令'
+                          : `展开全部命令（${directCommand.split('\n').length || 1} 行）`}
+                      </button>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="popup-tool-summary">
+                    {summaryLines.length > 0 ? (
+                      summaryLines.map((line, index) => (
+                        <div className="popup-summary-line" key={index}>
+                          {line}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="popup-summary-empty">
+                        该工具没有可摘要的参数，展开原始参数查看。
+                      </div>
                     )}
-                  </pre>
+                  </div>
                 )}
+                {identity.cwd ? (
+                  <div className="popup-content-cwd" title={identity.cwd}>
+                    {shellMode
+                      ? `在 ${identityPath} 执行`
+                      : urlMode
+                        ? `从 ${identityPath} 发起`
+                        : `工作目录 ${identityPath}`}
+                  </div>
+                ) : null}
+                {highRisk ? (
+                  <div className="risk-banner">
+                    <b>{riskLabel(item.risk.level)}</b>
+                    <span>{item.risk.reasons.join(' · ') || '此操作可能造成不可逆影响'}</span>
+                    <em className="risk-confirm-note">需二次确认</em>
+                  </div>
+                ) : null}
                 <div className="popup-detail-tools">
                   <button
                     className="link"
                     onClick={() => setDetailsOpen((value) => !value)}
                     aria-expanded={detailsOpen}
                   >
-                    {detailsOpen ? '收起完整参数' : '查看完整参数'}
+                    {detailsOpen ? '收起原始参数' : '查看原始参数'}
                   </button>
                   <button className="link" onClick={copyDetail}>
                     {copied ? '已复制' : '复制'}
@@ -1765,10 +1886,13 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
               </div>
             )}
 
-            {highRisk ? (
-              <div className="risk-banner">
-                <b>{riskLabel(item.risk.level)}</b>
-                <span>{item.risk.reasons.join(' · ') || '此操作可能造成不可逆影响'}</span>
+            {contextParts.length > 0 ? (
+              <div className="popup-context">
+                {contextParts.map((part) => (
+                  <span className="popup-context-item" key={part}>
+                    {part}
+                  </span>
+                ))}
               </div>
             ) : null}
             {item.correlation === 'unmatched' ? (
@@ -1777,169 +1901,162 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
               </div>
             ) : null}
 
-            {!isExpired ? (
-              <div className="popup-snooze">
-                <span>稍后提醒</span>
-                {[1, 5, 15].map((minutes) => {
-                  const tooLate = remaining <= minutes * 60
-                  return (
-                    <button
-                      key={minutes}
-                      className="link"
-                      disabled={tooLate}
-                      onClick={() => snoozeGroup(minutes)}
-                      title={
-                        tooLate
-                          ? `剩余 ${remaining}s，此时稍后会在超时后才提醒`
-                          : `${minutes} 分钟后重新弹出，倒计时继续`
-                      }
-                    >
-                      {minutes} 分钟
-                    </button>
-                  )
-                })}
-              </div>
-            ) : null}
-
-            {item.suggestions.length > 0 ? (
-              <div className="popup-suggestions">
-                <div className="popup-suggestions-title">权限建议</div>
-                {item.suggestions.map((suggestion, index) => {
-                  const known = isKnownSuggestionType(suggestion)
-                  const dangerous = suggestionNeedsConfirmation(suggestion)
-                  const confirming = suggestionConfirm === index
-                  return (
-                    <button
-                      key={`${describeSuggestion(suggestion)}-${index}`}
-                      className={`popup-btn suggestion ${confirming ? 'confirm' : ''}`}
-                      disabled={!known || busy}
-                      title={
-                        known
-                          ? JSON.stringify(suggestion, null, 2)
-                          : '未知建议类型，请交给终端处理'
-                      }
-                      onClick={() => {
-                        if (!known) return
-                        if (dangerous && !confirming) {
-                          setSuggestionConfirm(index)
-                          return
-                        }
-                        setSuggestionConfirm(null)
-                        void applyDecision(
-                          [item.id],
-                          'suggestion',
-                          { index },
-                          `已应用权限建议 · ${item.tool}`
-                        )
-                      }}
-                    >
-                      {confirming ? '再点一次确认：' : ''}
-                      {describeSuggestion(suggestion)}
-                      {!known ? '（未知类型，请交给终端）' : ''}
-                    </button>
-                  )
-                })}
-              </div>
-            ) : null}
-
-            {suggestRule ? (
-              <div className="rule-suggestion">
-                <span>这条命令已连续允许 {allowCount} 次，可以固化成规则。</span>
-                <button className="link" onClick={rememberRule}>
-                  使用当前设置保存
+            {hasMoreAuth ? (
+              <div className="popup-more">
+                <button
+                  type="button"
+                  className="popup-more-toggle"
+                  aria-expanded={moreOpen}
+                  aria-controls="popup-more-panel"
+                  onClick={() => setMoreOpen((value) => !value)}
+                >
+                  <span>更多授权方式</span>
+                  <em>{moreOpen ? '收起' : `${moreCount} 项`}</em>
                 </button>
+                {moreOpen ? (
+                  <div className="popup-more-panel" id="popup-more-panel">
+                    <div className="popup-more-note">
+                      这些选项会改变以后的授权范围，按需使用。
+                    </div>
+                    {item.suggestions.length > 0 ? (
+                      <div className="popup-suggestions">
+                        <div className="popup-suggestions-title">权限建议</div>
+                        {item.suggestions.map((suggestion, index) => {
+                          const known = isKnownSuggestionType(suggestion)
+                          const dangerous = suggestionNeedsConfirmation(suggestion)
+                          const confirming = suggestionConfirm === index
+                          return (
+                            <button
+                              key={`${describeSuggestion(suggestion)}-${index}`}
+                              className={`popup-btn suggestion ${
+                                confirming ? 'confirm' : ''
+                              }`}
+                              disabled={!known || busy}
+                              title={
+                                known
+                                  ? JSON.stringify(suggestion, null, 2)
+                                  : '未知建议类型，请在终端处理'
+                              }
+                              onClick={() => {
+                                if (!known) return
+                                if (dangerous && !confirming) {
+                                  setSuggestionConfirm(index)
+                                  return
+                                }
+                                setSuggestionConfirm(null)
+                                void applyDecision(
+                                  [item.id],
+                                  'suggestion',
+                                  { index },
+                                  `已应用权限建议 · ${item.tool}`
+                                )
+                              }}
+                            >
+                              {confirming ? '再点一次确认：' : ''}
+                              {describeSuggestion(suggestion)}
+                              {!known ? '（未知类型，请在终端处理）' : ''}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ) : null}
+
+                    {suggestRule ? (
+                      <div className="rule-suggestion">
+                        <span>可以把这条命令固化成规则，下次不再询问。</span>
+                        <button className="link" onClick={rememberRule}>
+                          使用当前设置保存
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {canRememberRule ? (
+                      <div className="popup-remember-block">
+                        <div className="popup-remember-row">
+                          <select
+                            className="popup-rule-ttl"
+                            value={ruleScope}
+                            onChange={(event) =>
+                              setRuleScope(event.target.value as 'session' | 'project')
+                            }
+                            aria-label="规则范围"
+                            title="规则范围"
+                          >
+                            <option value="session">仅本会话</option>
+                            <option value="project">本项目</option>
+                          </select>
+                          <select
+                            className="popup-rule-ttl"
+                            value={ruleTtl}
+                            onChange={(event) =>
+                              setRuleTtl(event.target.value as '1h' | '24h' | 'forever')
+                            }
+                            aria-label="规则有效期"
+                            title="规则有效期"
+                          >
+                            <option value="1h">1 小时</option>
+                            <option value="24h">24 小时</option>
+                            <option value="forever">永久</option>
+                          </select>
+                          <button
+                            className="popup-remember"
+                            disabled={busy}
+                            onClick={rememberRule}
+                          >
+                            记住此命令
+                          </button>
+                        </div>
+                        <div className="rule-preview">
+                          匹配：{item.tool} · 精确“{directCommand.slice(0, 48)}” ·{' '}
+                          {ruleScope === 'session'
+                            ? `仅 ${identityTitle}`
+                            : `项目 ${item.project}`}{' '}
+                          · {ruleScope === 'session' ? item.origin : identity.origin} ·{' '}
+                          {ruleTtl === '1h'
+                            ? '1 小时'
+                            : ruleTtl === '24h'
+                              ? '24 小时'
+                              : '永久'}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
 
-            {canRememberRule ? (
-              <div className="popup-remember-block">
-                <div className="popup-remember-row">
-                  <select
-                    className="popup-rule-ttl"
-                    value={ruleScope}
-                    onChange={(event) =>
-                      setRuleScope(event.target.value as 'session' | 'project')
-                    }
-                    aria-label="规则范围"
-                    title="规则范围"
+            {waitingSessions.length > 1 ||
+            pending.length > 1 ||
+            snoozedCount > 0 ||
+            showQueue ? (
+              <div className="popup-queue-row">
+                {sameSessionItems.length > 1 ? (
+                  <span className="popup-position">
+                    本会话 {requestPosition + 1}/{sameSessionItems.length}
+                  </span>
+                ) : null}
+                {pending.length > 1 || snoozedCount > 0 || showQueue ? (
+                  <button
+                    className="popup-queue-toggle"
+                    onClick={() => setShowQueue((value) => !value)}
+                    aria-expanded={showQueue}
+                    title={`${switchModifierLabel}1–9 切换会话；${switchModifierLabel}↑/↓ 切换本会话请求`}
                   >
-                    <option value="session">仅本会话</option>
-                    <option value="project">本项目</option>
-                  </select>
-                  <select
-                    className="popup-rule-ttl"
-                    value={ruleTtl}
-                    onChange={(event) =>
-                      setRuleTtl(event.target.value as '1h' | '24h' | 'forever')
-                    }
-                    aria-label="规则有效期"
-                    title="规则有效期"
-                  >
-                    <option value="1h">1 小时</option>
-                    <option value="24h">24 小时</option>
-                    <option value="forever">永久</option>
-                  </select>
-                  <button className="popup-remember" disabled={busy} onClick={rememberRule}>
-                    记住此命令
+                    {waitingSessions.length} 个会话 · {pending.length} 条待审批
+                    {snoozedCount > 0 ? ` · ${snoozedCount} 条稍后` : ''}
                   </button>
-                </div>
-                <div className="rule-preview">
-                  匹配：{item.tool} · 精确“{command.slice(0, 48)}” ·{' '}
-                  {ruleScope === 'session'
-                    ? `仅 ${identityTitle}`
-                    : `项目 ${item.project}`}{' '}
-                  · {ruleScope === 'session' ? item.origin : identity.origin} ·{' '}
-                  {ruleTtl === '1h' ? '1 小时' : ruleTtl === '24h' ? '24 小时' : '永久'}
-                </div>
+                ) : null}
+                {pending.length > 1 ? (
+                  <button
+                    className="link"
+                    onClick={() => void api.pauseAll(!allPaused)}
+                    title="暂停/继续所有可见倒计时（hook 最长约多等 10 分钟）"
+                  >
+                    {allPaused ? '继续全部' : '暂停全部'}
+                  </button>
+                ) : null}
               </div>
             ) : null}
-
-            <div className="popup-queue-row">
-              {waitingSessions.length > 1 ? (
-                <span className="popup-position">
-                  会话 {sessionPosition + 1}/{waitingSessions.length}
-                  {sameSessionItems.length > 1
-                    ? ` · 本会话 ${requestPosition + 1}/${sameSessionItems.length}`
-                    : ''}
-                </span>
-              ) : null}
-              {pending.length > 1 || snoozedCount > 0 ? (
-                <button
-                  className="popup-queue-toggle"
-                  onClick={() => setShowQueue((value) => !value)}
-                  aria-expanded={showQueue}
-                  title={`${switchModifierLabel}1–9 切换会话；${switchModifierLabel}↑/↓ 切换本会话请求`}
-                >
-                  {waitingSessions.length} 个会话 · {pending.length} 条待审批
-                  {snoozedCount > 0 ? ` · ${snoozedCount} 条稍后` : ''}
-                  {queue.length > 0 ? ` · 还有 ${queue.length} 条` : ''}
-                </button>
-              ) : null}
-              {pending.length > 1 ? (
-                <button
-                  className="link"
-                  onClick={() => void api.pauseAll(!allPaused)}
-                  title="暂停/继续所有可见倒计时（hook 最长约多等 10 分钟）"
-                >
-                  {allPaused ? '继续全部' : '暂停全部'}
-                </button>
-              ) : null}
-              <span className="popup-foot-hint">
-                {waitingSessions.length > 1 ? `${switchModifierLabel}1–9 切会话 · ` : ''}
-                {questionMode
-                  ? '1–9 答当前题 · Enter 下一题 · Esc 交给终端'
-                  : highRisk
-                    ? 'Enter 二次确认 · Esc 交给终端'
-                    : 'Enter 允许 · Esc 交给终端'}
-                <button
-                  className="link help-trigger"
-                  aria-label="快捷键帮助"
-                  onClick={() => setHelpOpen(true)}
-                >
-                  ?
-                </button>
-              </span>
-            </div>
 
             {showQueue ? (
               <div className="queue-panel">
@@ -2050,7 +2167,9 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                     ? 'urgent'
                     : ''
                 } ${item.paused ? 'paused' : ''}`}
-                title={`按历史估算处理约 ${Math.round(estimateMs / 1000)}s`}
+                title={`剩余 ${remaining}s · 按你的历史，处理这类请求约需 ${Math.round(
+                  estimateMs / 1000
+                )}s`}
               >
                 {item.paused ? `已暂停 · ${remaining}s` : `${remaining}s`}
               </b>
@@ -2067,19 +2186,28 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
               >
                 {item.paused ? '继续' : '暂停'}
               </button>
-              <button
-                type="button"
-                className="popup-pause popup-snooze-quick"
-                disabled={remaining <= 300}
-                onClick={() => snoozeGroup(5)}
-                title={
-                  remaining <= 300
-                    ? '剩余时间不足 5 分钟，稍后提醒会直接超时'
-                    : '5 分钟后再提醒，倒计时继续'
-                }
+              <select
+                className="popup-snooze-select"
+                defaultValue=""
+                aria-label="稍后提醒"
+                title="稍后提醒（倒计时继续）"
+                onChange={(event) => {
+                  const value = event.currentTarget.value
+                  event.currentTarget.value = ''
+                  if (value) snoozeGroup(Number(value))
+                }}
               >
-                稍后 5m
-              </button>
+                <option value="">稍后…</option>
+                {[1, 5, 15].map((minutes) => (
+                  <option
+                    key={minutes}
+                    value={minutes}
+                    disabled={remaining <= minutes * 60}
+                  >
+                    {minutes} 分钟
+                  </option>
+                ))}
+              </select>
             </div>
 
             {questionMode ? (
@@ -2099,16 +2227,18 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                   确认回答
                 </button>
                 <button className="popup-terminal" disabled={busy} onClick={ask}>
-                  交给终端
+                  在终端处理
                 </button>
               </div>
             ) : (
-              <div className={`popup-actions ${item.options.length <= 2 ? 'inline' : 'stack'}`}>
-                {highRisk ? (
-                  <div className={`confirm-bar ${confirmHighRisk ? 'active' : ''}`}>
-                    {confirmHighRisk
-                      ? '高风险操作，再按一次 Enter 或点击“仍然允许”确认'
-                      : '此操作风险较高，需要二次确认'}
+              <div
+                className={`popup-actions approval-actions ${
+                  item.options.length <= 2 ? 'inline' : 'stack'
+                }`}
+              >
+                {highRisk && confirmHighRisk ? (
+                  <div className="confirm-bar active">
+                    再按一次 Enter 或点击“仍然允许”确认
                   </div>
                 ) : null}
                 {item.options.map((option, index) => (
@@ -2127,15 +2257,11 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                     }
                   >
                     <kbd className="option-key">{index + 1}</kbd>
-                    {option.id === 'allow' && confirmHighRisk
-                      ? '仍然允许'
-                      : option.id === 'allow' && item.tool === 'ExitPlanMode'
-                        ? '批准计划并退出计划模式'
-                        : option.label}
+                    {option.id === 'allow' ? allowLabel : option.label}
                   </button>
                 ))}
                 <button className="popup-terminal" disabled={busy} onClick={ask}>
-                  交给终端
+                  在终端处理
                 </button>
                 {denyOpen ? (
                   <div className="deny-box">
@@ -2185,23 +2311,17 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
             )}
             <div className="popup-consequence">
               {questionMode
-                ? '提交后答案会回传给 Claude；交给终端则继续在终端回答。'
-                : `${lastForSession ? '这是该会话最后一条，允许后它会继续。' : '本次决策只影响当前这组请求。'} 回退或超时会在终端重新询问，不等于自动通过。`}
+                ? '提交后答案会回传给 Claude；在终端处理则继续在终端回答。'
+                : highRisk
+                  ? '允许后会立即执行；超时或在终端处理会回到终端等待，不会自动通过。'
+                  : '允许后 Claude 会继续；超时或在终端处理会回到终端等待，不会自动通过。'}
             </div>
             </div>
         ) : null}
 
         {isExpired ? (
           <div className="popup-foot">Enter / Esc 关闭提示</div>
-        ) : (
-          <div className="popup-foot">
-            {muted ? '该会话已静音提醒 · ' : ''}
-            {item.paused
-              ? '倒计时已暂停 · 点“继续”恢复自动回退（最长约 10 分钟）'
-              : '超时自动回退终端 · 回退后任务会停在终端等待'}
-            {snoozedCount > 0 ? ` · 另有 ${snoozedCount} 条稍后` : ''}
-          </div>
-        )}
+        ) : null}
       </section>
     </div>
   )

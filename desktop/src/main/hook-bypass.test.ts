@@ -177,4 +177,78 @@ module.emit_allow()
     expect(result.requests).toBe(1)
     expect(result.stdout).toContain('allow')
   })
+
+  maybe('skips confirmation-only prompts and reads the last assistant intent', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'claude-notify-task-'))
+    const transcript = join(dataDir, 'transcript.jsonl')
+    writeFileSync(
+      transcript,
+      [
+        JSON.stringify({
+          type: 'user',
+          message: { content: 'Fix the login redirect regression.' }
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: 'I will inspect the redirect handler first.' }]
+          }
+        }),
+        JSON.stringify({ type: 'last-prompt', lastPrompt: '继续' }),
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            content: [{ type: 'text', text: '我准备修改重定向处理，先确认当前实现。' }]
+          }
+        })
+      ].join('\n')
+    )
+    const script = `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("approval_hook", ${JSON.stringify(hookPath)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps({
+  "task": module.task_summary(${JSON.stringify(transcript)}),
+  "intent": module.assistant_intent(${JSON.stringify(transcript)}),
+  "confirmation": module._is_confirmation_prompt("好的！"),
+}, ensure_ascii=False))
+`
+    try {
+      const result = spawnSync(python, ['-c', script], { encoding: 'utf-8' })
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout.trim())).toEqual({
+        task: 'Fix the login redirect regression.',
+        intent: '我准备修改重定向处理，先确认当前实现。',
+        confirmation: true
+      })
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  maybe('keeps a substantive prompt that merely starts with 继续', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'claude-notify-task-'))
+    const transcript = join(dataDir, 'transcript.jsonl')
+    writeFileSync(
+      transcript,
+      JSON.stringify({ type: 'last-prompt', lastPrompt: '继续修复登录重定向的失败用例' })
+    )
+    const script = `
+import importlib.util
+spec = importlib.util.spec_from_file_location("notify_hook", ${JSON.stringify(
+      join(process.cwd(), 'resources', 'hooks', 'claude_notify_hook.py')
+    )})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module.task_summary(${JSON.stringify(transcript)}))
+`
+    try {
+      const result = spawnSync(python, ['-c', script], { encoding: 'utf-8' })
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout.trim()).toBe('继续修复登录重定向的失败用例')
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true })
+    }
+  })
 })
