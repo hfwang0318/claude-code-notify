@@ -42,12 +42,12 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-HOOK_VERSION = "8"
+HOOK_VERSION = "9"
 TASK_MAX_CHARS = 60
 TASK_TAIL_BYTES = 256 * 1024
 
 
-# Keep these three helpers in sync with claude_approval_hook.py. The two hooks
+# Keep these four helpers in sync with claude_approval_hook.py. The two hooks
 # are deployed as standalone files, so they cannot share a module.
 def _clean_task_text(text: str) -> str:
     text = re.sub(
@@ -72,6 +72,50 @@ def _is_noise_prompt(text: str) -> bool:
     )
 
 
+# Keep in sync with claude_approval_hook.py: a bare "继续/ok" is a bad title.
+_CONFIRMATION_PROMPTS = {
+    "继续",
+    "继续吧",
+    "继续执行",
+    "继续做",
+    "接着",
+    "好的",
+    "好的继续",
+    "好",
+    "好继续",
+    "可以",
+    "可以继续",
+    "行",
+    "嗯",
+    "嗯嗯",
+    "对",
+    "是",
+    "是的",
+    "没问题",
+    "辛苦了",
+    "谢谢",
+    "ok",
+    "okay",
+    "sure",
+    "yes",
+    "y",
+    "go",
+    "go on",
+    "continue",
+    "proceed",
+    "run it",
+    "do it",
+    "sounds good",
+    "lgtm",
+}
+
+
+def _is_confirmation_prompt(text: str) -> bool:
+    probe = re.sub(r"[!！。,.，?？~～、；;：:]+", "", text)
+    probe = re.sub(r"\s+", " ", probe).strip().lower()
+    return probe in _CONFIRMATION_PROMPTS
+
+
 def task_summary(transcript_path: str) -> str:
     if not transcript_path:
         return ""
@@ -92,7 +136,11 @@ def task_summary(transcript_path: str) -> str:
             continue
         if entry.get("type") == "last-prompt":
             prompt = entry.get("lastPrompt")
-            if isinstance(prompt, str) and not _is_noise_prompt(prompt):
+            if (
+                isinstance(prompt, str)
+                and not _is_noise_prompt(prompt)
+                and not _is_confirmation_prompt(prompt)
+            ):
                 cleaned = _clean_task_text(prompt)
                 if cleaned:
                     return cleaned[:TASK_MAX_CHARS]
@@ -105,7 +153,11 @@ def task_summary(transcript_path: str) -> str:
         if not isinstance(message, dict):
             continue
         content = message.get("content")
-        if not isinstance(content, str) or _is_noise_prompt(content):
+        if (
+            not isinstance(content, str)
+            or _is_noise_prompt(content)
+            or _is_confirmation_prompt(content)
+        ):
             continue
         cleaned = _clean_task_text(content)
         if cleaned:

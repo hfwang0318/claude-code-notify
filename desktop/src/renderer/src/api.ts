@@ -320,6 +320,7 @@ function createBrowserFallback(): DesktopApi {
       toast('浏览器预览模式：无法隐藏窗口')
     },
     resizePopup: () => undefined,
+    noticeReady: () => undefined,
     quit: async () => {
       toast('浏览器预览模式：无法退出')
     }

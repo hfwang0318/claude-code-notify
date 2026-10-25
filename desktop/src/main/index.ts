@@ -140,7 +140,8 @@ const isCapture = process.argv.includes('--capture')
 const isSelfTest = process.argv.includes('--self-test')
 const isDeployTest = process.argv.includes('--self-test-deploy')
 const isDemo = process.argv.includes('--demo-popup')
-const headless = (isCapture || isSelfTest || isDeployTest) && !isDemo
+const isNoticeTransitionDemo = process.argv.includes('--demo-notice-transition')
+const headless = (isCapture || isSelfTest || isDeployTest) && !isDemo && !isNoticeTransitionDemo
 
 app.setName(APP_NAME)
 if (process.platform === 'win32') app.setAppUserModelId('com.claude-notify.app')
@@ -174,6 +175,7 @@ let notificationQueue: ApprovalItem[] = []
 let notificationTimer: NodeJS.Timeout | null = null
 let noticeTimer: NodeJS.Timeout | null = null
 let popupCollapsed = false
+let deferPopupShow = false
 let collapseRevealTimer: NodeJS.Timeout | null = null
 let lastAdmissionNotifyAt = 0
 
@@ -564,6 +566,51 @@ function popupBounds(height = POPUP_HEIGHT): { x: number; y: number } {
   })
 }
 
+function applyPopupHeight(height: number): void {
+  if (!popupWindow || popupWindow.isDestroyed()) return
+  const bounds = popupWindow.getBounds()
+  const display = screen.getDisplayNearestPoint({
+    x: bounds.x,
+    y: bounds.y + bounds.height
+  })
+  const area = display.workArea
+  const maxHeight = Math.max(300, Math.min(820, area.height - 16))
+  const nextHeight = Math.max(300, Math.min(maxHeight, Math.round(height)))
+  if (Math.abs(nextHeight - bounds.height) < 2) return
+  suppressMoveSave = true
+  const bottom = Math.min(bounds.y + bounds.height, area.y + area.height)
+  const nextY = Math.max(area.y, bottom - nextHeight)
+  popupWindow.setBounds({
+    x: bounds.x,
+    y: nextY,
+    width: POPUP_WIDTH,
+    height: nextHeight
+  })
+  popupAnchor = { x: bounds.x, bottom: nextY + nextHeight }
+  setTimeout(() => {
+    suppressMoveSave = false
+  }, 120)
+}
+
+/**
+ * Show the window only after the completion notice has rendered at its real
+ * height. This prevents the old (taller) approval card from being visible for a
+ * frame while React swaps in the notice.
+ */
+function revealDeferredPopup(): void {
+  if (!deferPopupShow) return
+  deferPopupShow = false
+  if (!popupWindow || popupWindow.isDestroyed()) return
+  if (headless && !isCapture) return
+  const state = store.get()
+  if (!state.notice && state.pending.length === 0 && state.expired.length === 0) return
+  if (popupCollapsed && (state.pending.length > 0 || state.expired.length > 0)) return
+  popupWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+  popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  popupWindow.showInactive()
+  popupWindow.moveTop()
+}
+
 let popupResizeTimer: NodeJS.Timeout | null = null
 
 function savePopupPosition(): void {
@@ -695,6 +742,12 @@ function syncPopup(focusMode: 'none' | 'new' | 'manual' = 'none'): void {
 
   popupWindow.setAlwaysOnTop(true, 'screen-saver', 1)
   popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  // A notice is being swapped in; keep the old approval card off screen until
+  // the notice renderer has measured its own height.
+  if (deferPopupShow) {
+    if (popupWindow.isVisible()) popupWindow.hide()
+    return
+  }
   const wasVisible = popupWindow.isVisible()
   const muted = visiblePending[0]
     ? sessions.isMuted(visiblePending[0].sessionKey)
@@ -1566,16 +1619,25 @@ function clearCompletionNotice(): void {
     clearTimeout(noticeTimer)
     noticeTimer = null
   }
+  deferPopupShow = false
   if (store.get().notice) store.setNotice(null)
 }
 
 function showCompletionNotice(notice: CompletionNotice): void {
+  // The notice replaces a taller approval card. Hide the old card immediately
+  // and keep the window hidden until CompletionNotice reports its measured
+  // height; otherwise the old card is shown for a frame at the old height and
+  // the window visibly shrinks when the notice mounts.
+  if (popupWindow && !popupWindow.isDestroyed() && popupWindow.isVisible()) {
+    popupWindow.hide()
+  }
+  deferPopupShow = true
   store.setNotice(notice)
   if (noticeTimer) clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => {
     noticeTimer = null
     if (store.get().notice?.id !== notice.id) return
-    store.setNotice(null)
+    clearCompletionNotice()
     syncPopup('none')
   }, 7000)
   syncPopup('none')
@@ -2895,29 +2957,12 @@ function registerIpc(): void {
   })
   ipcMain.handle('window:hide', () => mainWindow?.hide())
   ipcMain.on('popup:resize', (_event, height: number) => {
-    if (!popupWindow || popupWindow.isDestroyed()) return
-    const bounds = popupWindow.getBounds()
-    const display = screen.getDisplayNearestPoint({
-      x: bounds.x,
-      y: bounds.y + bounds.height
-    })
-    const area = display.workArea
-    const maxHeight = Math.max(300, Math.min(820, area.height - 16))
-    const nextHeight = Math.max(300, Math.min(maxHeight, Math.round(height)))
-    if (Math.abs(nextHeight - bounds.height) < 2) return
-    suppressMoveSave = true
-    const bottom = Math.min(bounds.y + bounds.height, area.y + area.height)
-    const nextY = Math.max(area.y, bottom - nextHeight)
-    popupWindow.setBounds({
-      x: bounds.x,
-      y: nextY,
-      width: POPUP_WIDTH,
-      height: nextHeight
-    })
-    popupAnchor = { x: bounds.x, bottom: nextY + nextHeight }
-    setTimeout(() => {
-      suppressMoveSave = false
-    }, 120)
+    applyPopupHeight(height)
+  })
+  ipcMain.on('popup:notice-ready', (_event, id: string, height: number) => {
+    if (store.get().notice?.id !== id) return
+    applyPopupHeight(height)
+    revealDeferredPopup()
   })
   ipcMain.handle('app:quit', () => app.quit())
 }
@@ -3462,6 +3507,7 @@ async function runCapture(): Promise<void> {
     project: 'infra',
     cwd: '~/srv/infra',
     task: '重建 staging 集群并清理旧 PVC',
+    intent: '先确认 staging 集群没有在跑的监控任务，再清理旧 PVC。',
     branch: 'main',
     toolInput: { command: 'terraform destroy -auto-approve' },
     createdAt: now,
@@ -3484,6 +3530,18 @@ async function runCapture(): Promise<void> {
   await delay(1200)
   const popupImage = await popupWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'popup.png'), popupImage.toPNG())
+
+  // Verify the consolidated long-term authorization panel renders in context.
+  popupWindow.webContents.send('popup:select', second.id)
+  await delay(500)
+  await popupWindow.webContents.executeJavaScript(
+    "document.querySelector('.popup-more-toggle')?.click()"
+  )
+  await delay(500)
+  const moreImage = await popupWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-more.png'), moreImage.toPNG())
+  popupWindow.webContents.send('popup:select', third.id)
+  await delay(300)
 
   pauseApproval(third.id, true)
   syncPopup('none')
@@ -3533,6 +3591,40 @@ async function runCapture(): Promise<void> {
   const expiredImage = await popupWindow.webContents.capturePage()
   writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-expired.png'), expiredImage.toPNG())
 
+  // Completion notice: start from a tall approval card, then prove the window
+  // stays hidden until the notice reports its measured height.
+  store.clearExpired()
+  store.setPending([first, second, third])
+  syncPopup('none')
+  await delay(700)
+  store.setPending([])
+  syncPopup('none')
+  const noticeSession = store.get().sessions.find((session) => session.key === third.sessionKey)
+  showCompletionNotice({
+    id: 'notice_capture',
+    title: `${noticeSession?.title || third.sessionLabel} 已完成`,
+    body: '这一轮对话已经结束，可以回到终端继续。',
+    sessionKey: third.sessionKey,
+    createdAt: Date.now(),
+    sessionTitle: noticeSession?.title,
+    sessionLabel: noticeSession?.label || third.sessionLabel,
+    shortId: noticeSession?.shortId,
+    color: noticeSession?.color,
+    task: noticeSession?.task || third.task,
+    branch: noticeSession?.branch || third.branch
+  })
+  const noticeHiddenWhileMeasuring = !popupWindow.isVisible()
+  await delay(700)
+  const noticeReady = popupWindow.isVisible()
+  console.log('NOTICE_VISIBILITY', {
+    noticeHiddenWhileMeasuring,
+    noticeReady,
+    height: popupWindow.getBounds().height
+  })
+  const noticeImage = await popupWindow.webContents.capturePage()
+  writeFileSync(join(app.getAppPath(), 'artifacts', 'popup-notice.png'), noticeImage.toPNG())
+  clearCompletionNotice()
+
   console.log('CAPTURE_DONE')
   app.exit(0)
 }
@@ -3542,6 +3634,103 @@ async function runCapture(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Visible demo for the approval -> completion-notice height transition.
+ * Three real-looking approvals make the popup tall (~597px); after a pause the
+ * notice replaces them. Run with `--demo-notice-transition` and an isolated
+ * user-data-dir; it quits after three rounds.
+ */
+async function runNoticeTransitionDemo(): Promise<void> {
+  mainWindow?.hide()
+  const now = Date.now()
+  const first = captureItem({
+    id: 'demo_transition_a',
+    sessionId: 'demo-a-0000-4000-8000-000000000001',
+    sessionKey: '本机:demo-a-0000-4000-8000-000000000001',
+    sessionLabel: 'claude-code-notify · iTerm2',
+    task: '修复多会话弹窗无法区分任务的问题',
+    intent: '先确认会话条和身份条不会重复展示同一个任务。',
+    branch: 'feat/popup-identity',
+    toolInput: { command: 'git push origin feature/approval-popup --force-with-lease' },
+    createdAt: now,
+    timeoutAt: now + 120_000,
+    timeoutSec: 120
+  })
+  const second = captureItem({
+    id: 'demo_transition_b',
+    sessionId: 'demo-b-0000-4000-8000-000000000002',
+    sessionKey: '本机:demo-b-0000-4000-8000-000000000002',
+    sessionLabel: 'claude-code-notify · VS Code',
+    task: '给审批接口补上 trace_id 透传',
+    branch: 'fix/trace-id',
+    tool: 'Edit',
+    toolInput: {
+      file_path: 'src/server/config.ts',
+      old_string: 'const port = 8080',
+      new_string: 'const port = 9090'
+    },
+    createdAt: now,
+    timeoutAt: now + 180_000,
+    timeoutSec: 180
+  })
+  const third = captureItem({
+    id: 'demo_transition_c',
+    sessionId: 'demo-c-0000-4000-8000-000000000003',
+    sessionKey: 'prod-api:demo-c-0000-4000-8000-000000000003',
+    sessionLabel: 'infra · prod-api',
+    origin: 'prod-api',
+    project: 'infra',
+    cwd: '~/srv/infra',
+    task: '重建 staging 集群并清理旧 PVC',
+    intent: '先确认 staging 集群没有在跑的监控任务，再清理旧 PVC。',
+    branch: 'main',
+    toolInput: { command: 'terraform destroy -auto-approve' },
+    createdAt: now,
+    timeoutAt: now + 60_000,
+    timeoutSec: 60
+  })
+  const items = [first, second, third]
+  for (const item of items) {
+    localApprovals.set(item.id, () => undefined)
+    itemCache.set(item.id, item)
+    sessions.observe(item)
+  }
+  const thirdSession = () =>
+    store.get().sessions.find((session) => session.key === third.sessionKey)
+
+  for (let round = 1; round <= 3; round += 1) {
+    store.clearExpired()
+    store.setPending([])
+    refreshSessions()
+    store.setPending(items)
+    refreshSessions()
+    syncPopup('new')
+    await delay(4500)
+
+    store.setPending([])
+    syncPopup('none')
+    const session = thirdSession()
+    showCompletionNotice({
+      id: `notice_demo_${round}`,
+      title: `${session?.title || third.sessionLabel} 已完成`,
+      body: '这一轮对话已经结束，可以回到终端继续。',
+      sessionKey: third.sessionKey,
+      createdAt: Date.now(),
+      sessionTitle: session?.title,
+      sessionLabel: session?.label || third.sessionLabel,
+      shortId: session?.shortId,
+      color: session?.color,
+      task: session?.task || third.task,
+      branch: session?.branch || third.branch
+    })
+    await delay(4500)
+    clearCompletionNotice()
+    syncPopup('none')
+    await delay(800)
+  }
+  app.quit()
+}
 
 async function bootstrap(): Promise<void> {
   installPermissionRequestGuard()
@@ -3802,6 +3991,11 @@ async function bootstrap(): Promise<void> {
     if (process.argv.includes('--fullscreen-demo')) {
       setTimeout(() => mainWindow?.setFullScreen(true), 1800)
     }
+  }
+
+  if (isNoticeTransitionDemo) {
+    await delay(800)
+    void runNoticeTransitionDemo()
   }
 
   app.on('activate', () => {

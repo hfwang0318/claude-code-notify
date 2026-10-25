@@ -2,7 +2,7 @@ export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
 export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
-export const HOOK_VERSION = '8'
+export const HOOK_VERSION = '9'
 /** Extra time the hook process may stay alive while a popup countdown is paused. */
 export const HOOK_PAUSE_BUDGET_SEC = 600
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
