@@ -224,6 +224,71 @@ E2E_REQUIRE_CLAUDE=1 pnpm e2e:claude
 - `0`：通过；或缺少 Claude/认证且未设置 `E2E_REQUIRE_CLAUDE=1`（跳过）
 - `1`：断言失败、Claude 不可用但要求必须跑、或构建失败
 
+### 远程 SSH 部署（Docker 容器）
+
+`ssh-test/`（仓库根目录）提供一套手动 E2E 环境：真实 `sshd` + Ubuntu 容器 + 容器内 Claude
+Code，用来验证远程 SSH 部署、审批回调，以及 OSC 标题经 SSH 透传到本地终端 tab。
+
+`build.sh` 会在其中生成 `id_ed25519`、`id_ed25519.pub`、`password.txt`，这三个文件已加入
+`.gitignore`；不要提交、截图或外发。脚本用法见 `ssh-test/README.md`。
+
+前置条件：
+
+- Docker 正在运行
+- 宿主机 Claude 路由监听 `127.0.0.1:3456`（容器内 Claude 走反向隧道访问）
+- Claude Notify 应用监听 `18765`
+- `~/.claude-code-router/bin/ccr-claude-code-api-key-default-claude-code` 可执行
+
+启动与停止：
+
+```bash
+cd ssh-test
+./build.sh    # 构建镜像、创建容器、写入公钥与模型配置、启动反向隧道
+./stop.sh     # 关闭隧道并删除容器（需要保留容器时用 docker restart）
+```
+
+`start-tunnel.sh` 会建立两条反向隧道：
+
+- `3456`：容器内 Claude 的模型调用
+- `18765`：审批 / 通知回调
+
+隧道断开后容器内 Claude 无法调用模型、审批也会失败；重新执行 `./start-tunnel.sh` 即可。
+
+连接信息与部署对话框填写：
+
+| 项 | 值 |
+|---|---|
+| 服务器地址 / SSH 端口 | `127.0.0.1` / `2222` |
+| 用户名 / 密码 | `claude` / `password.txt` |
+| 免密 key | `ssh -i id_ed25519 -p 2222 claude@127.0.0.1` |
+| 回调 IP | `host.docker.internal`（或 `127.0.0.1`，依赖 18765 隧道） |
+| 回调端口 | `18765` |
+| 来源标签 | 任意，例如 `docker-test` |
+| 终端 tab 状态 | 勾选（验证 OSC 透传时必选） |
+
+验证步骤：
+
+1. 先在本地终端确认 OSC 标题能透传：
+
+   ```bash
+   ssh -p 2222 claude@127.0.0.1
+   printf '\033]0;🟡 SSH\007\033]1;🟡 SSH\007\033]2;🟡 SSH\007'; sleep 5
+   ```
+
+   iTerm2 / Tabby 的 tab 应在 5 秒内变成 `🟡 SSH`；命令结束后被 shell 重置属正常。
+
+2. 在部署对话框「测试连接」→ 确认主机指纹 →「部署并验证」。
+3. `ssh -p 2222 claude@127.0.0.1` 后运行 `claude`，运行中 tab 应为 `🟡`，本轮结束为 `🟢`。
+4. 触发一次审批，确认弹窗、批准 / 拒绝、`history.jsonl` 与超时回退都正常。
+
+清理：
+
+```bash
+docker rm -f claude-ssh-test
+```
+
+容器重建后需要重新写入 SSH 公钥并重启隧道，直接重跑 `./build.sh` 即可。
+
 ---
 
 ## 4. 隔离与清理

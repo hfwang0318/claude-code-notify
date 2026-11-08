@@ -87,7 +87,7 @@ pnpm dist:win
 
 - [ ] macOS：弹窗在普通桌面、全屏应用、切换 Space 后可见
 - [ ] macOS：Enter 允许 / Esc 在终端处理 / 超时回退
-- [ ] macOS：本机接入与远端 SSH 部署
+- [ ] macOS：本机接入与远端 SSH 部署（远端可用 `ssh-test/` Docker 容器，见 `E2E.md`「远程 SSH 部署（Docker 容器）」）
 - [ ] Windows 11：Acrylic 背景、标题栏控件不重叠、托盘图标
 - [ ] Windows 11：焦点窗口定位
 - [ ] Windows：安装包安装/卸载、开机自启、Toast 通知
