@@ -4,6 +4,7 @@ import {
   buildHookCommand,
   HOOK_PAUSE_BUDGET_SEC,
   mergeSettingsJson,
+  stripSettingsJson,
   type HookEntry
 } from './settings'
 
@@ -97,6 +98,135 @@ describe('mergeSettingsJson', () => {
     expect(merged.hooks.Stop).toHaveLength(1)
     expect(merged.hooks.Stop[0].hooks[0].command).toContain('claude_notify_hook.py')
     expect(merged.hooks.Stop[0].hooks[0].timeout).toBe(30)
+  })
+
+  it('installs tab-status hooks for the full green/yellow/red state machine', () => {
+    const tabStatus: HookEntry = {
+      type: 'command',
+      command: 'python3 "$HOME/.claude/claude_tab_status_hook.py"'
+    }
+    const merged = JSON.parse(
+      mergeSettingsJson('', {
+        mode: 'popup',
+        hookEntry: hook,
+        hookTimeout: 300,
+        stopEntry: hook,
+        tabStatusEntry: tabStatus,
+        terminalTitle: { action: 'disable' }
+      })
+    )
+
+    for (const section of [
+      'SessionStart',
+      'UserPromptSubmit',
+      'PreToolUse',
+      'PostToolUse',
+      'Notification',
+      'SessionEnd'
+    ]) {
+      expect(merged.hooks[section], section).toHaveLength(1)
+      expect(merged.hooks[section][0].hooks[0].command, section).toContain(
+        'claude_tab_status_hook.py'
+      )
+      expect(merged.hooks[section][0].hooks[0].timeout, section).toBe(5)
+    }
+    // In popup mode only idle/auth notifications may overwrite the title;
+    // the permission red comes from PermissionRequest with the tool detail.
+    expect(merged.hooks.Notification[0].matcher).toBe(
+      'idle_prompt|auth_success'
+    )
+    expect(merged.hooks.PreToolUse[0].matcher).toBe('')
+
+    // The tab hook must run before the blocking approval/notify hooks.
+    expect(merged.hooks.PermissionRequest).toHaveLength(2)
+    expect(merged.hooks.PermissionRequest[0].hooks[0].command).toContain(
+      'claude_tab_status_hook.py'
+    )
+    expect(merged.hooks.PermissionRequest[1].hooks[0].command).toContain(
+      'claude_approval_hook.py'
+    )
+
+    expect(merged.hooks.Stop).toHaveLength(2)
+    expect(merged.hooks.Stop[0].hooks[0].command).toContain(
+      'claude_tab_status_hook.py'
+    )
+    expect(merged.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBe('1')
+  })
+
+  it('handles all notification types in notify mode', () => {
+    const tabStatus: HookEntry = {
+      type: 'command',
+      command: 'python3 "$HOME/.claude/claude_tab_status_hook.py"'
+    }
+    const merged = JSON.parse(
+      mergeSettingsJson('', {
+        mode: 'notify',
+        hookEntry: hook,
+        hookTimeout: 300,
+        tabStatusEntry: tabStatus
+      })
+    )
+    expect(merged.hooks.Notification).toHaveLength(2)
+    expect(merged.hooks.Notification[0].matcher).toBe('')
+    expect(merged.hooks.Notification[0].hooks[0].command).toContain(
+      'claude_tab_status_hook.py'
+    )
+    expect(merged.hooks.Notification[1].hooks[0].timeout).toBe(30)
+    expect(merged.hooks.PermissionRequest).toBeUndefined()
+  })
+
+  it('restores the previous terminal-title value only when it still owns it', () => {
+    const existing = JSON.stringify({
+      env: {
+        KEEP: 'yes',
+        CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1'
+      }
+    })
+    const restored = JSON.parse(
+      mergeSettingsJson(existing, {
+        mode: 'notify',
+        hookEntry: hook,
+        hookTimeout: 300,
+        terminalTitle: { action: 'restore', previous: null }
+      })
+    )
+    expect(restored.env.KEEP).toBe('yes')
+    expect(restored.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBeUndefined()
+
+    const changedByUser = JSON.stringify({
+      env: { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '0' }
+    })
+    const untouched = JSON.parse(
+      mergeSettingsJson(changedByUser, {
+        mode: 'notify',
+        hookEntry: hook,
+        hookTimeout: 300,
+        terminalTitle: { action: 'restore', previous: null }
+      })
+    )
+    expect(untouched.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBe('0')
+  })
+
+  it('removes tab-status hooks and restores the title env on strip', () => {
+    const tabStatus: HookEntry = {
+      type: 'command',
+      command: 'python3 "$HOME/.claude/claude_tab_status_hook.py"'
+    }
+    const installed = mergeSettingsJson('', {
+      mode: 'popup',
+      hookEntry: hook,
+      hookTimeout: 300,
+      tabStatusEntry: tabStatus,
+      terminalTitle: { action: 'disable' }
+    })
+    const stripped = stripSettingsJson(installed, {
+      restoreTerminalTitle: { previous: null }
+    })
+    expect(stripped.removed).toBeGreaterThan(0)
+    expect(stripped.changed).toBe(true)
+    const parsed = JSON.parse(stripped.text)
+    expect(JSON.stringify(parsed)).not.toContain('claude_tab_status_hook.py')
+    expect(parsed.env).toBeUndefined()
   })
 
   it('uses timeout 30 for notification mode', () => {

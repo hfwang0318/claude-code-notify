@@ -28,6 +28,11 @@ import {
 } from 'node:fs'
 import { release } from 'node:os'
 import { join } from 'node:path'
+import {
+  defaultTabPrefix,
+  defaultTabSuffix,
+  sanitizeTabItems
+} from '../shared/tab-info'
 import type {
   AppState,
   ApprovalExtra,
@@ -46,7 +51,8 @@ import type {
   Prefs,
   RuleScope,
   SecurityInfo,
-  SkipReason
+  SkipReason,
+  TabInfoItem
 } from '../shared/types'
 import {
   approvalCommand,
@@ -2108,7 +2114,16 @@ async function applyNetwork(port: number, bindMode: BindMode): Promise<{ ok: boo
 // local deployment
 // ---------------------------------------------------------------------------
 
-function localDeployOptions(mode: 'popup' | 'notify') {
+function deployedHookCount(mode: 'popup' | 'notify', tabStatus: boolean): number {
+  return (mode === 'popup' ? 2 : 1) + (tabStatus ? 2 : 0)
+}
+
+function localDeployOptions(
+  mode: 'popup' | 'notify',
+  tabStatus: boolean,
+  tabPrefix?: TabInfoItem[],
+  tabSuffix?: TabInfoItem[]
+) {
   return {
     mode,
     token: store.get().server.token,
@@ -2116,20 +2131,34 @@ function localDeployOptions(mode: 'popup' | 'notify') {
     timeoutSec: store.get().prefs.timeoutSec,
     writeEnv: false,
     envShells: [] as string[],
+    tabStatus,
+    tabPrefix,
+    tabSuffix,
     origin: '本机'
   }
 }
 
-function applyLocalDeploy(mode: 'popup' | 'notify'): { ok: boolean; message: string } {
+function applyLocalDeploy(
+  mode: 'popup' | 'notify',
+  tabStatus = true,
+  tabPrefix?: TabInfoItem[],
+  tabSuffix?: TabInfoItem[]
+): { ok: boolean; message: string } {
   try {
-    const result = deployLocal(localDeployOptions(mode), (level, message) => log(level, message))
+    const result = deployLocal(
+      localDeployOptions(mode, tabStatus, tabPrefix, tabSuffix),
+      (level, message) => log(level, message)
+    )
     store.setDeploy({
       status: 'deployed',
       host: '本机 · 127.0.0.1',
-      hooks: mode === 'popup' ? 2 : 1,
+      hooks: deployedHookCount(mode, tabStatus),
       message: `本机已接入 · ${result.settingsPath}`,
       localMode: mode,
-      localHooks: mode === 'popup' ? 2 : 1,
+      localHooks: deployedHookCount(mode, tabStatus),
+      localTabStatus: tabStatus,
+      localTabPrefix: tabPrefix ?? defaultTabPrefix(),
+      localTabSuffix: tabSuffix ?? defaultTabSuffix(),
       hookVersion: HOOK_VERSION,
       hookStale: false,
       modeMismatch: mode !== store.get().prefs.mode
@@ -2146,7 +2175,12 @@ function applyLocalDeploy(mode: 'popup' | 'notify'): { ok: boolean; message: str
   }
 }
 
-async function localDeployWithConfirm(mode: 'popup' | 'notify'): Promise<{ ok: boolean; canceled?: boolean; message: string }> {
+async function localDeployWithConfirm(
+  mode: 'popup' | 'notify',
+  tabStatus = true,
+  tabPrefix?: TabInfoItem[],
+  tabSuffix?: TabInfoItem[]
+): Promise<{ ok: boolean; canceled?: boolean; message: string }> {
   const confirmed = await confirm({
     type: 'question',
     title: '接入本机',
@@ -2154,13 +2188,14 @@ async function localDeployWithConfirm(mode: 'popup' | 'notify'): Promise<{ ok: b
     detail:
       `目标：~/.claude/settings.json\n` +
       `模式：${mode === 'popup' ? '置顶弹窗' : '系统通知'}\n` +
+      `终端 tab 状态：${tabStatus ? '开启（🟡 运行中 / 🟢 完成 / 🔴 等待）' : '关闭'}\n` +
       '会先备份现有 settings.json，并保留第三方 hooks。',
     buttons: ['接入本机', '取消'],
     defaultId: 0,
     cancelId: 1
   })
   if (!confirmed) return { ok: false, canceled: true, message: '已取消' }
-  return applyLocalDeploy(mode)
+  return applyLocalDeploy(mode, tabStatus, tabPrefix, tabSuffix)
 }
 
 async function localRemoveWithConfirm(): Promise<{ ok: boolean; message: string }> {
@@ -2191,6 +2226,9 @@ async function localRemoveWithConfirm(): Promise<{ ok: boolean; message: string 
       message: `本机已断开 · 移除 ${result.removedHooks} 个钩子`,
       localMode: null,
       localHooks: 0,
+      localTabStatus: false,
+      localTabPrefix: defaultTabPrefix(),
+      localTabSuffix: defaultTabSuffix(),
       hookStale: false,
       modeMismatch: computeModeMismatch()
     })
@@ -2222,7 +2260,10 @@ async function localRestoreWithConfirm(): Promise<{ ok: boolean; message: string
     const next = detectLocalState()
     store.setDeploy({
       localMode: next.mode,
-      localHooks: next.mode ? (next.mode === 'popup' ? 2 : 1) : 0,
+      localHooks: next.mode ? deployedHookCount(next.mode, next.tabStatus) : 0,
+      localTabStatus: next.tabStatus,
+      localTabPrefix: next.tabPrefix,
+      localTabSuffix: next.tabSuffix,
       hookVersion: next.version,
       hookStale: next.stale,
       message: `已恢复设置 · ${result.restoredFrom}`,
@@ -2316,9 +2357,14 @@ function upsertProfile(form: DeployFormConfig, result: DeployResult): DeployProf
     callbackPort: Number(form.callbackPort),
     hookTimeout: Number(form.hookTimeout),
     toolMatcher: form.toolMatcher?.trim() || '',
+    tabStatus: form.tabStatus !== false,
+    tabPrefix: sanitizeTabItems(form.tabPrefix ?? defaultTabPrefix()),
+    tabSuffix: sanitizeTabItems(form.tabSuffix ?? defaultTabSuffix()),
     lastDeployAt: Date.now(),
     status: result.success ? 'deployed' : 'failed',
-    hooks: result.success ? (form.mode === 'popup' ? 2 : 1) : 0,
+    hooks: result.success
+      ? deployedHookCount(form.mode, form.tabStatus !== false)
+      : 0,
     hookVersion: HOOK_VERSION,
     tokenFingerprint: fingerprintToken(store.get().server.token),
     ...(result.success ? {} : { lastError: result.summary })
@@ -2344,7 +2390,10 @@ function saveDeployFormCache(form: DeployFormConfig): void {
     origin: form.origin,
     rememberPassword: form.rememberPassword,
     envImport: form.envImport,
-    envShells: form.envShells
+    envShells: form.envShells,
+    tabStatus: form.tabStatus !== false,
+    tabPrefix: sanitizeTabItems(form.tabPrefix ?? defaultTabPrefix()),
+    tabSuffix: sanitizeTabItems(form.tabSuffix ?? defaultTabSuffix())
   }
   if (form.rememberPassword && form.password) {
     const encrypted = encryptSecret(form.password)
@@ -2786,9 +2835,34 @@ function registerIpc(): void {
   })
   ipcMain.handle('local:status', () => {
     const state = detectLocalState()
-    return { deployed: Boolean(state.mode), mode: state.mode, stale: state.stale, version: state.version }
+    return {
+      deployed: Boolean(state.mode),
+      mode: state.mode,
+      stale: state.stale,
+      version: state.version,
+      tabStatus: state.tabStatus,
+      tabPrefix: state.tabPrefix,
+      tabSuffix: state.tabSuffix
+    }
   })
-  ipcMain.handle('local:deploy', (_event, mode: 'popup' | 'notify') => localDeployWithConfirm(mode))
+  ipcMain.handle(
+    'local:deploy',
+    (
+      _event,
+      mode: 'popup' | 'notify',
+      options?: {
+        tabStatus?: boolean
+        tabPrefix?: TabInfoItem[]
+        tabSuffix?: TabInfoItem[]
+      }
+    ) =>
+      localDeployWithConfirm(
+        mode,
+        options?.tabStatus !== false,
+        options?.tabPrefix,
+        options?.tabSuffix
+      )
+  )
   ipcMain.handle('local:remove', () => localRemoveWithConfirm())
   ipcMain.handle('local:restore', () => localRestoreWithConfirm())
   ipcMain.handle('prefs:set', (_event, patch: Partial<Prefs>) => applyPrefs(patch))
@@ -3872,14 +3946,19 @@ async function bootstrap(): Promise<void> {
       : latestProfile
         ? `${latestProfile.username}@${latestProfile.host}:${latestProfile.sshPort}`
         : '',
-    hooks: localMode ? (localMode === 'popup' ? 2 : 1) : latestProfile?.hooks || 0,
+    hooks: localMode
+      ? deployedHookCount(localMode, local.tabStatus)
+      : latestProfile?.hooks || 0,
     message: localMode
       ? `本机已接入 · ${localMode === 'popup' ? '置顶弹窗' : '系统通知'}`
       : latestProfile
         ? `上次成功 ${new Date(latestProfile.lastDeployAt || Date.now()).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`
         : '尚未部署',
     localMode,
-    localHooks: localMode ? (localMode === 'popup' ? 2 : 1) : 0,
+    localHooks: localMode ? deployedHookCount(localMode, local.tabStatus) : 0,
+    localTabStatus: local.tabStatus,
+    localTabPrefix: local.tabPrefix,
+    localTabSuffix: local.tabSuffix,
     hookVersion: local.version,
     hookStale: local.stale,
     modeMismatch: false,

@@ -5,10 +5,13 @@ import type {
   DeployResult,
   DeployTestResult,
   LogLevel,
-  SecurityInfo
+  SecurityInfo,
+  TabInfoItem
 } from '../../shared/types'
+import { defaultTabPrefix, defaultTabSuffix, sanitizeTabItems } from '../../shared/tab-info'
 import { api } from './api'
 import { formatRelative } from './format'
+import TabInfoEditor from './TabInfoEditor'
 import { useFocusTrap } from './useFocusTrap'
 
 interface Props {
@@ -41,6 +44,9 @@ const EMPTY_FORM: DeployFormConfig = {
   rememberPassword: false,
   envImport: false,
   envShells: ['bash'],
+  tabStatus: true,
+  tabPrefix: defaultTabPrefix(),
+  tabSuffix: defaultTabSuffix(),
   hostFingerprint: ''
 }
 
@@ -175,7 +181,10 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
     hookTimeout: Number(form.hookTimeout),
     toolMatcher: form.toolMatcher?.trim() || '',
     origin: form.origin?.trim() || form.host.trim(),
-    envShells: form.envImport ? form.envShells : []
+    envShells: form.envImport ? form.envShells : [],
+    tabStatus: form.tabStatus !== false,
+    tabPrefix: sanitizeTabItems(form.tabPrefix ?? defaultTabPrefix()),
+    tabSuffix: sanitizeTabItems(form.tabSuffix ?? defaultTabSuffix())
   })
 
   const testConnection = async (override?: Partial<DeployFormConfig>): Promise<void> => {
@@ -374,6 +383,13 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
                           callbackPort: profile.callbackPort,
                           hookTimeout: profile.hookTimeout,
                           toolMatcher: profile.toolMatcher,
+                          tabStatus: profile.tabStatus !== false,
+                          tabPrefix: sanitizeTabItems(
+                            profile.tabPrefix ?? defaultTabPrefix()
+                          ),
+                          tabSuffix: sanitizeTabItems(
+                            profile.tabSuffix ?? defaultTabSuffix()
+                          ),
                           origin: profile.origin
                         }))
                         setTestResult(null)
@@ -580,6 +596,32 @@ export default function DeployDialog({ open, state, onClose }: Props): React.JSX
 
           <div className="form-section">
             <div className="form-section-title">选项</div>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={form.tabStatus !== false}
+                onChange={(event) => update('tabStatus', event.target.checked)}
+              />
+              <span className="check-copy">
+                <span>终端 tab 状态（🟡 运行中 / 🟢 完成 / 🔴 阻塞）</span>
+                <small className="check-note">
+                  会关闭 Claude Code 内置标题更新，移除时恢复原值
+                </small>
+              </span>
+            </label>
+            {form.tabStatus !== false ? (
+              <TabInfoEditor
+                prefix={sanitizeTabItems(form.tabPrefix ?? defaultTabPrefix())}
+                suffix={sanitizeTabItems(form.tabSuffix ?? defaultTabSuffix())}
+                onChange={(prefix: TabInfoItem[], suffix: TabInfoItem[]) =>
+                  setForm((current) => ({
+                    ...current,
+                    tabPrefix: prefix,
+                    tabSuffix: suffix
+                  }))
+                }
+              />
+            ) : null}
             <label className="check-row">
               <input
                 type="checkbox"

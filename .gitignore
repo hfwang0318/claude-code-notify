@@ -19,3 +19,6 @@ uiux_skill_repo/
 # Python hook bytecode
 __pycache__/
 *.py[cod]
+
+# Runtime tab task state (created next to the deployed hook)
+claude_notify_tab_state.json

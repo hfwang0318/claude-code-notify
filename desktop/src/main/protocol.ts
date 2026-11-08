@@ -129,6 +129,7 @@ export function approvalFromPayload(
     safeString(payload.session_label) ||
     deriveSessionLabel({ project, terminal, tty, sessionId })
   const task = safeString(payload.task).trim().slice(0, 160)
+  const headline = safeString(payload.headline).trim()
   const intent = safeString(payload.intent).trim().slice(0, 200)
   const branch = safeString(payload.branch).trim().slice(0, 80)
   const correlationField = safeString(payload.correlation)
@@ -156,6 +157,7 @@ export function approvalFromPayload(
     tty,
     terminal,
     task,
+    ...(headline ? { headline } : {}),
     ...(intent ? { intent } : {}),
     branch,
     message,

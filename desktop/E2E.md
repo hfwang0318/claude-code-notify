@@ -89,6 +89,62 @@ v4 弹窗把“当前任务”提升为 H1，把命令/工具名收敛到唯一�
 
 2026-10-25 v4 验证结果：全量 `pnpm e2e:claude` 在 `bypass` 用例被当次路由模型阻断 —— `--permission-mode bypassPermissions` 入口因 Claude 未暴露 Bash/Write/Edit 按 SKIP 处理，`--dangerously-skip-permissions` 入口在 120s 内未退出（输出 `[claude-code:unrecognized_model] {"model":"zhipu/glm-5.3[1m]"}`，非弹窗卡住）。随后分两轮定向运行覆盖其余用例：一轮 `E2E_CASES=stop,multi,resolved,timeout` 通过 `stop`/`multi`/`timeout`（`resolved` 当轮 SKIP），另一轮通过 `stop`/`resolved`/`timeout`（`multi` 当轮 SKIP），最后在最终代码上复跑 `E2E_CASES=multi`，输出 `E2E PASS · multi · 13.6s`。因此 `stop`、`multi`、`resolved`、`timeout` 均已至少一次在真实 Claude 上通过；由于工具暴露随路由模型变化，四个用例未能在同一轮全部同时出现。不要用 `bypass` 的这一条失败推断审批 UI 回归。
 
+### 0.8 终端 tab 状态
+
+部署选项“终端 tab 状态”默认开启，会写入 `claude_tab_status_hook.py`，并通过
+`terminalSequence` 维护三态标题：
+
+- `SessionStart` / `Stop` / `SessionEnd` → 🟢
+- `UserPromptSubmit` / `PostToolUse` → 🟡
+- `AskUserQuestion` / `ExitPlanMode` / `PermissionRequest` / `permission_prompt` → 🔴
+
+标题与审批弹窗 H1 共用优先级：
+
+```text
+agent name
+  > custom-title（transcript）
+  > ai-title（transcript，官方 AI 标题）
+  > 小模型会话标题（env=on 时按官方 generateSessionTitle 复刻）
+  > 当前任务（UserPromptSubmit 的 prompt，按 session 缓存）
+  > 项目名 + session_id 前 4 位
+```
+
+标题由 `前缀信息项 · 会话标题 · 后缀信息项` 组成。部署 UI 提供胶囊池
+（项目名/分支/会话短码/来源/终端/工作目录/当前任务），拖入前缀或后缀区配置，
+同区拖拽改变顺序，拖回池或点 × 移除；默认前后缀为空，项目名也在池中待选。胶囊只存在于配置 UI，
+终端标题仍是纯文本。与标题重复的信息项自动去重；标题和阻塞详情不做手动截断，
+交给终端 tab 视觉截断。配置写入 `claude_notify_config.json` 的
+`CLAUDE_NOTIFY_TAB_PREFIX` / `CLAUDE_NOTIFY_TAB_SUFFIX`。
+`custom-title` / `ai-title` 直接从 transcript 读取。`/clear` 触发
+`SessionStart(source=clear)` 时清掉旧任务，`resume` / `compact` 保留。首次进入、没有
+标题/任务时显示 `项目名 #短码`，不再显示应用品牌名；应用会话标题也用同样的兜底。
+红色状态追加阻塞详情（Bash 命令、编辑文件、WebFetch 主机、问题或计划确认）。审批
+payload 增加 `headline`，弹窗 H1 使用同一优先级。
+
+开启时 `settings.json` 的 `env` 会设置 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`，避免
+Claude Code 内置标题覆盖；关闭或移除时按记录恢复原值。**UI 实测：该变量会停止 AI
+标题生成**——同一交互式会话一次 prompt，env=on 的 transcript `ai-title` 为 0 条，
+env=off 为 3 条（`测试目的说明`）。因此 env=on 时按官方 `generateSessionTitle` 复刻：
+
+- system prompt 原文、`<session>` user prompt、JSON schema `{title}`
+- 输入取**第一条真实用户消息**；每条 session 只尝试一次；最短 10 字符
+- 超过 2000 字符按官方 cap 形状保留 1500 头部 + 省略标记 + 尾部
+- 模型：`CLAUDE_NOTIFY_TITLE_MODEL` > `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_MODEL`
+- 异步子进程生成，写入 `claude_notify_tab_state.json`；不阻塞主 hook
+- 路由器偶发 thinking-only 时重试 3 次（官方是单次；这是对路由模型的适配）
+
+要保留官方 AI 标题，需要关闭该 env 并改用独立状态通道（iTerm2 OSC 21337 /
+Tabby 插件）。快速 tab hook 会排在审批/问答 hook 之前，确保阻塞时红灯先出现。
+
+E2E 的隔离 settings 已注入 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、
+`PostToolUse`、`PermissionRequest`、`Notification`、`Stop`、`SessionEnd` 的 tab hook，
+并把 `CLAUDE_NOTIFY_TAB_STATE` 指向临时目录，避免污染仓库。真实 `claude -p` 会执行
+它们；`stop` / `multi` / `resolved` / `timeout` 用例同时验证这些 hook 不会改变审批
+决策。但 `-p` 非交互模式下 Claude Code 会忽略 `terminalSequence`，因此真实 tab
+颜色/标题显示仍需人工验收。settings 合并、选项关闭后的清理、状态文件清理、`env`
+原值恢复和脚本事件映射由 `settings.test.ts`、`local.test.ts`、
+`tab-status-hook.test.ts` 覆盖。
+
 ### 明确不覆盖
 
 - 交互式 TUI 中的真实按键/终端焦点（E2E 使用 `claude -p` 非交互模式）

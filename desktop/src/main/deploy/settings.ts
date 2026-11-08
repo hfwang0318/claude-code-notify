@@ -1,11 +1,23 @@
 export const APPROVAL_SCRIPT_NAME = 'claude_approval_hook.py'
 export const NOTIFY_SCRIPT_NAME = 'claude_notify_hook.py'
+export const TAB_STATUS_SCRIPT_NAME = 'claude_tab_status_hook.py'
+export const TAB_STATE_NAME = 'claude_notify_tab_state.json'
 export const HOOK_CONFIG_NAME = 'claude_notify_config.json'
-export const ALL_HOOK_SCRIPTS = [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME]
-export const HOOK_VERSION = '9'
+export const ALL_HOOK_SCRIPTS = [
+  APPROVAL_SCRIPT_NAME,
+  NOTIFY_SCRIPT_NAME,
+  TAB_STATUS_SCRIPT_NAME
+]
+export const HOOK_VERSION = '18'
 /** Extra time the hook process may stay alive while a popup countdown is paused. */
 export const HOOK_PAUSE_BUDGET_SEC = 600
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'
+/** Claude Code built-in window/tab title; disable it while our tab hook owns the title. */
+export const TERMINAL_TITLE_ENV_KEY = 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE'
+/** Stored in claude_notify_config.json so removal can restore the previous env value. */
+export const TERMINAL_TITLE_OWNER_KEY = 'CLAUDE_NOTIFY_TERMINAL_TITLE_PREVIOUS'
+/** Sentinel for "the key did not exist before we set it". */
+export const TERMINAL_TITLE_UNSET = '__unset__'
 
 export const DEFAULT_PRE_TOOL_MATCHER =
   'Bash|Edit|Write|MultiEdit|NotebookEdit|ExitPlanMode|AskUserQuestion|mcp__.*'
@@ -37,6 +49,12 @@ export interface MergeOptions {
   stopEntry?: HookEntry
   /** Optional SessionEnd entry; the notify script already understands the event. */
   sessionEndEntry?: HookEntry
+  /** Optional tab-status hook for UserPromptSubmit + Stop. */
+  tabStatusEntry?: HookEntry
+  /** Whether the deployer should own CLAUDE_CODE_DISABLE_TERMINAL_TITLE. */
+  terminalTitle?:
+    | { action: 'disable' }
+    | { action: 'restore'; previous: string | null }
   /** Restrict the PreToolUse correlation hook to tools that can need approval. */
   preToolMatcher?: string
 }
@@ -129,6 +147,68 @@ function cleanHooks(settings: Record<string, unknown>): number {
   return removed
 }
 
+function envObject(settings: Record<string, unknown>): Record<string, unknown> {
+  const current = settings.env
+  if (current === undefined) return {}
+  if (typeof current !== 'object' || current === null || Array.isArray(current)) {
+    throw new Error('settings.json 的 env 必须是对象，无法写入终端标题开关')
+  }
+  return { ...(current as Record<string, unknown>) }
+}
+
+function applyTerminalTitle(
+  settings: Record<string, unknown>,
+  action: MergeOptions['terminalTitle']
+): boolean {
+  if (!action) return false
+  const env = envObject(settings)
+  const current = env[TERMINAL_TITLE_ENV_KEY]
+
+  if (action.action === 'disable') {
+    if (current === '1') return false
+    env[TERMINAL_TITLE_ENV_KEY] = '1'
+    settings.env = env
+    return true
+  }
+
+  // Only restore a value we actually set. If the user changed it in the
+  // meantime, leave their value alone.
+  if (current !== '1') return false
+  if (action.previous === null) delete env[TERMINAL_TITLE_ENV_KEY]
+  else env[TERMINAL_TITLE_ENV_KEY] = action.previous
+  if (Object.keys(env).length === 0) delete settings.env
+  else settings.env = env
+  return true
+}
+
+/** Read the current CLAUDE_CODE_DISABLE_TERMINAL_TITLE value from settings text. */
+export function readTerminalTitleEnv(existingText: string): string | undefined {
+  if (!existingText.trim()) return undefined
+  try {
+    const settings = JSON.parse(existingText) as Record<string, unknown>
+    const env = settings?.env
+    if (!env || typeof env !== 'object' || Array.isArray(env)) return undefined
+    const value = (env as Record<string, unknown>)[TERMINAL_TITLE_ENV_KEY]
+    if (value === undefined) return undefined
+    return typeof value === 'string' ? value : String(value)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Read the previous title value recorded in our hook config.
+ * `undefined` means we never owned the key; `null` means it was unset.
+ */
+export function terminalTitlePrevious(
+  config: Record<string, unknown> | null
+): string | null | undefined {
+  if (!config) return undefined
+  const value = config[TERMINAL_TITLE_OWNER_KEY]
+  if (value === TERMINAL_TITLE_UNSET) return null
+  return typeof value === 'string' ? value : undefined
+}
+
 export function mergeSettingsJson(
   existingText: string,
   options: MergeOptions
@@ -203,6 +283,41 @@ export function mergeSettingsJson(
     hooks.SessionEnd = endSection
   }
 
+  if (options.tabStatusEntry) {
+    const entry = { ...options.tabStatusEntry, timeout: 5 }
+    // Put the quick tab-status hook first in each section. The approval/question
+    // hooks can block for a long time; the tab indicator must update immediately.
+    const addTabHook = (sectionName: string, matcher = ''): void => {
+      const section = Array.isArray(hooks[sectionName])
+        ? (hooks[sectionName] as unknown[])
+        : []
+      section.unshift({ matcher, hooks: [{ ...entry }] })
+      hooks[sectionName] = section
+    }
+    for (const sectionName of [
+      'SessionStart',
+      'UserPromptSubmit',
+      'PreToolUse',
+      'PostToolUse',
+      'Stop',
+      'SessionEnd'
+    ]) {
+      addTabHook(sectionName)
+    }
+    // In popup mode PermissionRequest carries the blocking detail. Only let
+    // Notification handle the non-blocking idle/auth states, otherwise a
+    // task-only red could overwrite the detailed permission red.
+    addTabHook(
+      'Notification',
+      options.mode === 'notify' ? '' : 'idle_prompt|auth_success'
+    )
+    if (options.mode === 'popup') {
+      addTabHook('PermissionRequest')
+    }
+  }
+
+  applyTerminalTitle(settings, options.terminalTitle)
+
   return `${JSON.stringify(settings, null, 2)}\n`
 }
 
@@ -211,7 +326,10 @@ export function settingsHaveOurHooks(existingText: string): boolean {
   return ALL_HOOK_SCRIPTS.some((script) => existingText.includes(script))
 }
 
-export function stripSettingsJson(existingText: string): {
+export function stripSettingsJson(
+  existingText: string,
+  options: { restoreTerminalTitle?: { previous: string | null } } = {}
+): {
   text: string
   removed: number
   changed: boolean
@@ -222,7 +340,10 @@ export function stripSettingsJson(existingText: string): {
     throw new Error('settings.json 根节点必须是对象')
   }
   const removed = cleanHooks(settings)
-  if (removed === 0) {
+  const restored = options.restoreTerminalTitle
+    ? applyTerminalTitle(settings, { action: 'restore', previous: options.restoreTerminalTitle.previous })
+    : false
+  if (removed === 0 && !restored) {
     // Preserve the original formatting when there is nothing of ours to remove.
     return { text: existingText, removed: 0, changed: false }
   }

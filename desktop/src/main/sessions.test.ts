@@ -249,7 +249,7 @@ describe('SessionRegistry persistence', () => {
     registry.rename('本机:bbb', '后端会话')
 
     const listed = registry.list([first, second], [], 3000)
-    expect(listed.find((session) => session.key === '本机:aaa')?.title).toBe('demo #1')
+    expect(listed.find((session) => session.key === '本机:aaa')?.title).toBe('demo #aaa0')
     const renamed = listed.find((session) => session.key === '本机:bbb')
     expect(renamed?.title).toBe('后端会话')
     expect(renamed?.customLabel).toBe(true)

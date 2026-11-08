@@ -12,22 +12,35 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { LogLevel } from '../../shared/types'
+import type { LogLevel, TabInfoItem } from '../../shared/types'
 import {
+  defaultTabPrefix,
+  defaultTabSuffix,
+  sanitizeTabItems
+} from '../../shared/tab-info'
+import {
+  ALL_HOOK_SCRIPTS,
   APPROVAL_SCRIPT_NAME,
   HOOK_CONFIG_NAME,
   HOOK_VERSION,
   HOOK_VERSION_KEY,
   NOTIFY_SCRIPT_NAME,
   SHELL_RC_FILES,
+  TAB_STATE_NAME,
+  TAB_STATUS_SCRIPT_NAME,
+  TERMINAL_TITLE_OWNER_KEY,
+  TERMINAL_TITLE_UNSET,
   buildEnvBlock,
   installedHookVersion,
   mergeSettingsJson,
+  readTerminalTitleEnv,
   removeEnvBlock,
   settingsHaveOurHooks,
   stripSettingsJson,
+  terminalTitlePrevious,
   type DeployMode,
-  type HookEntry
+  type HookEntry,
+  type MergeOptions
 } from './settings'
 import { hooksDirectory, localClaudeDir, quoteShell, timestamp } from './paths'
 
@@ -38,6 +51,11 @@ export interface LocalDeployConfig {
   timeoutSec?: number
   writeEnv: boolean
   envShells: string[]
+  /** Write the tab-status hook and disable Claude's built-in title. Defaults to true. */
+  tabStatus?: boolean
+  /** Info items placed before/after the session title. */
+  tabPrefix?: TabInfoItem[]
+  tabSuffix?: TabInfoItem[]
   origin?: string
   claudeDir?: string
   hooksDir?: string
@@ -169,6 +187,18 @@ function writePrivate(file: string, content: string): void {
   }
 }
 
+function readHookConfig(path: string): Record<string, unknown> | null {
+  try {
+    if (!existsSync(path)) return null
+    const parsed = JSON.parse(readFileSync(path, 'utf-8'))
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null
+  } catch {
+    return null
+  }
+}
+
 export function deployLocal(
   config: LocalDeployConfig,
   onProgress: (level: LogLevel, message: string) => void
@@ -209,9 +239,27 @@ export function deployLocal(
   if (!isPopup && existsSync(join(claudeDir, APPROVAL_SCRIPT_NAME))) {
     unlinkSync(join(claudeDir, APPROVAL_SCRIPT_NAME))
   }
+
+  const tabStatusEnabled = config.tabStatus !== false
+  const tabScriptPath = join(claudeDir, TAB_STATUS_SCRIPT_NAME)
+  if (tabStatusEnabled) {
+    const tabSource = join(scriptsDir, TAB_STATUS_SCRIPT_NAME)
+    if (!existsSync(tabSource)) throw new Error(`找不到内置钩子脚本 ${tabSource}`)
+    writeFileSync(tabScriptPath, readFileSync(tabSource, 'utf-8'), 'utf-8')
+    try {
+      chmodSync(tabScriptPath, 0o755)
+    } catch {
+      // Windows
+    }
+    onProgress('info', `终端 tab 状态钩子已写入 ${tabScriptPath}`)
+  } else if (existsSync(tabScriptPath)) {
+    unlinkSync(tabScriptPath)
+    onProgress('info', '终端 tab 状态已关闭，已删除旧钩子脚本')
+  }
   onProgress('info', `本机钩子脚本已写入 ${scriptPath}`)
 
   const settingsPath = join(claudeDir, 'settings.json')
+  const configPath = join(claudeDir, HOOK_CONFIG_NAME)
   let existing = ''
   if (existsSync(settingsPath) && statSync(settingsPath).isFile()) {
     existing = readFileSync(settingsPath, 'utf-8')
@@ -251,35 +299,71 @@ export function deployLocal(
   const stopEntry = isPopup
     ? buildLocalHookEntry(notifyEnvPairs, notifyScriptPath, platform, pythonPath)
     : hookEntry
+  const tabStatusEntry = tabStatusEnabled
+    ? buildLocalHookEntry({}, tabScriptPath, platform, pythonPath)
+    : undefined
+
+  const previousTitle = terminalTitlePrevious(readHookConfig(configPath))
+  const currentTitle = readTerminalTitleEnv(existing)
+  let terminalTitle: MergeOptions['terminalTitle']
+  let ownedTitlePrevious: string | null | undefined
+  if (tabStatusEnabled) {
+    terminalTitle = { action: 'disable' }
+    if (currentTitle === '1') {
+      // Keep ownership only if we already set it; otherwise the user owns it.
+      ownedTitlePrevious = previousTitle
+    } else {
+      ownedTitlePrevious = currentTitle === undefined ? null : currentTitle
+    }
+  } else if (previousTitle !== undefined) {
+    terminalTitle = { action: 'restore', previous: previousTitle }
+  }
+
   const merged = mergeSettingsJson(existing, {
     mode: config.mode,
     hookEntry,
     hookTimeout: 300,
     questionEntry: hookEntry,
     stopEntry,
-    sessionEndEntry: stopEntry
+    sessionEndEntry: stopEntry,
+    tabStatusEntry,
+    terminalTitle
   })
   writePrivate(settingsPath, merged)
   onProgress(
     'notify',
     `本机 settings.json 已合并（${config.mode === 'popup' ? '置顶弹窗' : '系统通知'}）`
   )
+  if (tabStatusEnabled) {
+    onProgress('info', '终端 tab 状态已开启（新启动的 Claude Code 会话生效）')
+  }
   if (pythonPath) onProgress('info', `钩子解释器：${pythonPath}（绝对路径，exec form）`)
 
-  const configPath = join(claudeDir, HOOK_CONFIG_NAME)
-  writePrivate(configPath, `${JSON.stringify(envPairs, null, 2)}\n`)
+  const configValues: Record<string, string | number> = { ...envPairs }
+  configValues.CLAUDE_NOTIFY_TAB_PREFIX = JSON.stringify(
+    config.tabPrefix ?? []
+  )
+  configValues.CLAUDE_NOTIFY_TAB_SUFFIX = JSON.stringify(config.tabSuffix ?? [])
+  if (tabStatusEnabled && ownedTitlePrevious !== undefined) {
+    configValues[TERMINAL_TITLE_OWNER_KEY] =
+      ownedTitlePrevious === null ? TERMINAL_TITLE_UNSET : ownedTitlePrevious
+  }
+  writePrivate(configPath, `${JSON.stringify(configValues, null, 2)}\n`)
   onProgress('info', `钩子配置已写入 ${configPath}`)
 
   const verifyPython = platform === 'win32' ? hookEntry.command : 'python3'
-  const verify = spawnSync(verifyPython, ['-m', 'py_compile', scriptPath], {
-    encoding: 'utf-8',
-    timeout: 10000,
-    windowsHide: true
-  })
-  if (verify.status !== 0) {
-    throw new Error(
-      `钩子脚本编译验证失败 exit=${verify.status}: ${(verify.stderr || '').slice(0, 200)}`
-    )
+  const scriptsToVerify = tabStatusEnabled ? [scriptPath, tabScriptPath] : [scriptPath]
+  for (const candidate of scriptsToVerify) {
+    const verify = spawnSync(verifyPython, ['-m', 'py_compile', candidate], {
+      encoding: 'utf-8',
+      timeout: 10000,
+      windowsHide: true
+    })
+    if (verify.status !== 0) {
+      throw new Error(
+        `钩子脚本编译验证失败（${candidate}）exit=${verify.status}: ${(verify.stderr || '').slice(0, 200)}`
+      )
+    }
   }
   onProgress('info', '钩子脚本编译验证通过')
 
@@ -317,6 +401,9 @@ export interface LocalInstallState {
   mode: DeployMode | null
   version: string
   stale: boolean
+  tabStatus: boolean
+  tabPrefix: TabInfoItem[]
+  tabSuffix: TabInfoItem[]
   configPath: string
   settingsPath: string
   latestBackup: string | null
@@ -336,6 +423,19 @@ function latestBackup(settingsPath: string): string | null {
   }
 }
 
+function parseDeployedTabItems(
+  config: Record<string, unknown> | null,
+  key: string,
+  fallback: TabInfoItem[]
+): TabInfoItem[] {
+  if (!config || !(key in config)) return fallback
+  try {
+    return sanitizeTabItems(JSON.parse(String(config[key])))
+  } catch {
+    return fallback
+  }
+}
+
 export function detectLocalState(claudeDir = localClaudeDir()): LocalInstallState {
   const settingsPath = join(claudeDir, 'settings.json')
   const configPath = join(claudeDir, HOOK_CONFIG_NAME)
@@ -349,10 +449,29 @@ export function detectLocalState(claudeDir = localClaudeDir()): LocalInstallStat
     config = null
   }
   const version = installedHookVersion(config)
+  let tabStatus = false
+  try {
+    if (existsSync(settingsPath)) {
+      tabStatus = readFileSync(settingsPath, 'utf-8').includes(TAB_STATUS_SCRIPT_NAME)
+    }
+  } catch {
+    tabStatus = false
+  }
   return {
     mode,
     version,
     stale: Boolean(mode) && version !== HOOK_VERSION,
+    tabStatus,
+    tabPrefix: parseDeployedTabItems(
+      config,
+      'CLAUDE_NOTIFY_TAB_PREFIX',
+      defaultTabPrefix()
+    ),
+    tabSuffix: parseDeployedTabItems(
+      config,
+      'CLAUDE_NOTIFY_TAB_SUFFIX',
+      defaultTabSuffix()
+    ),
     configPath,
     settingsPath,
     latestBackup: latestBackup(settingsPath)
@@ -377,13 +496,20 @@ export function removeLocalDeploy(
 ): LocalRemoveResult {
   const claudeDir = config.claudeDir || localClaudeDir()
   const settingsPath = join(claudeDir, 'settings.json')
+  const configPath = join(claudeDir, HOOK_CONFIG_NAME)
+  const previousTitle = terminalTitlePrevious(readHookConfig(configPath))
   let removedHooks = 0
   let backupPath = ''
   if (existsSync(settingsPath)) {
     const existing = readFileSync(settingsPath, 'utf-8')
     backupPath = `${settingsPath}.bak.${timestamp()}`
     writeFileSync(backupPath, existing, 'utf-8')
-    const stripped = stripSettingsJson(existing)
+    const stripped = stripSettingsJson(
+      existing,
+      previousTitle !== undefined
+        ? { restoreTerminalTitle: { previous: previousTitle } }
+        : undefined
+    )
     removedHooks = stripped.removed
     if (removedHooks === 0 && settingsHaveOurHooks(existing)) {
       throw new Error(
@@ -400,7 +526,7 @@ export function removeLocalDeploy(
     }
   }
   let removedScripts = 0
-  for (const script of [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME, HOOK_CONFIG_NAME]) {
+  for (const script of [...ALL_HOOK_SCRIPTS, HOOK_CONFIG_NAME, TAB_STATE_NAME]) {
     const path = join(claudeDir, script)
     if (existsSync(path)) {
       unlinkSync(path)

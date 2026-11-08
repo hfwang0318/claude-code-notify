@@ -71,11 +71,14 @@ describe('deployLocal', () => {
     expect(detectLocalDeploy(claudeDir)).toBe('popup')
 
     const settings = JSON.parse(readFileSync(result.settingsPath, 'utf-8'))
-    expect(settings.hooks.PermissionRequest).toHaveLength(2)
-    expect(settings.hooks.PreToolUse).toHaveLength(1)
+    expect(settings.hooks.PermissionRequest).toHaveLength(3)
+    expect(settings.hooks.PreToolUse).toHaveLength(2)
     expect(JSON.stringify(settings.hooks.Stop)).toContain('claude_notify_hook.py')
-    expect(settings.hooks.PermissionRequest[0].hooks[0].command).toBe('echo third-party')
-    const installedHook = settings.hooks.PermissionRequest[1].hooks[0]
+    expect(settings.hooks.PermissionRequest[0].hooks[0].command).toContain(
+      'claude_tab_status_hook.py'
+    )
+    expect(settings.hooks.PermissionRequest[1].hooks[0].command).toBe('echo third-party')
+    const installedHook = settings.hooks.PermissionRequest[2].hooks[0]
     if (process.platform === 'win32') {
       expect(installedHook.command).toMatch(/python(\.exe)?$/i)
       expect(installedHook.args).toEqual([result.scriptPath])
@@ -94,6 +97,110 @@ describe('deployLocal', () => {
 
     const backups = readFileSync(result.settingsPath, 'utf-8')
     expect(backups).toContain('third-party')
+  })
+
+  it('installs the tab-status hook by default and removes it when disabled', () => {
+    const claudeDir = tempDir()
+    const base = {
+      mode: 'popup' as const,
+      token: 'test-token',
+      port: 18765,
+      timeoutSec: 240,
+      writeEnv: false,
+      envShells: [],
+      claudeDir,
+      hooksDir: join(process.cwd(), 'resources', 'hooks')
+    }
+
+    deployLocal({ ...base, tabStatus: true }, () => undefined)
+    const installed = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf-8'))
+    expect(existsSync(join(claudeDir, 'claude_tab_status_hook.py'))).toBe(true)
+    expect(installed.hooks.SessionStart).toHaveLength(1)
+    expect(installed.hooks.UserPromptSubmit).toHaveLength(1)
+    expect(installed.hooks.PreToolUse).toHaveLength(2)
+    expect(installed.hooks.PostToolUse).toHaveLength(1)
+    expect(installed.hooks.Notification).toHaveLength(1)
+    expect(installed.hooks.Notification[0].matcher).toBe(
+      'idle_prompt|auth_success'
+    )
+    expect(installed.hooks.PermissionRequest).toHaveLength(2)
+    expect(installed.hooks.Stop).toHaveLength(2)
+    expect(installed.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBe('1')
+    const config = JSON.parse(
+      readFileSync(join(claudeDir, 'claude_notify_config.json'), 'utf-8')
+    )
+    expect(config.CLAUDE_NOTIFY_TERMINAL_TITLE_PREVIOUS).toBe('__unset__')
+    expect(JSON.parse(config.CLAUDE_NOTIFY_TAB_PREFIX)).toEqual([])
+    expect(JSON.parse(config.CLAUDE_NOTIFY_TAB_SUFFIX)).toEqual([])
+
+    deployLocal({ ...base, tabStatus: false }, () => undefined)
+    const removed = JSON.parse(readFileSync(join(claudeDir, 'settings.json'), 'utf-8'))
+    expect(removed.hooks.UserPromptSubmit).toBeUndefined()
+    expect(removed.hooks.SessionStart).toBeUndefined()
+    expect(removed.hooks.PostToolUse).toBeUndefined()
+    expect(removed.hooks.Stop).toHaveLength(1)
+    expect(removed.env?.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBeUndefined()
+    expect(existsSync(join(claudeDir, 'claude_tab_status_hook.py'))).toBe(false)
+  })
+
+  it('writes the configured tab prefix/suffix order', () => {
+    const claudeDir = tempDir()
+    deployLocal(
+      {
+        mode: 'popup',
+        token: 'test-token',
+        port: 18765,
+        timeoutSec: 240,
+        writeEnv: false,
+        envShells: [],
+        tabStatus: true,
+        tabPrefix: ['branch', 'project'],
+        tabSuffix: ['shortId', 'origin'],
+        claudeDir,
+        hooksDir: join(process.cwd(), 'resources', 'hooks')
+      },
+      () => undefined
+    )
+    const config = JSON.parse(
+      readFileSync(join(claudeDir, 'claude_notify_config.json'), 'utf-8')
+    )
+    expect(JSON.parse(config.CLAUDE_NOTIFY_TAB_PREFIX)).toEqual([
+      'branch',
+      'project'
+    ])
+    expect(JSON.parse(config.CLAUDE_NOTIFY_TAB_SUFFIX)).toEqual([
+      'shortId',
+      'origin'
+    ])
+  })
+
+  it('restores a user-provided terminal-title value after disabling tab status', () => {
+    const claudeDir = tempDir()
+    const settingsPath = join(claudeDir, 'settings.json')
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ env: { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '0', KEEP: 'yes' } })
+    )
+    const base = {
+      mode: 'notify' as const,
+      token: 'test-token',
+      port: 18765,
+      timeoutSec: 240,
+      writeEnv: false,
+      envShells: [],
+      claudeDir,
+      hooksDir: join(process.cwd(), 'resources', 'hooks')
+    }
+
+    deployLocal({ ...base, tabStatus: true }, () => undefined)
+    const installed = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    expect(installed.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBe('1')
+    expect(installed.env.KEEP).toBe('yes')
+
+    deployLocal({ ...base, tabStatus: false }, () => undefined)
+    const restored = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    expect(restored.env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE).toBe('0')
+    expect(restored.env.KEEP).toBe('yes')
   })
 
   it('restricts settings.json permissions to 0600 on POSIX', () => {
@@ -168,6 +275,9 @@ describe('deployLocal', () => {
       () => undefined
     )
 
+    const statePath = join(claudeDir, 'claude_notify_tab_state.json')
+    writeFileSync(statePath, '{}')
+
     const removed = removeLocalDeploy({ claudeDir }, () => undefined)
     expect(removed.removedHooks).toBeGreaterThan(0)
 
@@ -180,6 +290,7 @@ describe('deployLocal', () => {
     expect(settings.hooks.Stop).toBeUndefined()
     expect(existsSync(result.scriptPath)).toBe(false)
     expect(existsSync(result.configPath)).toBe(false)
+    expect(existsSync(statePath)).toBe(false)
   })
 
   it('marks an old or missing hook version as stale', () => {
@@ -223,8 +334,8 @@ describe('deployLocal', () => {
     deployLocal(base, () => undefined)
     const result = deployLocal(base, () => undefined)
     const settings = JSON.parse(readFileSync(result.settingsPath, 'utf-8'))
-    expect(settings.hooks.PermissionRequest).toHaveLength(1)
-    expect(settings.hooks.PreToolUse).toHaveLength(1)
+    expect(settings.hooks.PermissionRequest).toHaveLength(2)
+    expect(settings.hooks.PreToolUse).toHaveLength(2)
   })
 })
 
@@ -269,8 +380,12 @@ it('supports notification mode locally', () => {
     () => undefined
   )
   const settings = JSON.parse(readFileSync(result.settingsPath, 'utf-8'))
-  expect(settings.hooks.Notification).toHaveLength(1)
-  expect(settings.hooks.Notification[0].hooks[0].timeout).toBe(30)
+  expect(settings.hooks.Notification).toHaveLength(2)
+  expect(settings.hooks.Notification[0].matcher).toBe('')
+  expect(settings.hooks.Notification[0].hooks[0].command).toContain(
+    'claude_tab_status_hook.py'
+  )
+  expect(settings.hooks.Notification[1].hooks[0].timeout).toBe(30)
   expect(settings.hooks.PermissionRequest).toBeUndefined()
   expect(JSON.stringify(settings.hooks.Stop)).toContain('claude_notify_hook.py')
   const config = JSON.parse(readFileSync(result.configPath, 'utf-8'))

@@ -78,7 +78,7 @@ function sessionMeta(state: AppState, item: ApprovalItem) {
       title: item.sessionLabel,
       topic: '',
       shortId: shortSessionId(item.sessionId),
-      task: item.task,
+      task: item.headline || item.task,
       branch: item.branch,
       ordinal: 1,
       groupSize: 1,

@@ -19,6 +19,7 @@ import type {
   FocusPolicy,
   FontSize,
   FontStyle,
+  TabInfoItem,
   ThemeMode
 } from '../shared/types'
 import type { PopupAnchor } from '../shared/popup-layout'
@@ -39,6 +40,10 @@ export interface DeployCache {
   rememberPassword?: boolean
   envImport?: boolean
   envShells?: string[]
+  /** Show 🟡/🟢 in the terminal tab; defaults to true when absent. */
+  tabStatus?: boolean
+  tabPrefix?: TabInfoItem[]
+  tabSuffix?: TabInfoItem[]
   passwordEncrypted?: string
 }
 

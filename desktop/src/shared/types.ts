@@ -1,3 +1,12 @@
+export type TabInfoItem =
+  | 'project'
+  | 'branch'
+  | 'shortId'
+  | 'origin'
+  | 'terminal'
+  | 'cwd'
+  | 'task'
+
 export type PopupPosition = 'primary' | 'cursor' | 'focus'
 export type ThemeMode = 'system' | 'dark' | 'light'
 export type FocusPolicy = 'first' | 'always' | 'never'
@@ -139,6 +148,8 @@ export interface ApprovalItem {
   terminal: string
   /** Task summary forwarded by the hook (last human prompt of this session). */
   task: string
+  /** Display headline: custom title > AI title > task > project#shortId. */
+  headline?: string
   /** Last assistant explanation before the tool call, when the hook can read it. */
   intent?: string
   /** Git branch forwarded by the hook. */
@@ -244,6 +255,12 @@ export interface DeployFormConfig {
   rememberPassword: boolean
   envImport: boolean
   envShells: string[]
+  /** Show 🟡/🟢 in the terminal tab; defaults to true when absent. */
+  tabStatus?: boolean
+  /** Info items placed before the session title, in order. */
+  tabPrefix?: TabInfoItem[]
+  /** Info items placed after the session title, in order. */
+  tabSuffix?: TabInfoItem[]
   hostFingerprint?: string
 }
 
@@ -277,6 +294,10 @@ export interface DeployProfile {
   callbackPort: number
   hookTimeout: number
   toolMatcher: string
+  /** Show 🟡/🟢 in the terminal tab; absent on older profiles means enabled. */
+  tabStatus?: boolean
+  tabPrefix?: TabInfoItem[]
+  tabSuffix?: TabInfoItem[]
   lastDeployAt: number | null
   status: 'deployed' | 'failed' | 'unknown'
   hooks: number
@@ -305,6 +326,10 @@ export interface DeployState {
   message: string
   localMode: DeployMode | null
   localHooks: number
+  /** Whether the local deployment currently includes the tab-status hook. */
+  localTabStatus?: boolean
+  localTabPrefix?: TabInfoItem[]
+  localTabSuffix?: TabInfoItem[]
   hookVersion: string
   hookStale: boolean
   modeMismatch: boolean
@@ -439,7 +464,14 @@ export interface DesktopApi {
   cancelDeploy?: () => Promise<{ ok: boolean; message?: string }>
   onDeployProgress(callback: (progress: { level: LogLevel; message: string }) => void): () => void
   localStatus(): Promise<{ deployed: boolean; mode: DeployMode | null }>
-  localDeploy(mode: DeployMode): Promise<{ ok: boolean; canceled?: boolean; message: string }>
+  localDeploy(
+    mode: DeployMode,
+    options?: {
+      tabStatus?: boolean
+      tabPrefix?: TabInfoItem[]
+      tabSuffix?: TabInfoItem[]
+    }
+  ): Promise<{ ok: boolean; canceled?: boolean; message: string }>
   removeLocal(): Promise<{ ok: boolean; message: string }>
   restoreLocal(): Promise<{ ok: boolean; message: string }>
   setPrefs(patch: Partial<Prefs>): Promise<void>

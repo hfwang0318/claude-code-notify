@@ -2,22 +2,31 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Client, type ClientChannel, type ConnectConfig, type SFTPWrapper } from 'ssh2'
-import type { LogLevel } from '../../shared/types'
+import type { LogLevel, TabInfoItem } from '../../shared/types'
 import { hooksDirectory, quoteShell as shellQuote, timestamp } from './paths'
 import {
+  ALL_HOOK_SCRIPTS,
   APPROVAL_SCRIPT_NAME,
   DEFAULT_PRE_TOOL_MATCHER,
+  HOOK_CONFIG_NAME,
   HOOK_VERSION,
   HOOK_VERSION_KEY,
   NOTIFY_SCRIPT_NAME,
   SHELL_RC_FILES,
+  TAB_STATE_NAME,
+  TAB_STATUS_SCRIPT_NAME,
+  TERMINAL_TITLE_OWNER_KEY,
+  TERMINAL_TITLE_UNSET,
   buildEnvBlock,
   buildHookCommand,
   mergeSettingsJson,
+  readTerminalTitleEnv,
   removeEnvBlock,
   settingsHaveOurHooks,
   stripSettingsJson,
-  type DeployMode
+  terminalTitlePrevious,
+  type DeployMode,
+  type MergeOptions
 } from './settings'
 
 export interface DeployConfig {
@@ -37,6 +46,10 @@ export interface DeployConfig {
   origin?: string
   envImport?: boolean
   envShells: string[]
+  /** Write the tab-status hook and disable Claude's built-in title. Defaults to true. */
+  tabStatus?: boolean
+  tabPrefix?: TabInfoItem[]
+  tabSuffix?: TabInfoItem[]
   token: string
   hostFingerprint?: string
   trustHost?: boolean
@@ -437,6 +450,21 @@ export async function deployToServer(
         )
       }
 
+      const tabStatusEnabled = config.tabStatus !== false
+      const remoteTabScript = `${claudeDir}/${TAB_STATUS_SCRIPT_NAME}`
+      if (tabStatusEnabled) {
+        const tabContent = readFileSync(
+          join(hooksDirectory(), TAB_STATUS_SCRIPT_NAME),
+          'utf-8'
+        )
+        log(`上传终端 tab 状态脚本 → ${remoteTabScript}`)
+        await sftpWrite(sftp, remoteTabScript, tabContent)
+        await sftpChmod(sftp, remoteTabScript, 0o755)
+      } else {
+        await execCommand(client, `rm -f ${shellQuote(remoteTabScript)}`, 30000, signal)
+        log('终端 tab 状态已关闭，已删除旧钩子脚本')
+      }
+
       // Validate before touching settings.json. A broken upload must not leave
       // the server with hooks pointing at a script that cannot start.
       checkAborted(signal)
@@ -445,7 +473,10 @@ export async function deployToServer(
       if (pythonCheck.code !== 0 || !pythonCheck.stdout.trim()) {
         throw new Error('服务器没有可用的 python3')
       }
-      const scriptsToVerify = isPopup ? [remoteScript, remoteNotifyScript] : [remoteScript]
+      const scriptsToVerify = isPopup
+        ? [remoteScript, remoteNotifyScript]
+        : [remoteScript]
+      if (tabStatusEnabled) scriptsToVerify.push(remoteTabScript)
       for (const scriptPath of scriptsToVerify) {
         const verify = await execCommand(
           client,
@@ -506,6 +537,30 @@ export async function deployToServer(
         [HOOK_VERSION_KEY]: HOOK_VERSION
       }
       const stopCommand = buildHookCommand(notifyEnvPairs, NOTIFY_SCRIPT_NAME)
+
+      const remoteConfigPath = `${claudeDir}/${HOOK_CONFIG_NAME}`
+      const oldConfigText = await sftpRead(sftp, remoteConfigPath)
+      let oldConfig: Record<string, unknown> | null = null
+      try {
+        oldConfig = oldConfigText ? (JSON.parse(oldConfigText) as Record<string, unknown>) : null
+      } catch {
+        oldConfig = null
+      }
+      const previousTitle = terminalTitlePrevious(oldConfig)
+      const currentTitle = readTerminalTitleEnv(existing)
+      let terminalTitle: MergeOptions['terminalTitle']
+      let ownedTitlePrevious: string | null | undefined
+      if (tabStatusEnabled) {
+        terminalTitle = { action: 'disable' }
+        if (currentTitle === '1') {
+          ownedTitlePrevious = previousTitle
+        } else {
+          ownedTitlePrevious = currentTitle === undefined ? null : currentTitle
+        }
+      } else if (previousTitle !== undefined) {
+        terminalTitle = { action: 'restore', previous: previousTitle }
+      }
+
       log('合并钩子配置（清除未选模式的残留）…')
       const merged = mergeSettingsJson(existing, {
         mode: config.mode,
@@ -514,11 +569,48 @@ export async function deployToServer(
         questionEntry: { type: 'command', command: hookCommand },
         stopEntry: { type: 'command', command: stopCommand },
         sessionEndEntry: { type: 'command', command: stopCommand },
+        tabStatusEntry: tabStatusEnabled
+          ? { type: 'command', command: buildHookCommand({}, TAB_STATUS_SCRIPT_NAME) }
+          : undefined,
+        terminalTitle,
         preToolMatcher: DEFAULT_PRE_TOOL_MATCHER
       })
       await sftpWrite(sftp, settingsPath, merged)
       await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
       log(`已写入 ${settingsPath}`)
+      if (tabStatusEnabled) {
+        log('终端 tab 状态已开启（新启动的 Claude Code 会话生效）')
+      }
+
+      if (tabStatusEnabled) {
+        const remoteConfig: Record<string, unknown> = {
+          CLAUDE_NOTIFY_TAB_PREFIX: JSON.stringify(
+            config.tabPrefix ?? []
+          ),
+          CLAUDE_NOTIFY_TAB_SUFFIX: JSON.stringify(config.tabSuffix ?? []),
+          CLAUDE_NOTIFY_ORIGIN: config.origin || config.host
+        }
+        if (ownedTitlePrevious !== undefined) {
+          remoteConfig[TERMINAL_TITLE_OWNER_KEY] =
+            ownedTitlePrevious === null
+              ? TERMINAL_TITLE_UNSET
+              : ownedTitlePrevious
+        }
+        await sftpWrite(
+          sftp,
+          remoteConfigPath,
+          `${JSON.stringify(remoteConfig, null, 2)}\n`
+        )
+        await execCommand(
+          client,
+          `chmod 600 ${shellQuote(remoteConfigPath)}`,
+          15000,
+          signal
+        )
+      } else {
+        // Avoid leaving stale config after re-deploying with the option off.
+        await execCommand(client, `rm -f ${shellQuote(remoteConfigPath)}`, 30000, signal)
+      }
 
       if (config.envImport && config.envShells.length > 0) {
         for (const shell of config.envShells) {
@@ -602,6 +694,15 @@ export async function removeDeployFromServer(
     try {
       checkAborted(signal)
       const existing = await sftpRead(sftp, settingsPath)
+      const remoteConfigPath = `${claudeDir}/${HOOK_CONFIG_NAME}`
+      const oldConfigText = await sftpRead(sftp, remoteConfigPath)
+      let oldConfig: Record<string, unknown> | null = null
+      try {
+        oldConfig = oldConfigText ? (JSON.parse(oldConfigText) as Record<string, unknown>) : null
+      } catch {
+        oldConfig = null
+      }
+      const previousTitle = terminalTitlePrevious(oldConfig)
       if (existing === null) {
         const exists = await execCommand(
           client,
@@ -621,7 +722,12 @@ export async function removeDeployFromServer(
           signal
         )
         log(`已备份现有配置 → ${backupPath}`)
-        const stripped = stripSettingsJson(existing)
+        const stripped = stripSettingsJson(
+          existing,
+          previousTitle !== undefined
+            ? { restoreTerminalTitle: { previous: previousTitle } }
+            : undefined
+        )
         removedHooks = stripped.removed
         if (removedHooks === 0 && settingsHaveOurHooks(existing)) {
           throw new Error(
@@ -639,7 +745,7 @@ export async function removeDeployFromServer(
         }
       }
       checkAborted(signal)
-      for (const script of [APPROVAL_SCRIPT_NAME, NOTIFY_SCRIPT_NAME, 'claude_notify_config.json']) {
+      for (const script of [...ALL_HOOK_SCRIPTS, HOOK_CONFIG_NAME, TAB_STATE_NAME]) {
         await execCommand(
           client,
           `rm -f ${shellQuote(`${claudeDir}/${script}`)}`,

@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import type { AppState } from '../../shared/types'
+import type { AppState, TabInfoItem } from '../../shared/types'
+import {
+  defaultTabPrefix,
+  defaultTabSuffix,
+  sanitizeTabItems
+} from '../../shared/tab-info'
 import { api } from './api'
 import DeployDialog from './DeployDialog'
+import TabInfoEditor from './TabInfoEditor'
 import type { SettingsSection } from './Preferences'
 import { useFocusTrap } from './useFocusTrap'
 
@@ -61,6 +67,13 @@ export default function DeployPanel({
 }: Props): React.JSX.Element | null {
   const dialogRef = useRef<HTMLElement>(null)
   const [localBusy, setLocalBusy] = useState(false)
+  const [localTabStatus, setLocalTabStatus] = useState(true)
+  const [localTabPrefix, setLocalTabPrefix] = useState<TabInfoItem[]>(
+    defaultTabPrefix()
+  )
+  const [localTabSuffix, setLocalTabSuffix] = useState<TabInfoItem[]>(
+    defaultTabSuffix()
+  )
   const [remoteOpen, setRemoteOpen] = useState(false)
 
   useFocusTrap(open && !remoteOpen, dialogRef, onClose)
@@ -68,6 +81,18 @@ export default function DeployPanel({
   useEffect(() => {
     if (!open) setRemoteOpen(false)
   }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    setLocalTabStatus(state.deploy.localTabStatus ?? true)
+    setLocalTabPrefix(state.deploy.localTabPrefix ?? defaultTabPrefix())
+    setLocalTabSuffix(state.deploy.localTabSuffix ?? defaultTabSuffix())
+  }, [
+    open,
+    state.deploy.localTabStatus,
+    state.deploy.localTabPrefix,
+    state.deploy.localTabSuffix
+  ])
 
   const localMode = state.deploy.localMode
   const profiles = state.deploy.profiles
@@ -77,7 +102,11 @@ export default function DeployPanel({
 
   const connectLocal = async (): Promise<void> => {
     setLocalBusy(true)
-    const response = await api.localDeploy(state.prefs.mode)
+    const response = await api.localDeploy(state.prefs.mode, {
+      tabStatus: localTabStatus,
+      tabPrefix: sanitizeTabItems(localTabPrefix),
+      tabSuffix: sanitizeTabItems(localTabSuffix)
+    })
     setLocalBusy(false)
     if (response.ok && !state.onboarding.done) void api.finishOnboarding()
   }
@@ -141,6 +170,31 @@ export default function DeployPanel({
                   <div className="inline-warning">
                     本机 Hook 版本落后，重新接入会保留第三方 hooks 并更新到最新版。
                   </div>
+                ) : null}
+
+                <label className="check-row deploy-choice-check">
+                  <input
+                    type="checkbox"
+                    checked={localTabStatus}
+                    onChange={(event) => setLocalTabStatus(event.target.checked)}
+                  />
+                  <span className="check-copy">
+                    <span>终端 tab 状态（🟡 运行中 / 🟢 完成 / 🔴 阻塞）</span>
+                    <small className="check-note">
+                      会关闭 Claude Code 内置标题更新
+                    </small>
+                  </span>
+                </label>
+
+                {localTabStatus ? (
+                  <TabInfoEditor
+                    prefix={sanitizeTabItems(localTabPrefix)}
+                    suffix={sanitizeTabItems(localTabSuffix)}
+                    onChange={(prefix: TabInfoItem[], suffix: TabInfoItem[]) => {
+                      setLocalTabPrefix(prefix)
+                      setLocalTabSuffix(suffix)
+                    }}
+                  />
                 ) : null}
 
                 <div className="deploy-choice-actions">

@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.7.0 — 2026-11-08
+
+### 新增
+
+- 部署选项“终端 tab 状态”（默认开启）：
+  - `SessionStart` / `Stop` → 🟢 就绪/完成
+  - `UserPromptSubmit` / `PostToolUse` → 🟡 运行中
+  - `AskUserQuestion` / `ExitPlanMode` / `PermissionRequest` / `permission_prompt` → 🔴 阻塞
+  - 标题/弹窗 H1 共用优先级：
+    `agent name > custom-title > ai-title > 小模型会话标题 > 当前任务 > 项目名 #短码`
+  - 标题由 `前缀信息项 · 会话标题 · 后缀信息项` 组成；默认前后缀为空，由用户拖拽选择
+  - 部署 UI 提供胶囊式信息项池：项目名 / 分支 / 会话短码 / 来源 / 终端 / 工作目录 /
+    当前任务；拖入前缀/后缀区配置，同区拖拽改变顺序，拖回池或点 × 移除
+  - 胶囊只存在于配置 UI；终端标题仍是纯文本，不会变成胶囊样式
+  - 标题项与默认项目名重复时自动去重
+  - custom-title / ai-title 直接读取 transcript 的 `type: custom-title` / `ai-title`
+  - 不再手动截断标题和阻塞详情，交给终端 tab 自己做视觉截断
+  - 红色时追加阻塞详情：`Bash: ...` / `编辑 file.ts` / `回答：...` / `确认计划`
+  - 首次进入、没有标题/任务时显示 `项目名 #session_id 前 4 位`
+  - `/clear` 触发 `SessionStart(source=clear)` 时清掉旧任务；`resume` / `compact` 保留
+  - 本机与远端部署都支持，SSH 下同样生效（OSC 0/1/2 经 pty 透传）
+- 开启该选项时会设置 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`，避免 Claude Code 内置标题
+  在回合结束时覆盖状态；关闭或移除时恢复用户原来的值
+- **实测**：`CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` 会停止 AI 标题生成。同一交互式会话
+  一次 prompt：env=on 的 transcript `ai-title` 为 0 条；env=off 为 3 条
+  （`测试目的说明`）。因此 env=on 时用下面的小模型复刻替代官方 AI 标题
+- **严格复刻官方 `generateSessionTitle`**：
+  - 使用官方 system prompt 原文、`<session>` user prompt、JSON schema `{title}`
+  - 输入取**第一条真实用户消息**，不是每轮任务；每条 session 只尝试一次
+  - 最短 10 字符；超过 2000 字符按官方 cap 形状保留 1500 头部 + 省略标记 + 尾部
+  - 语言：优先设置里的 language，否则官方“predominant language”指令
+  - 模型：`CLAUDE_NOTIFY_TITLE_MODEL` > `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_MODEL`
+    （自动去掉 `[1m]` 这类上下文后缀）；直连 `/v1/messages`
+  - env=on 时才启动；异步子进程生成并写入 `claude_notify_tab_state.json`，
+    不阻塞主 hook；路由器偶发 thinking-only 时重试 3 次
+  - 标题仍是 session 级主题，不随每轮任务变化；当前任务只做兜底
+- hook v18：`claude_tab_status_hook.py` / `claude_approval_hook.py` 共用标题优先级；
+  审批 payload 增加 `headline` 字段，弹窗 H1 使用同一套逻辑
+- 应用会话标题在无自定义/首任务/生成标题时回退为 `项目名 #短码`，不再显示应用品牌名
+
+### 测试
+
+- `tab-status-hook.test.ts` 覆盖任务态、确认词、`/clear` 重置、自定义标题、
+  AI 标题优先级、env=1 时跳过 AI 标题、小模型标题与 generated_for 校验、
+  Bash/Edit/AskUserQuestion/ExitPlanMode 详情、SessionEnd 清理、截断与控制字符；
+  `settings.test.ts` / `local.test.ts` 覆盖 hook 合并、通知 matcher、关闭后清理、
+  `env` 原值恢复、状态文件清理
+- `pnpm typecheck`、`pnpm test`（226）通过
+- 真实 Claude E2E：`E2E_CASES=stop,multi,resolved,timeout` 通过（最后一次 30.6s），
+  确认 `PreToolUse` / `PermissionRequest` 的 tab hook 与 headline 不会干扰审批决策
+- UI 实测：iTerm2 交互式会话，env=on 0 条 `ai-title`，env=off 3 条
+  `ai-title`（`测试目的说明`）；测试临时目录已清理
+- 小模型实测：同一 prompt 生成 `终端 tab 状态指示`；父 hook 异步派生子进程、
+  下一次事件读取 generated title 均验证通过
+
 ## 0.6.2 — 2026-10-25
 
 ### 修复

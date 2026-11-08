@@ -306,16 +306,18 @@ export class SessionRegistry {
       if (!group || group.length <= 1) {
         session.ordinal = 1
         session.groupSize = 1
-        session.title = session.customLabel ? session.label : session.topic || base
+        const fallback = session.shortId ? `${base} #${session.shortId}` : base
+        session.title = session.customLabel ? session.label : session.topic || fallback
         continue
       }
       group.sort((left, right) => left.firstSeen - right.firstSeen || left.key.localeCompare(right.key))
       const index = group.findIndex((entry) => entry.key === session.key)
       session.ordinal = index + 1
       session.groupSize = group.length
-      session.title = session.customLabel
-        ? session.label
-        : session.topic || `${base} #${index + 1}`
+      const fallback = session.shortId
+        ? `${base} #${session.shortId}`
+        : `${base} #${index + 1}`
+      session.title = session.customLabel ? session.label : session.topic || fallback
     }
 
     return visible

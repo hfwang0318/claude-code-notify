@@ -1217,14 +1217,17 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
   const elapsed = formatWait(now - item.createdAt)
   // The task is the decision context; the tool message is not. Falling back to
   // the session title keeps old hooks (no task) readable.
+  const providedHeadline = (item.headline || '').trim()
   const headline = isExpired
     ? `${state.expired.length} 条审批已回退终端`
-    : identity.task.trim() && !isConfirmationOnly(identity.task)
-      ? identity.task
-      : identity.title ||
-        item.message ||
-        (questionMode ? item.questions[0]?.question : '') ||
-        'Claude 请求执行权限'
+    : providedHeadline && !isConfirmationOnly(providedHeadline)
+      ? providedHeadline
+      : identity.task.trim() && !isConfirmationOnly(identity.task)
+        ? identity.task
+        : identity.title ||
+          item.message ||
+          (questionMode ? item.questions[0]?.question : '') ||
+          'Claude 请求执行权限'
   const intent = (item.intent || '').trim()
   const showIntent = Boolean(
     intent &&

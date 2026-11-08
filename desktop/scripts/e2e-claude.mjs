@@ -256,45 +256,46 @@ function buildSettings(auth, approvalTimeout) {
     `CLAUDE_NOTIFY_ORIGIN=${shellQuote(origin)}`,
     `python3 ${shellQuote(join(desktopRoot, 'resources', 'hooks', 'claude_notify_hook.py'))}`
   ].join(' ')
+  const tabStatusHook = `CLAUDE_NOTIFY_TAB_STATE=${shellQuote(
+    join(tempRoot, 'claude-tab-state.json')
+  )} python3 ${shellQuote(
+    join(desktopRoot, 'resources', 'hooks', 'claude_tab_status_hook.py')
+  )}`
+  const tabHook = () => ({
+    matcher: '',
+    hooks: [{ type: 'command', command: tabStatusHook, timeout: 5 }]
+  })
+  const approvalEntry = {
+    matcher: '',
+    hooks: [
+      {
+        type: 'command',
+        command: approvalHook,
+        timeout: approvalTimeout + 60 + PAUSE_BUDGET_SEC
+      }
+    ]
+  }
+  const notifyEntry = {
+    matcher: '',
+    hooks: [{ type: 'command', command: notifyHook, timeout: 30 }]
+  }
   const settings = {
     // Some routed models only expose tools that have an explicit permission
     // rule. "ask" keeps Bash/Write/Edit visible while still forcing the real
     // PermissionRequest hook (unlike "allow", which would skip the popup).
     permissions: { defaultMode: 'default', ask: ['Bash', 'Write', 'Edit'] },
     hooks: {
-      PermissionRequest: [
-        {
-          matcher: '',
-          hooks: [
-            {
-              type: 'command',
-              command: approvalHook,
-              timeout: approvalTimeout + 60 + PAUSE_BUDGET_SEC
-            }
-          ]
-        }
-      ],
-      PreToolUse: [
-        {
-          matcher: '',
-          hooks: [
-            {
-              type: 'command',
-              command: approvalHook,
-              timeout: approvalTimeout + 60 + PAUSE_BUDGET_SEC
-            }
-          ]
-        }
-      ],
-      Notification: [
-        { matcher: '', hooks: [{ type: 'command', command: notifyHook, timeout: 30 }] }
-      ],
+      SessionStart: [tabHook()],
+      PermissionRequest: [tabHook(), approvalEntry],
+      PreToolUse: [tabHook(), approvalEntry],
+      PostToolUse: [tabHook()],
+      UserPromptSubmit: [tabHook()],
+      Notification: [tabHook(), notifyEntry],
+      SessionEnd: [tabHook()],
       ...(process.env.E2E_NO_STOP
         ? {}
         : {
-            Stop: [
-              { matcher: '', hooks: [{ type: 'command', command: notifyHook, timeout: 30 }] }
-            ]
+            Stop: [tabHook(), notifyEntry]
           })
     }
   }

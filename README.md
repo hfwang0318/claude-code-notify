@@ -23,14 +23,14 @@ Claude Code 的桌面审批与通知工具：把权限请求、`AskUserQuestion`
 
 ## 下载
 
-最新版本：[Desktop v0.6.1](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.6.1)
+最新版本：[Desktop v0.7.0](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.7.0)
 
-- Windows 免安装：`Claude-Notify-0.6.1-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.6.1.exe`
-- macOS：`Claude.Notify-0.6.1-arm64.dmg`
+- Windows 免安装：`Claude-Notify-0.7.0-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.7.0.exe`
+- macOS：`Claude.Notify-0.7.0-arm64.dmg`
 - 校验：`SHA256SUMS-macos.txt` / `SHA256SUMS-windows.txt`
 
-也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.6.1) 下载。
+也可以直接打开 [Release 页面](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.7.0) 下载。
 
 Windows 包未签名，SmartScreen 提示时选“更多信息 → 仍要运行”。macOS DMG 未签名/未公证，macOS 26/27 上不能直接启动，详见 [desktop/README.md](desktop/README.md)。打包版的自动更新需要签名；未签名 macOS 会自动回退到发布页。
 
@@ -41,7 +41,7 @@ cd desktop
 pnpm install
 pnpm dev          # 开发模式
 pnpm demo         # 构建后打开主窗口 + 演示审批
-pnpm test         # 当前 182 个单测/集成测试，以实际输出为准
+pnpm test         # 当前 226 个单测/集成测试，以实际输出为准
 pnpm e2e:claude   # 真实 Claude Code 端到端（需已登录 Claude）
 pnpm self-test    # HTTP 协议冒烟
 pnpm local-app    # macOS：生成可双击的本机启动器
@@ -61,6 +61,7 @@ pnpm local-app    # macOS：生成可双击的本机启动器
 - 免打扰时段、通知类型区分（审批 / 等待输入 / 需要回答 / 完成）
 - SessionEnd 会话结束态、恢复命令复制、计划审批与 MultiEdit/Write 预览
 - 本机 hook 自动接入/版本自愈；远端 SSH 部署、SHA256 主机指纹、备份与恢复；多服务器目标管理
+- 终端 tab 状态（部署选项，默认开启）：🟢 就绪/完成、🟡 运行中、🔴 阻塞；标题与审批弹窗 H1 共用 `agent > 自定义标题 > AI 标题 > 小模型会话标题 > 当前任务 > 项目名#短码` 优先级，前缀/后缀可在部署 UI 用胶囊拖拽配置（项目名/分支/短码/来源/终端/目录/任务，默认前后缀为空），终端标题仍是纯文本且不手动截断；env=on 时按官方 `generateSessionTitle` 的提示词和第一条用户消息异步生成会话标题，红色时追加阻塞命令/文件/问题；移除时恢复原值
 - 自动更新：安装版启动检查、下载并重启安装；免安装版启动检查并把新 zip 下载到下载目录，手动替换；未签名 macOS 回退到发布页
 - 真实 Claude Code E2E：bypass 双入口、双会话、resolved、timeout
 
@@ -75,6 +76,6 @@ pnpm local-app    # macOS：生成可双击的本机启动器
 
 ## 更新已部署的钩子
 
-升级桌面端后，在应用里重新部署即可（本机按钮或远端“部署并验证”）。部署会重新上传随包的 `claude_approval_hook.py` 并幂等合并 `settings.json`，不需要手动替换服务器文件。
+升级桌面端后，在应用里重新部署即可（本机按钮或远端“部署并验证”）。部署会重新上传随包的钩子（含 `claude_tab_status_hook.py`）并幂等合并 `settings.json`，不需要手动替换服务器文件。
 
 本机 hook 版本过期时，应用启动会自动备份并升级；如果自动升级失败，会显示“本机 Hook 需要更新”横幅，可一键修复。

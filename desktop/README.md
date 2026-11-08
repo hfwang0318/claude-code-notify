@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.6.1**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.6.1)。
+当前版本 **0.7.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.7.0)。
 
 ## 运行
 
@@ -14,7 +14,7 @@ pnpm dev        # Vite + Electron 开发模式
 pnpm demo       # 构建后打开主窗口 + 演示审批弹窗
 pnpm capture    # 离屏截图：onboarding / main / status / inbox / history / logs / settings / settings-reminder / deploy / deploy-dialog / popup*
 pnpm self-test  # 协议冒烟：health、401、审批、问答、建议、resolved
-pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 182 个，以 pnpm test 输出为准）
+pnpm test       # HTTP 集成 + settings/env + 会话/规则/协议（当前 226 个，以 pnpm test 输出为准）
 pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ```
 
@@ -77,6 +77,23 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 - `ssh2` 真实 SSH 部署：密码 / 私钥 / 私钥密码
 - 上传所选钩子、删除未选钩子、`chmod 755`
+- **终端 tab 状态**（部署选项，默认开启）：`SessionStart` / `Stop` 显示 🟢，
+  `UserPromptSubmit` / `PostToolUse` 显示 🟡，`AskUserQuestion` / `ExitPlanMode` /
+  `PermissionRequest` / `permission_prompt` 显示 🔴。标题与审批弹窗 H1 共用优先级：
+  `agent name > custom-title > ai-title > 小模型会话标题 > 当前任务 > 项目名 #短码`。
+  标题由 `前缀 · 会话标题 · 后缀` 组成；部署 UI 用胶囊池配置项目名/分支/会话短码/
+  来源/终端/工作目录/当前任务，拖入前缀或后缀区并可在同区排序，默认前后缀为空。
+  胶囊只存在于配置 UI，终端标题仍是纯文本；标题和阻塞详情不手动截断，交给终端
+  tab 视觉截断；与标题重复的信息项自动去重。
+  custom/ai 标题直接读 transcript；开启时设置
+  `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`，避免被 Claude Code 内置标题覆盖。
+  实测该变量会停止官方 AI 标题生成，因此 env=on 时按官方 `generateSessionTitle`
+  的 system prompt、**第一条用户消息**输入、JSON schema 和 once-per-session 条件，
+  异步调用当前 Claude 模型端点生成会话标题；模型可用
+  `CLAUDE_NOTIFY_TITLE_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_MODEL`
+  覆盖。红色时追加阻塞详情（`Bash: ...` / `编辑 file.ts` / `回答：...` / `确认计划`），
+  首次进入没有标题/任务时显示 `项目名 #短码`。关闭或移除时恢复 env 原值。
+  iTerm2 / Tabby / Terminal.app 等能显示 OSC 0/1/2 标题的终端都适用
 - `settings.json` 备份 + 幂等合并（清除本工具旧条目，保留第三方 hooks）；支持移除服务器钩子与恢复上一个备份
 - 可选把 Token 写入 bash / zsh / csh / fish 的 rc 文件（幂等标记块）
 - 部署后验证 `python3` 可执行钩子，并从服务器反向 `curl /health`；测试连接会同时预检回调连通性
@@ -122,9 +139,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.6.1-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.6.1.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.6.1-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.7.0-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.7.0.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.7.0-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
@@ -135,7 +152,7 @@ Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS D
 
 ## 验证
 
-- `pnpm test`：当前 182 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、完成弹窗策略）
+- `pnpm test`：当前 226 个测试，以 `pnpm test` 输出为准（HTTP 401 / 411 / 413 / 去重 / 长轮询 / 断开取消 / 并发队列 / resolved / 停止服务、body 超时、回调异常、SSH 超时/取消、settings 合并与递归移除、本机接入、Windows exec form、会话身份/任务摘要/短码/同项目编号/倒计时暂停/风险/规则/协议、历史导出、通知策略、部署漂移、弹窗底部锚点、远程 Python 语法验证、终端 tab 状态合并/清理/原值恢复、完成弹窗策略）
 - `pnpm self-test`：health、allow、question、suggestion、resolved、404、超时、回退确认、历史/会话落盘
 - `pnpm e2e:claude`：真实 Claude Code 2.1.295 bypass（两种入口）、Stop 回合通知、双会话并发、终端已处理、真实超时回退；工具未暴露时明示 SKIP，约 60–130s
 - E2E 使用隔离端口/数据目录/Claude settings，不修改 `~/.claude/settings.json`；详见 [E2E.md](E2E.md)

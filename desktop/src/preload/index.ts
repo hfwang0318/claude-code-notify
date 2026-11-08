@@ -12,7 +12,8 @@ import type {
   LogLevel,
   Prefs,
   RuleScope,
-  SecurityInfo
+  SecurityInfo,
+  TabInfoItem
 } from '../shared/types'
 
 const api: DesktopApi = {
@@ -88,7 +89,14 @@ const api: DesktopApi = {
       stale?: boolean
       version?: string
     }>,
-  localDeploy: (mode: 'popup' | 'notify') => ipcRenderer.invoke('local:deploy', mode),
+  localDeploy: (
+    mode: 'popup' | 'notify',
+    options?: {
+      tabStatus?: boolean
+      tabPrefix?: TabInfoItem[]
+      tabSuffix?: TabInfoItem[]
+    }
+  ) => ipcRenderer.invoke('local:deploy', mode, options),
   removeLocal: () => ipcRenderer.invoke('local:remove'),
   restoreLocal: () => ipcRenderer.invoke('local:restore'),
   setPrefs: (patch: Partial<Prefs>) => ipcRenderer.invoke('prefs:set', patch),

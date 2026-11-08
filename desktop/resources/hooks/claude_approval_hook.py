@@ -121,12 +121,27 @@ TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 # in settings.json gets the same budget added by the deploy code.
 PAUSE_BUDGET_SEC = 600
 SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
-HOOK_VERSION = "9"
+HOOK_VERSION = "18"
 CURRENT_EVENT = ""
 
-TASK_MAX_CHARS = 60
+TASK_MAX_CHARS = None
 INTENT_MAX_CHARS = 160
 TASK_TAIL_BYTES = 256 * 1024
+HEADLINE_MAX_CHARS = None
+AI_TITLE_TAIL_BYTES = 128 * 1024
+TAB_STATE_NAME = "claude_notify_tab_state.json"
+TAB_CONFIG_NAME = "claude_notify_config.json"
+TAB_ITEM_IDS = {
+    "project",
+    "branch",
+    "shortId",
+    "origin",
+    "terminal",
+    "cwd",
+    "task",
+}
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_SEPARATORS = re.compile(r"[/\\]")
 
 
 def _clean_task_text(text: str) -> str:
@@ -291,6 +306,235 @@ def assistant_intent(transcript_path: str) -> str:
             return cleaned[:INTENT_MAX_CHARS]
         return ""
     return ""
+
+
+def _clean_text(text: object) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = _CONTROL_CHARS.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _clean_label(text: object, max_chars: int | None = None) -> str:
+    text = _clean_text(text)
+    return text[:max_chars] if max_chars else text
+
+
+def _project_name(cwd: str) -> str:
+    text = str(cwd or "").rstrip("/\\")
+    parts = [part for part in _SEPARATORS.split(text) if part]
+    return _clean_text(parts[-1] if parts else "")
+
+
+def _short_session_id(session_id: str) -> str:
+    match = re.match(r"[A-Za-z0-9_-]{4}", str(session_id or ""))
+    return match.group(0) if match else ""
+
+
+def _tab_custom_title(session_id: str) -> str:
+    if not session_id:
+        return ""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TAB_STATE_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            state = json.load(file)
+        entry = state.get(session_id) if isinstance(state, dict) else None
+        if isinstance(entry, dict):
+            return _clean_label(entry.get("custom_title"))
+    except Exception:
+        pass
+    return ""
+
+
+def _transcript_titles(transcript_path: str) -> tuple[str, str]:
+    custom = ""
+    ai_title = ""
+    for raw_line in reversed(_read_transcript_lines(transcript_path)):
+        try:
+            entry = json.loads(raw_line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("type")
+        if kind == "custom-title" and not custom:
+            custom = _clean_label(entry.get("customTitle"))
+        elif kind == "ai-title" and not ai_title:
+            ai_title = _clean_label(entry.get("aiTitle"))
+        if custom and ai_title:
+            break
+    return custom, ai_title
+
+
+def _tab_generated_title(session_id: str) -> str:
+    if not session_id:
+        return ""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TAB_STATE_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            state = json.load(file)
+        entry = state.get(session_id) if isinstance(state, dict) else None
+        if not isinstance(entry, dict):
+            return ""
+        first = entry.get("first_prompt")
+        generated = _clean_label(entry.get("generated_title"))
+        generated_for = entry.get("generated_for")
+        if (
+            generated
+            and isinstance(first, str)
+            and first
+            and generated_for == first
+        ):
+            return generated
+    except Exception:
+        pass
+    return ""
+
+
+def _ai_title_enabled() -> bool:
+    # The env disables Claude Code's title generator too (verified interactively).
+    return os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE") != "1"
+
+
+def _parse_tab_items(value: object) -> list[str] | None:
+    data = value
+    if isinstance(value, str):
+        try:
+            data = json.loads(value)
+        except Exception:
+            return None
+    if not isinstance(data, list):
+        return None
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        if isinstance(item, str) and item in TAB_ITEM_IDS and item not in seen:
+            seen.add(item)
+            output.append(item)
+    return output
+
+
+def _tab_config() -> tuple[list[str], list[str], str]:
+    path = os.environ.get("CLAUDE_NOTIFY_TAB_CONFIG") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), TAB_CONFIG_NAME
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            config = json.load(file)
+    except Exception:
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    prefix = _parse_tab_items(config.get("CLAUDE_NOTIFY_TAB_PREFIX"))
+    suffix = _parse_tab_items(config.get("CLAUDE_NOTIFY_TAB_SUFFIX"))
+    origin = _clean_text(config.get("CLAUDE_NOTIFY_ORIGIN"))
+    return (
+        prefix if prefix is not None else [],
+        suffix if suffix is not None else [],
+        origin,
+    )
+
+
+def _short_path(cwd: str) -> str:
+    text = str(cwd or "").rstrip("/\\")
+    parts = [part for part in _SEPARATORS.split(text) if part]
+    if len(parts) <= 2:
+        return text
+    return "/".join(parts[-2:])
+
+
+def _fallback_headline(cwd: str, session_id: str) -> str:
+    project = _project_name(cwd) or "Claude"
+    short_id = _short_session_id(session_id)
+    return f"{project} #{short_id}" if short_id else project
+
+
+def _source_title(
+    cwd: str,
+    session_id: str,
+    task: str,
+    transcript_path: str,
+    agent_type: str,
+) -> str:
+    agent = _clean_label(agent_type)
+    if agent:
+        return agent
+    custom, ai_title = _transcript_titles(transcript_path)
+    custom = custom or _tab_custom_title(session_id)
+    if custom:
+        return custom
+    if _ai_title_enabled() and ai_title:
+        return ai_title
+    generated = _tab_generated_title(session_id)
+    if generated:
+        return generated
+    cleaned_task = _clean_label(task)
+    if cleaned_task:
+        return cleaned_task
+    return _fallback_headline(cwd, session_id)
+
+
+def _compose_headline(
+    source: str,
+    values: dict[str, str],
+    prefix: list[str],
+    suffix: list[str],
+) -> str:
+    source_text = _clean_text(source)
+    source_lower = source_text.lower()
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: object) -> None:
+        part = _clean_text(value)
+        if not part:
+            return
+        lower = part.lower()
+        if lower in seen:
+            return
+        if source_lower and (
+            lower == source_lower
+            or source_lower.startswith(lower + " ")
+            or lower in source_lower
+        ):
+            return
+        seen.add(lower)
+        parts.append(part)
+
+    for item in prefix:
+        add(values.get(item, ""))
+    if source_text and source_lower not in seen:
+        parts.append(source_text)
+        seen.add(source_lower)
+    for item in suffix:
+        add(values.get(item, ""))
+    return " · ".join(parts) if parts else source_text
+
+
+def headline_for(
+    cwd: str,
+    session_id: str,
+    task: str,
+    transcript_path: str,
+    agent_type: str = "",
+) -> str:
+    """Popup H1 / tab label priority, aligned with Claude Code's session title."""
+    prefix, suffix, config_origin = _tab_config()
+    environment = session_environment()
+    origin = config_origin or environment.get("origin", "")
+    terminal = environment.get("terminal", "")
+    short_id = _short_session_id(session_id)
+    values = {
+        "project": _project_name(cwd),
+        "branch": git_branch(cwd),
+        "shortId": f"#{short_id}" if short_id else "",
+        "origin": origin,
+        "terminal": terminal,
+        "cwd": _short_path(cwd),
+        "task": _clean_label(task),
+    }
+    source = _source_title(cwd, session_id, task, transcript_path, agent_type)
+    return _compose_headline(source, values, prefix, suffix)
 
 
 def _read_git_head(head_path: str) -> str:
@@ -1035,6 +1279,15 @@ def main() -> None:
         or ""
     )
     cwd = str(hook_input.get("cwd") or "")
+    session_id = str(hook_input.get("session_id") or "")
+    task = task_summary(transcript_path)
+    headline = headline_for(
+        cwd,
+        session_id,
+        task,
+        transcript_path,
+        str(hook_input.get("agent_type") or ""),
+    )
     payload = {
         "request_id": correlation["request_id"],
         "session_id": hook_input.get("session_id"),
@@ -1043,7 +1296,9 @@ def main() -> None:
         "cwd": cwd,
         "transcript_path": transcript_path,
         # 多会话区分：任务摘要 + 分支，全部在钩子侧生成，只有短文本过网。
-        "task": task_summary(transcript_path),
+        "task": task,
+        # 弹窗 H1 / tab 共用优先级：自定义标题 > AI 标题 > 任务 > 项目名#短码。
+        "headline": headline,
         "intent": assistant_intent(transcript_path),
         "branch": git_branch(cwd),
         "tool_name": tool_name,

@@ -1587,6 +1587,100 @@ kbd {
   accent-color: var(--coral);
 }
 
+.check-row small {
+  color: var(--faint);
+  font-size: 0.9em;
+}
+
+.check-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.check-note {
+  display: block;
+}
+
+.deploy-choice-check {
+  margin-top: 12px;
+}
+
+.tab-info-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.tab-info-caption {
+  margin-top: 4px;
+  color: var(--faint);
+  font-size: calc(11.5px * var(--font-scale));
+}
+
+.tab-info-zone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+}
+
+.tab-info-pool {
+  min-height: 32px;
+  background: rgba(127, 127, 127, 0.04);
+}
+
+.tab-info-zone.drag-over {
+  border-color: var(--coral);
+  background: color-mix(in srgb, var(--coral) 8%, transparent);
+}
+
+.tab-info-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.08);
+  color: var(--muted);
+  font-size: calc(11.5px * var(--font-scale));
+  cursor: grab;
+  user-select: none;
+}
+
+.tab-info-pill:active {
+  cursor: grabbing;
+}
+
+.tab-info-pill.dragging {
+  opacity: 0.45;
+}
+
+.tab-info-remove {
+  padding: 0 0 0 2px;
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tab-info-remove:hover {
+  color: var(--coral);
+}
+
+.tab-info-hint {
+  color: var(--faint);
+  font-size: calc(11px * var(--font-scale));
+}
+
 .shell-chips {
   display: flex;
   flex-wrap: wrap;
