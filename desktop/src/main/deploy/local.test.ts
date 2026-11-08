@@ -34,6 +34,14 @@ afterEach(() => {
   }
 })
 
+// POSIX 把脚本路径写进 command；Windows 用 exec form（command + args）。
+function hookCommandText(entry: {
+  command?: string
+  args?: string[]
+}): string {
+  return [entry.command || '', ...(entry.args || [])].join(' ')
+}
+
 describe('deployLocal', () => {
   it('writes hooks, config, backup, and preserves third-party hooks', () => {
     const claudeDir = tempDir()
@@ -74,9 +82,9 @@ describe('deployLocal', () => {
     expect(settings.hooks.PermissionRequest).toHaveLength(3)
     expect(settings.hooks.PreToolUse).toHaveLength(2)
     expect(JSON.stringify(settings.hooks.Stop)).toContain('claude_notify_hook.py')
-    expect(settings.hooks.PermissionRequest[0].hooks[0].command).toContain(
-      'claude_tab_status_hook.py'
-    )
+    expect(
+      hookCommandText(settings.hooks.PermissionRequest[0].hooks[0])
+    ).toContain('claude_tab_status_hook.py')
     expect(settings.hooks.PermissionRequest[1].hooks[0].command).toBe('echo third-party')
     const installedHook = settings.hooks.PermissionRequest[2].hooks[0]
     if (process.platform === 'win32') {
@@ -382,9 +390,9 @@ it('supports notification mode locally', () => {
   const settings = JSON.parse(readFileSync(result.settingsPath, 'utf-8'))
   expect(settings.hooks.Notification).toHaveLength(2)
   expect(settings.hooks.Notification[0].matcher).toBe('')
-  expect(settings.hooks.Notification[0].hooks[0].command).toContain(
-    'claude_tab_status_hook.py'
-  )
+  expect(
+    hookCommandText(settings.hooks.Notification[0].hooks[0])
+  ).toContain('claude_tab_status_hook.py')
   expect(settings.hooks.Notification[1].hooks[0].timeout).toBe(30)
   expect(settings.hooks.PermissionRequest).toBeUndefined()
   expect(JSON.stringify(settings.hooks.Stop)).toContain('claude_notify_hook.py')
