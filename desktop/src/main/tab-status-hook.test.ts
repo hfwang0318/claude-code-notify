@@ -119,6 +119,107 @@ function title(dot: string, label: string): string {
   return `\x1b]0;${dot} ${label}\x07\x1b]1;${dot} ${label}\x07\x1b]2;${dot} ${label}\x07`
 }
 
+function titleWorkerEnv(
+  baseUrl: string,
+  extra: Record<string, string | undefined> = {}
+): NodeJS.ProcessEnv {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    CLAUDE_NOTIFY_TAB_STATE: statePath,
+    CLAUDE_NOTIFY_TAB_CONFIG: tabConfigPath,
+    CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
+    ANTHROPIC_AUTH_TOKEN: 'test-token',
+    ANTHROPIC_MODEL: 'test-model',
+    ANTHROPIC_BASE_URL: baseUrl,
+    // Inherited proxy settings must not leak into these cases.
+    http_proxy: undefined,
+    HTTP_PROXY: undefined,
+    https_proxy: undefined,
+    HTTPS_PROXY: undefined,
+    all_proxy: undefined,
+    ALL_PROXY: undefined,
+    no_proxy: undefined,
+    NO_PROXY: undefined,
+    ...extra
+  }
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined)
+  )
+}
+
+function writeTitleState(firstPrompt: string): void {
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      [SESSION_ID]: {
+        first_prompt: firstPrompt,
+        title_attempted: 1,
+        ts: Date.now() / 1000
+      }
+    })
+  )
+}
+
+function generatedTitle(): string | undefined {
+  const state = JSON.parse(readFileSync(statePath, 'utf-8'))
+  return state[SESSION_ID]?.generated_title
+}
+
+async function runTitleWorker(env: NodeJS.ProcessEnv): Promise<void> {
+  if (!python) throw new Error('python is unavailable')
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      python.command,
+      [...python.args, script, '--generate-title', SESSION_ID],
+      { env, stdio: 'ignore', windowsHide: true }
+    )
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('title worker did not exit in time'))
+    }, 40000)
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    child.on('close', () => {
+      clearTimeout(timer)
+      resolve()
+    })
+  })
+}
+
+async function startTitleServer(
+  delayMs: number
+): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((request, response) => {
+    request.on('data', () => {})
+    request.on('end', () => {
+      setTimeout(() => {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({
+            content: [
+              { type: 'text', text: JSON.stringify({ title: '慢路由标题' }) }
+            ]
+          })
+        )
+      }, delayMs)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('title server did not bind a port')
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+  }
+}
+
 describe.skipIf(!python)('claude_tab_status_hook.py', () => {
   it('falls back to project + short id when no task is known', () => {
     const output = event('SessionStart')
@@ -276,74 +377,6 @@ print(json.dumps([
     expect(result.status, result.stderr).toBe(0)
     expect(JSON.parse(result.stdout.trim())).toEqual([true, true, true, false])
   })
-
-  it('bypasses environment proxies for a loopback title endpoint', async () => {
-    const firstPrompt = '修复登录超时问题的完整回归用例'
-    writeFileSync(
-      statePath,
-      JSON.stringify({ [SESSION_ID]: { first_prompt: firstPrompt, ts: Date.now() / 1000 } })
-    )
-    let requests = 0
-    const server = createServer((request, response) => {
-      requests += 1
-      request.resume()
-      request.on('end', () => {
-        const text = JSON.stringify({ title: '登录超时修复' })
-        response.writeHead(200, { 'content-type': 'application/json' })
-        response.end(
-          JSON.stringify({ content: [{ type: 'text', text }] })
-        )
-      })
-    })
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const address = server.address()
-    const port = typeof address === 'object' && address ? address.port : 0
-    try {
-      const child = spawn(
-        python!.command,
-        [...python!.args, script, '--generate-title', SESSION_ID],
-        {
-          env: {
-            ...process.env,
-            CLAUDE_NOTIFY_TAB_STATE: statePath,
-            CLAUDE_NOTIFY_TAB_CONFIG: tabConfigPath,
-            CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
-            ANTHROPIC_AUTH_TOKEN: 'test-token',
-            ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-            CLAUDE_NOTIFY_TITLE_MODEL: 'test-model',
-            HTTP_PROXY: 'http://127.0.0.1:1',
-            HTTPS_PROXY: 'http://127.0.0.1:1',
-            http_proxy: 'http://127.0.0.1:1',
-            https_proxy: 'http://127.0.0.1:1',
-            NO_PROXY: '',
-            no_proxy: ''
-          },
-          stdio: ['ignore', 'pipe', 'pipe']
-        }
-      )
-      let stderr = ''
-      child.stderr.on('data', (chunk) => {
-        stderr += String(chunk)
-      })
-      const code = await new Promise<number | null>((resolve) => {
-        const timer = setTimeout(() => {
-          child.kill('SIGTERM')
-          resolve(null)
-        }, 20000)
-        child.on('exit', (value) => {
-          clearTimeout(timer)
-          resolve(value)
-        })
-      })
-      expect(code, stderr).toBe(0)
-      expect(requests, stderr).toBe(1)
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'))
-      expect(state[SESSION_ID].generated_title).toBe('登录超时修复')
-      expect(state[SESSION_ID].generated_for).toBe(firstPrompt)
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-    }
-  }, 30000)
 
   it('uses the AI title even before the first task is known', () => {
     writeAiTitles('Claude Code 终端标签页状态指示')
@@ -578,4 +611,36 @@ print(json.dumps([
     const output = run({ hook_event_name: 'SessionStart', cwd: '/tmp/demo' })
     expect(output.terminalSequence).toBe(title('🟢', 'demo'))
   })
+
+  it('waits past 8s for a slow structured title request', async () => {
+    const firstPrompt = '/gc-req-clarify 分析需求：maau net name 优化 maau net name'
+    writeTitleState(firstPrompt)
+    const server = await startTitleServer(9000)
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('慢路由标题')
+  }, 30000)
+
+  it('reaches a loopback model router even when HTTP(S)_PROXY is set', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startTitleServer(0)
+    const proxy = 'http://127.0.0.1:1'
+    try {
+      await runTitleWorker(
+        titleWorkerEnv(server.url, {
+          http_proxy: proxy,
+          HTTP_PROXY: proxy,
+          https_proxy: proxy,
+          HTTPS_PROXY: proxy
+        })
+      )
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('慢路由标题')
+  }, 30000)
 })

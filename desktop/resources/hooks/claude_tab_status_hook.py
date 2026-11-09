@@ -66,6 +66,11 @@ TAB_ITEM_IDS = {
 }
 STATE_RETENTION_SEC = 7 * 24 * 60 * 60
 STATE_MAX_ENTRIES = 50
+# Structured output makes thinking-heavy routers spend 10-16s before they
+# finish a title. The worker is detached and the hook never waits for it, so
+# this timeout only bounds the worker's lifetime: leave room for the model to
+# finish instead of cutting the request off mid-thinking.
+TITLE_REQUEST_TIMEOUT_SEC = 25
 _UNSET = object()
 
 # Exact system prompt from Claude Code 2.1.308's generateSessionTitle.
@@ -592,7 +597,7 @@ def _request_title(content: str) -> str:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers=headers,
         )
-        with _open_url(request, timeout=8) as response:
+        with _open_url(request, timeout=TITLE_REQUEST_TIMEOUT_SEC) as response:
             return response.read().decode("utf-8", "ignore")
 
     def extract(raw: str) -> str:

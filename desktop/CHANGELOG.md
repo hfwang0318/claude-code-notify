@@ -4,6 +4,10 @@
 
 ### 修复
 
+- 终端 tab 状态：以斜杠技能/命令开头的会话永远不生成 AI 标题。复刻的标题请求带
+  `output_format: json_schema`，思考型路由回到 JSON 需要 10~16s，而 8s 超时会先掐断
+  请求，worker 拿到空响应后静默结束；普通短 prompt 也只在 5~8s 边缘偶尔成功。超时
+  放宽到 25s——标题 worker 是 detached 子进程，主 hook 不等待它，放宽不影响任何交互
 - Hook 发往 loopback 的请求不再被 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量劫持。
   `urllib.request.urlopen` 会对所有主机应用环境代理；服务器上导出代理变量后，
   终端 AI 标题、审批弹窗与通知发往 `127.0.0.1` / `localhost` 的请求会被转发到
