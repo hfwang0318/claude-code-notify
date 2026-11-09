@@ -95,6 +95,8 @@ v4 弹窗把“当前任务”提升为 H1，把命令/工具名收敛到唯一�
 `terminalSequence` 维护三态标题：
 
 - `SessionStart` / `Stop` / `SessionEnd` → 🟢
+- `SessionStart(source=compact)` → 沿用压缩前的灯色（自动压缩发生在回合中途，
+  不能当成 🟢；没有历史状态时按 🟡 处理）
 - `UserPromptSubmit` / `PostToolUse` → 🟡
 - `AskUserQuestion` / `ExitPlanMode` / `PermissionRequest` / `permission_prompt` → 🔴
 
@@ -116,7 +118,8 @@ agent name
 交给终端 tab 视觉截断。配置写入 `claude_notify_config.json` 的
 `CLAUDE_NOTIFY_TAB_PREFIX` / `CLAUDE_NOTIFY_TAB_SUFFIX`。
 `custom-title` / `ai-title` 直接从 transcript 读取。`/clear` 触发
-`SessionStart(source=clear)` 时清掉旧任务，`resume` / `compact` 保留。首次进入、没有
+`SessionStart(source=clear)` 时清掉旧任务，`resume` / `compact` 保留；状态灯按
+session 缓存，`compact` 时恢复压缩前的灯色。首次进入、没有
 标题/任务时显示 `项目名 #短码`，不再显示应用品牌名；应用会话标题也用同样的兜底。
 红色状态追加阻塞详情（Bash 命令、编辑文件、WebFetch 主机、问题或计划确认）。审批
 payload 增加 `headline`，弹窗 H1 使用同一优先级。
@@ -380,3 +383,12 @@ E2E 需要显示窗口。Linux 无头环境用 `xvfb-run -a pnpm e2e:claude`；m
 已验证环境：Claude Code **2.1.295**。`bypass` 下 Bash / Write / Edit 均执行且 pending=0；`multi` 下两路真实 `-p` 会话并发，先批准第二路，弹窗自动切回第一路；两路均输出 `DONE` 并生成 `result.txt`；history 中记录 `allow/popup`，session 标签/颜色/来源正确。
 
 自动 E2E 五个用例当前均通过，耗时约 **60–130s**，取决于 Claude 当前会话是否暴露 Bash/文件工具。`bypass` 同时覆盖 `--permission-mode bypassPermissions` 和 `--dangerously-skip-permissions`；`stop` 验证真实回合结束通知。
+
+**2026-11-09 自动压缩 tab 状态验证（Claude Code 2.1.308）**：在 tmux 交互式真机会话中，
+用 `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000` + 连续多次大文件 `Read` 推过阈值触发
+`PreCompact(trigger=auto)`。事件序列为 `UserPromptSubmit` 🟡 → 多次
+`PreToolUse` / `PostToolUse` 🟡 → `PreCompact(auto)` → `SessionStart(source=compact)` 🟡 →
+继续工具调用 🟡 → `Stop` 🟢；`pipe-pane` 抓到的原始 OSC 0/1/2 序列在压缩前后没有任何 🟢，
+确认修复后压缩不会再把工作中的会话刷成绿灯。空闲时手动 `/compact` 仍从 🟢 沿用 🟢。
+注意：该版本在 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 触发的 fork 快速压缩路径上不发
+`SessionStart(compact)`，也从不发绿，因此自动化验证要使用正常的阈值压缩路径。

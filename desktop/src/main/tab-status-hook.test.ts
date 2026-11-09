@@ -452,6 +452,24 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     expect(output.terminalSequence).toBe(title('🟢', '修复登录超时'))
   })
 
+  it('keeps the running dot when auto-compaction reports source=compact', () => {
+    event('UserPromptSubmit', { prompt: '修复登录超时' })
+    const output = event('SessionStart', { source: 'compact' })
+    expect(output.terminalSequence).toBe(title('🟡', '修复登录超时'))
+  })
+
+  it('keeps the ready dot when compaction happens between turns', () => {
+    event('UserPromptSubmit', { prompt: '修复登录超时' })
+    event('Stop')
+    const output = event('SessionStart', { source: 'compact' })
+    expect(output.terminalSequence).toBe(title('🟢', '修复登录超时'))
+  })
+
+  it('assumes a running turn when compaction has no previous state', () => {
+    const output = event('SessionStart', { source: 'compact' })
+    expect(output.terminalSequence).toBe(title('🟡', 'demo #a1b2'))
+  })
+
   it('truncates a long task to the configured limit', () => {
     const prompt = 'a'.repeat(60)
     const output = event('UserPromptSubmit', { prompt })

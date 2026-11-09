@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1 — 2026-11-09
+
+### 修复
+
+- 终端 tab 状态：会话触发自动压缩后错误显示 🟢。Claude Code 在自动/手动压缩时发送
+  `SessionStart(source=compact)`，此前被当成会话开始刷成 🟢，导致仍在工作的会话看起来
+  已空闲；现在按 session 缓存上一状态的灯色，压缩后沿用（无历史状态时回落 🟡）。
+  状态灯写入 `claude_notify_tab_state.json`，`/clear` 与 `SessionEnd` 仍会清理
+
 ## 0.7.0 — 2026-11-08
 
 ### 新增

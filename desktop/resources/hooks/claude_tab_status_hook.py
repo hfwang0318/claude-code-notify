@@ -261,6 +261,7 @@ def _state_snapshot(session_id: str) -> dict:
             if isinstance(entry.get("generated_for"), str)
             else ""
         ),
+        "dot": entry.get("dot") if entry.get("dot") in (GREEN, YELLOW, RED) else "",
     }
 
 
@@ -273,6 +274,7 @@ def _update_state(
     attempted: object = _UNSET,
     generated_title: object = _UNSET,
     generated_for: object = _UNSET,
+    dot: object = _UNSET,
     delete: bool = False,
 ) -> None:
     if not session_id:
@@ -320,6 +322,11 @@ def _update_state(
             entry["generated_for"] = cleaned
         else:
             entry.pop("generated_for", None)
+    if dot is not _UNSET:
+        if dot in (GREEN, YELLOW, RED):
+            entry["dot"] = dot
+        else:
+            entry.pop("dot", None)
 
     if entry:
         entry["ts"] = time.time()
@@ -918,7 +925,16 @@ def _detail(payload: dict) -> str:
 
 def _dot(payload: dict) -> str | None:
     event = str(payload.get("hook_event_name") or "")
-    if event in {"SessionStart", "SessionEnd", "Stop"}:
+    if event == "SessionStart":
+        # Auto-compaction (and /compact) fires SessionStart(source=compact)
+        # in the middle of the session. Reporting GREEN there would mark a
+        # working session as idle, so carry over the state shown before
+        # compacting; without prior state assume the turn is still running.
+        if str(payload.get("source") or "") == "compact":
+            session_id = str(payload.get("session_id") or "")
+            return _state_snapshot(session_id)["dot"] or YELLOW
+        return GREEN
+    if event in {"SessionEnd", "Stop"}:
         return GREEN
     if event == "UserPromptSubmit":
         return YELLOW
@@ -947,6 +963,10 @@ def main() -> int:
         return 0
 
     event = str(payload.get("hook_event_name") or "")
+    session_id = str(payload.get("session_id") or "")
+    if session_id:
+        # Remember the dot so SessionStart(source=compact) can carry it over.
+        _update_state(session_id, dot=dot)
     titles = _transcript_titles(str(payload.get("transcript_path") or ""))
     label = _priority_label(payload, event, titles)
     title = f"{dot} {label}"

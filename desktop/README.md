@@ -3,7 +3,7 @@
 Python/PySide6 版本的完整技术栈迁移。桌面端已经替换为 Electron + React，
 服务器端钩子仍然使用零依赖 Python 脚本（部署到远端 `~/.claude/`，不要求用户装 Node）。
 
-当前版本 **0.7.0**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.7.0)。
+当前版本 **0.7.1**，下载：[GitHub Release](https://github.com/hfwang0318/claude-code-notify/releases/tag/desktop-v0.7.1)。
 
 ## 运行
 
@@ -78,6 +78,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 - `ssh2` 真实 SSH 部署：密码 / 私钥 / 私钥密码
 - 上传所选钩子、删除未选钩子、`chmod 755`
 - **终端 tab 状态**（部署选项，默认开启）：`SessionStart` / `Stop` 显示 🟢，
+  `SessionStart(source=compact)` 沿用压缩前的灯色（自动压缩不是回合结束），
   `UserPromptSubmit` / `PostToolUse` 显示 🟡，`AskUserQuestion` / `ExitPlanMode` /
   `PermissionRequest` / `permission_prompt` 显示 🔴。标题与审批弹窗 H1 共用优先级：
   `agent name > custom-title > ai-title > 小模型会话标题 > 当前任务 > 项目名 #短码`。
@@ -139,9 +140,9 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 
 ## 下载、安装与升级
 
-- Windows 免安装：Release 里的 `Claude-Notify-0.7.0-win-x64-portable.zip`
-- Windows 安装版：`Claude.Notify.Setup.0.7.0.exe`（windows-latest CI 构建）
-- macOS：`Claude.Notify-0.7.0-arm64.dmg`（未签名/未公证）
+- Windows 免安装：Release 里的 `Claude-Notify-0.7.1-win-x64-portable.zip`
+- Windows 安装版：`Claude.Notify.Setup.0.7.1.exe`（windows-latest CI 构建）
+- macOS：`Claude.Notify-0.7.1-arm64.dmg`（未签名/未公证）
 
 Windows 未签名，SmartScreen 选“更多信息 → 仍要运行”。macOS DMG 在 macOS 26/27
 上不能直接启动；本机开发请用 `pnpm local-app` 生成启动器。
