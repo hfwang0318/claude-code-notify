@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   mkdirSync,
   mkdtempSync,
@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -253,6 +254,96 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     expect(state[SESSION_ID].first_prompt).toBe(firstPrompt)
     expect(state[SESSION_ID].task).toBe('另一个任务')
   })
+
+  it('classifies loopback targets but not public endpoints', () => {
+    const probe = `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("tab_hook", ${JSON.stringify(script)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps([
+  module._is_loopback_url("http://127.0.0.1:3456/v1/messages"),
+  module._is_loopback_url("http://localhost:18765/claude-notify"),
+  module._is_loopback_url("http://[::1]:3456/v1/messages"),
+  module._is_loopback_url("https://api.anthropic.com/v1/messages"),
+]))
+`
+    const result = spawnSync(python!.command, [...python!.args, '-c', probe], {
+      encoding: 'utf-8',
+      timeout: 10000,
+      windowsHide: true
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout.trim())).toEqual([true, true, true, false])
+  })
+
+  it('bypasses environment proxies for a loopback title endpoint', async () => {
+    const firstPrompt = '修复登录超时问题的完整回归用例'
+    writeFileSync(
+      statePath,
+      JSON.stringify({ [SESSION_ID]: { first_prompt: firstPrompt, ts: Date.now() / 1000 } })
+    )
+    let requests = 0
+    const server = createServer((request, response) => {
+      requests += 1
+      request.resume()
+      request.on('end', () => {
+        const text = JSON.stringify({ title: '登录超时修复' })
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({ content: [{ type: 'text', text }] })
+        )
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    try {
+      const child = spawn(
+        python!.command,
+        [...python!.args, script, '--generate-title', SESSION_ID],
+        {
+          env: {
+            ...process.env,
+            CLAUDE_NOTIFY_TAB_STATE: statePath,
+            CLAUDE_NOTIFY_TAB_CONFIG: tabConfigPath,
+            CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
+            ANTHROPIC_AUTH_TOKEN: 'test-token',
+            ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+            CLAUDE_NOTIFY_TITLE_MODEL: 'test-model',
+            HTTP_PROXY: 'http://127.0.0.1:1',
+            HTTPS_PROXY: 'http://127.0.0.1:1',
+            http_proxy: 'http://127.0.0.1:1',
+            https_proxy: 'http://127.0.0.1:1',
+            NO_PROXY: '',
+            no_proxy: ''
+          },
+          stdio: ['ignore', 'pipe', 'pipe']
+        }
+      )
+      let stderr = ''
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk)
+      })
+      const code = await new Promise<number | null>((resolve) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGTERM')
+          resolve(null)
+        }, 20000)
+        child.on('exit', (value) => {
+          clearTimeout(timer)
+          resolve(value)
+        })
+      })
+      expect(code, stderr).toBe(0)
+      expect(requests, stderr).toBe(1)
+      const state = JSON.parse(readFileSync(statePath, 'utf-8'))
+      expect(state[SESSION_ID].generated_title).toBe('登录超时修复')
+      expect(state[SESSION_ID].generated_for).toBe(firstPrompt)
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 30000)
 
   it('uses the AI title even before the first task is known', () => {
     writeAiTitles('Claude Code 终端标签页状态指示')

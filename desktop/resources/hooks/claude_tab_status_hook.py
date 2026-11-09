@@ -30,6 +30,7 @@ Claude Code 终端 tab 状态钩子。
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -472,6 +473,34 @@ def _base_url() -> str:
     return "https://api.anthropic.com"
 
 
+# urllib applies HTTP(S)_PROXY from the environment to every host, including
+# loopback. Requests to 127.0.0.1/localhost must never be handed to an
+# external proxy, so loopback targets use a proxy-free opener. Non-loopback
+# endpoints (for example ANTHROPIC_BASE_URL on a LAN/router host) keep the
+# environment proxy behavior.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _open_url(request: urllib.request.Request, timeout: float):
+    if _is_loopback_url(request.full_url):
+        return _DIRECT_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def _configured_language() -> str:
     settings = _settings()
     for key in ("language", "outputLanguage", "responseLanguage"):
@@ -563,7 +592,7 @@ def _request_title(content: str) -> str:
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers=headers,
         )
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with _open_url(request, timeout=8) as response:
             return response.read().decode("utf-8", "ignore")
 
     def extract(raw: str) -> str:

@@ -121,8 +121,47 @@ TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 # in settings.json gets the same budget added by the deploy code.
 PAUSE_BUDGET_SEC = 600
 SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
-HOOK_VERSION = "18"
+HOOK_VERSION = "19"
 CURRENT_EVENT = ""
+
+# urllib applies HTTP(S)_PROXY from the environment to every host, including
+# loopback. Approval requests to 127.0.0.1/localhost must never be handed to
+# an external proxy, so loopback targets use a proxy-free opener. Non-loopback
+# desktop URLs (remote deployments) keep the environment proxy behavior.
+# Imports stay lazy: PreToolUse runs this script on every tool call and never
+# opens a URL.
+_DIRECT_OPENER = None
+
+
+def _is_loopback_url(url: str) -> bool:
+    import ipaddress
+    import urllib.parse
+
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _open_url(request, timeout: float):
+    import urllib.request
+
+    global _DIRECT_OPENER
+    if _is_loopback_url(request.full_url):
+        if _DIRECT_OPENER is None:
+            _DIRECT_OPENER = urllib.request.build_opener(
+                urllib.request.ProxyHandler({})
+            )
+        return _DIRECT_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
 
 TASK_MAX_CHARS = None
 INTENT_MAX_CHARS = 160
@@ -881,7 +920,7 @@ def notify_terminal_resolved(
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=3) as response:
+            with _open_url(request, timeout=3) as response:
                 if 200 <= response.status < 300:
                     return
         except urllib.error.HTTPError as exc:
@@ -1341,7 +1380,7 @@ def main() -> None:
 
     # ---- 等待 Windows 端的用户决定 ----
     try:
-        with urllib.request.urlopen(
+        with _open_url(
             request,
             timeout=SOCKET_TIMEOUT,
         ) as response:

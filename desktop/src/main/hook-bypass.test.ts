@@ -178,6 +178,29 @@ module.emit_allow()
     expect(result.stdout).toContain('allow')
   })
 
+  maybe('reaches a loopback desktop despite environment proxy variables', async () => {
+    const result = await runHookPayload(
+      {
+        hook_event_name: 'PermissionRequest',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'pwd' },
+        session_id: 'hook-test-proxy'
+      },
+      {
+        HTTP_PROXY: 'http://127.0.0.1:1',
+        HTTPS_PROXY: 'http://127.0.0.1:1',
+        http_proxy: 'http://127.0.0.1:1',
+        https_proxy: 'http://127.0.0.1:1',
+        NO_PROXY: '',
+        no_proxy: ''
+      }
+    )
+    expect(result.code, result.stderr).toBe(0)
+    expect(result.requests, result.stderr).toBe(1)
+    expect(result.stdout).toContain('allow')
+  })
+
   maybe('skips confirmation-only prompts and reads the last assistant intent', () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'claude-notify-task-'))
     const transcript = join(dataDir, 'transcript.jsonl')

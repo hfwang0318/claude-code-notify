@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.2 — 2026-11-09
+
+### 修复
+
+- Hook 发往 loopback 的请求不再被 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量劫持。
+  `urllib.request.urlopen` 会对所有主机应用环境代理；服务器上导出代理变量后，
+  终端 AI 标题、审批弹窗与通知发往 `127.0.0.1` / `localhost` 的请求会被转发到
+  外部代理并失败，而且失败被静默忽略。现在 loopback 目标使用无代理 opener 直连，
+  非 loopback 端点（远端桌面、`ANTHROPIC_BASE_URL` 等）仍遵循环境代理。
+  hook 版本升至 19，已部署实例会显示需要重新部署
+
 ## 0.7.1 — 2026-11-09
 
 ### 修复
