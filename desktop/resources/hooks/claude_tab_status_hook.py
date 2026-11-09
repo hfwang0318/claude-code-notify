@@ -30,6 +30,7 @@ Claude Code 终端 tab 状态钩子。
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -70,7 +71,6 @@ STATE_MAX_ENTRIES = 50
 # this timeout only bounds the worker's lifetime: leave room for the model to
 # finish instead of cutting the request off mid-thinking.
 TITLE_REQUEST_TIMEOUT_SEC = 25
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _UNSET = object()
 
 # Exact system prompt from Claude Code 2.1.308's generateSessionTitle.
@@ -478,9 +478,32 @@ def _base_url() -> str:
     return "https://api.anthropic.com"
 
 
+# urllib applies HTTP(S)_PROXY from the environment to every host, including
+# loopback. Requests to 127.0.0.1/localhost must never be handed to an
+# external proxy, so loopback targets use a proxy-free opener. Non-loopback
+# endpoints (for example ANTHROPIC_BASE_URL on a LAN/router host) keep the
+# environment proxy behavior.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _is_loopback_url(url: str) -> bool:
-    host = urllib.parse.urlparse(url).hostname or ""
-    return host.lower() in _LOOPBACK_HOSTS or host.startswith("127.")
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _open_url(request: urllib.request.Request, timeout: float):
+    if _is_loopback_url(request.full_url):
+        return _DIRECT_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def _configured_language() -> str:
@@ -568,21 +591,13 @@ def _request_title(content: str) -> str:
         "anthropic-version": "2023-06-01",
     }
 
-    # A local model router must be reached directly: an HTTP(S)_PROXY inherited
-    # from the terminal environment would otherwise swallow the loopback
-    # request. Remote endpoints keep the default proxy resolution.
-    if _is_loopback_url(url):
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    else:
-        opener = urllib.request.build_opener()
-
     def call(body: dict) -> str:
         request = urllib.request.Request(
             url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers=headers,
         )
-        with opener.open(request, timeout=TITLE_REQUEST_TIMEOUT_SEC) as response:
+        with _open_url(request, timeout=TITLE_REQUEST_TIMEOUT_SEC) as response:
             return response.read().decode("utf-8", "ignore")
 
     def extract(raw: str) -> str:

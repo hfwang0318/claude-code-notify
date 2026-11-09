@@ -8,7 +8,7 @@ export const ALL_HOOK_SCRIPTS = [
   NOTIFY_SCRIPT_NAME,
   TAB_STATUS_SCRIPT_NAME
 ]
-export const HOOK_VERSION = '18'
+export const HOOK_VERSION = '19'
 /** Extra time the hook process may stay alive while a popup countdown is paused. */
 export const HOOK_PAUSE_BUDGET_SEC = 600
 export const HOOK_VERSION_KEY = 'CLAUDE_NOTIFY_HOOK_VERSION'

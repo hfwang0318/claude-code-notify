@@ -18,11 +18,13 @@ Claude Code Notification 钩子：把通知单向 POST 到 Windows 托盘应用�
     CLAUDE_NOTIFY_URL     可选，默认 http://localhost:18765/claude-notify
 """
 
+import ipaddress
 import json
 import os
 import re
 import socket
 import sys
+import urllib.parse
 import urllib.request
 
 CONFIG_PATH = os.path.join(
@@ -42,7 +44,7 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-HOOK_VERSION = "18"
+HOOK_VERSION = "19"
 TASK_MAX_CHARS = 60
 TASK_TAIL_BYTES = 256 * 1024
 
@@ -224,6 +226,33 @@ TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
 TIMEOUT = 10
 
 
+# urllib applies HTTP(S)_PROXY from the environment to every host, including
+# loopback. Requests to 127.0.0.1/localhost must never be handed to an
+# external proxy, so loopback targets use a proxy-free opener. Non-loopback
+# endpoints (for example a LAN desktop URL) keep the environment proxy.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _open_url(request: urllib.request.Request, timeout: float):
+    if _is_loopback_url(request.full_url):
+        return _DIRECT_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def note(message: str) -> None:
     """诊断信息写 stderr：不污染 stdout 协议输出，claude --debug 可见。"""
     print(f"[claude-notify-hook] {message}", file=sys.stderr)
@@ -289,7 +318,7 @@ def main() -> None:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT):
+        with _open_url(request, timeout=TIMEOUT):
             pass
     except Exception as exc:
         note(f"请求 {WINDOWS_URL} 失败：{exc}")

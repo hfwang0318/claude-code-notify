@@ -8,9 +8,12 @@
   `output_format: json_schema`，思考型路由回到 JSON 需要 10~16s，而 8s 超时会先掐断
   请求，worker 拿到空响应后静默结束；普通短 prompt 也只在 5~8s 边缘偶尔成功。超时
   放宽到 25s——标题 worker 是 detached 子进程，主 hook 不等待它，放宽不影响任何交互
-- 终端 tab 状态：环境里的 `HTTP(S)_PROXY` 会把发往 loopback 模型路由（如
-  `http://127.0.0.1:xxxx`）的标题请求也交给代理，导致请求失败。loopback 目标改为
-  直连，远端端点仍按默认代理解析
+- Hook 发往 loopback 的请求不再被 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量劫持。
+  `urllib.request.urlopen` 会对所有主机应用环境代理；服务器上导出代理变量后，
+  终端 AI 标题、审批弹窗与通知发往 `127.0.0.1` / `localhost` 的请求会被转发到
+  外部代理并失败，而且失败被静默忽略。现在 loopback 目标使用无代理 opener 直连，
+  非 loopback 端点（远端桌面、`ANTHROPIC_BASE_URL` 等）仍遵循环境代理。
+  hook 版本升至 19，已部署实例会显示需要重新部署
 
 ## 0.7.1 — 2026-11-09
 

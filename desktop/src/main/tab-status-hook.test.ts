@@ -1,5 +1,4 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { createServer } from 'node:http'
 import {
   mkdirSync,
   mkdtempSync,
@@ -7,6 +6,7 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -354,6 +354,28 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     state = JSON.parse(readFileSync(statePath, 'utf-8'))
     expect(state[SESSION_ID].first_prompt).toBe(firstPrompt)
     expect(state[SESSION_ID].task).toBe('另一个任务')
+  })
+
+  it('classifies loopback targets but not public endpoints', () => {
+    const probe = `
+import importlib.util, json
+spec = importlib.util.spec_from_file_location("tab_hook", ${JSON.stringify(script)})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps([
+  module._is_loopback_url("http://127.0.0.1:3456/v1/messages"),
+  module._is_loopback_url("http://localhost:18765/claude-notify"),
+  module._is_loopback_url("http://[::1]:3456/v1/messages"),
+  module._is_loopback_url("https://api.anthropic.com/v1/messages"),
+]))
+`
+    const result = spawnSync(python!.command, [...python!.args, '-c', probe], {
+      encoding: 'utf-8',
+      timeout: 10000,
+      windowsHide: true
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout.trim())).toEqual([true, true, true, false])
   })
 
   it('uses the AI title even before the first task is known', () => {
