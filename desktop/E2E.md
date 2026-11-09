@@ -135,6 +135,10 @@ env=off 为 3 条（`测试目的说明`）。因此 env=on 时按官方 `genera
 - 模型：`CLAUDE_NOTIFY_TITLE_MODEL` > `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_MODEL`
 - 异步子进程生成，写入 `claude_notify_tab_state.json`；不阻塞主 hook
 - 路由器偶发 thinking-only 时重试 3 次（官方是单次；这是对路由模型的适配）
+- 单次请求超时 25s：`json_schema` 结构化输出在思考型路由上要 10~16s，8s 会把斜杠
+  会话的请求全部掐断
+- loopback 模型路由（`localhost` / `127.0.0.0/8` / `::1`）绕过 `HTTP(S)_PROXY`
+  直连；远端端点仍按环境代理解析
 
 要保留官方 AI 标题，需要关闭该 env 并改用独立状态通道（iTerm2 OSC 21337 /
 Tabby 插件）。快速 tab hook 会排在审批/问答 hook 之前，确保阻塞时红灯先出现。
