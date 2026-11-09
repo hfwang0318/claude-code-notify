@@ -65,6 +65,12 @@ TAB_ITEM_IDS = {
 }
 STATE_RETENTION_SEC = 7 * 24 * 60 * 60
 STATE_MAX_ENTRIES = 50
+# Structured output makes thinking-heavy routers spend 10-16s before they
+# finish a title. The worker is detached and the hook never waits for it, so
+# this timeout only bounds the worker's lifetime: leave room for the model to
+# finish instead of cutting the request off mid-thinking.
+TITLE_REQUEST_TIMEOUT_SEC = 25
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _UNSET = object()
 
 # Exact system prompt from Claude Code 2.1.308's generateSessionTitle.
@@ -472,6 +478,11 @@ def _base_url() -> str:
     return "https://api.anthropic.com"
 
 
+def _is_loopback_url(url: str) -> bool:
+    host = urllib.parse.urlparse(url).hostname or ""
+    return host.lower() in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
 def _configured_language() -> str:
     settings = _settings()
     for key in ("language", "outputLanguage", "responseLanguage"):
@@ -557,13 +568,21 @@ def _request_title(content: str) -> str:
         "anthropic-version": "2023-06-01",
     }
 
+    # A local model router must be reached directly: an HTTP(S)_PROXY inherited
+    # from the terminal environment would otherwise swallow the loopback
+    # request. Remote endpoints keep the default proxy resolution.
+    if _is_loopback_url(url):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    else:
+        opener = urllib.request.build_opener()
+
     def call(body: dict) -> str:
         request = urllib.request.Request(
             url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers=headers,
         )
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with opener.open(request, timeout=TITLE_REQUEST_TIMEOUT_SEC) as response:
             return response.read().decode("utf-8", "ignore")
 
     def extract(raw: str) -> str:
