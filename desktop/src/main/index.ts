@@ -130,7 +130,10 @@ import {
   downloadAppUpdate,
   initAutoUpdater,
   installAppUpdate,
-  isPortableBuild
+  isPortableBuild,
+  RELEASES_URL,
+  recordPendingInstall,
+  takeFailedInstallNotice
 } from './auto-update'
 
 const APP_NAME = 'Claude Notify'
@@ -138,6 +141,8 @@ const DEFAULT_PORT = 18765
 const POPUP_WIDTH = 560
 const POPUP_HEIGHT = 760
 const LOG_MAX_BYTES = 5 * 1024 * 1024
+/** Grace period before force-exiting a quit that a stuck handle is holding open. */
+const QUIT_FORCE_EXIT_MS = 10_000
 const BROADCAST_INTERVAL_MS = 16
 const MAIN_QUEUE_FLUSH_DELAY_MS = 30
 const MAIN_QUEUE_MAX = 200
@@ -154,7 +159,14 @@ if (process.platform === 'win32') app.setAppUserModelId('com.claude-notify.app')
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
-  app.quit()
+  // A running instance would make `--self-test` exit 0 without running any
+  // check, which turns the release gate into a false green.
+  if (isSelfTest || isCapture || isDeployTest) {
+    console.error('SELFTEST_BLOCKED 已有实例在运行，请先退出再运行自检')
+    app.exit(2)
+  } else {
+    app.quit()
+  }
 } else {
   app.on('second-instance', () => showMainWindow())
 }
@@ -3019,11 +3031,24 @@ function registerIpc(): void {
     if (result.downloadedPath) {
       shell.showItemInFolder(result.downloadedPath)
       log('info', `免安装更新已下载：${result.downloadedPath}`)
+    } else if (result.status === 'downloaded') {
+      log('notify', `更新 ${result.latest ?? ''} 已下载，等待重启安装`)
+      store.setToast('更新已下载，点击“重启并安装”完成更新')
+    } else if (result.status === 'error') {
+      store.setToast(result.message || '更新下载失败')
     }
     return result
   })
   ipcMain.handle('update:install', () => {
-    installAppUpdate()
+    const update = store.get().update
+    if (update.status !== 'downloaded' || update.installable === false) {
+      store.setToast('当前没有可安装的更新，请先检查并下载')
+      return
+    }
+    if (!installAppUpdate()) return
+    // Mark the target version: if the installer cannot replace the running
+    // build, the next launch reports it instead of failing silently.
+    recordPendingInstall(update.latest || '')
   })
   ipcMain.handle('onboarding:finish', () => {
     store.setOnboarding(true)
@@ -3984,6 +4009,22 @@ async function bootstrap(): Promise<void> {
     (update) => store.setUpdate(update),
     (level, message) => log(level, message)
   )
+  // A pending-install marker from the previous run means the installer never
+  // replaced this build (locked files, missing elevation, app killed first).
+  const failedInstall = takeFailedInstallNotice()
+  if (failedInstall) {
+    log('warn', failedInstall)
+    store.setToast(failedInstall)
+    // Keep the hint in the update panel too: the toast expires long before a
+    // user who launches the app later opens Preferences.
+    store.setUpdate({
+      status: 'error',
+      message: failedInstall,
+      url: RELEASES_URL,
+      manual: true,
+      installable: false
+    })
+  }
 
   server = createNotifyServer()
   await startServer()
@@ -4127,5 +4168,12 @@ app.on('before-quit', (event) => {
     }
     quitAllowed = true
     app.quit()
+    // The Windows NSIS updater cannot replace files that a live process still
+    // maps. Everything is persisted above, so force-exit rather than let a
+    // stuck handle block the install indefinitely.
+    setTimeout(() => {
+      log('warn', '退出超时，强制结束进程')
+      app.exit(0)
+    }, QUIT_FORCE_EXIT_MS).unref?.()
   })()
 })
