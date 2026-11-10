@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.3 — 2026-11-10
+
+### 修复
+
+- Windows 自动更新：下载完成后界面永远停在“下载中 0%”，“重启并安装”按钮不出现。
+  `electron-updater` 先触发 `update-downloaded` 事件、之后 `downloadUpdate()` 才
+  resolve，而 IPC 处理器拿到的是一个写死的 `downloading` 结果，把刚设好的
+  `downloaded` 状态覆盖掉了。现在返回事件里的最终状态，并在重复“检查更新”时保持
+  重启按钮可用，也不会再把更旧的远端版本当成更新
+- Windows 自动更新：安装失败完全静默。下载/安装时写入待安装版本标记，下次启动
+  若仍在旧版本，日志、toast 和“版本与更新”面板都会提示“上次更新未完成”，并给出
+  发布页入口；`electron-updater` 的安装器日志（如 `Cannot run installer`）也会写进
+  `claude-notify.log`
+- 退出流程兜底：清理完成后 10s 仍未退出时强制结束进程，避免 Windows NSIS 更新
+  因残留进程占用安装目录而无法替换文件
+
 ## 0.7.2 — 2026-11-09
 
 ### 修复
