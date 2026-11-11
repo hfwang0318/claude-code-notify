@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.4 — 2026-11-11
+
+### 修复
+
+- 终端 tab 状态：Ctrl+C / Esc 中断工作回合后一直停在 🟡。Claude Code 在用户中断
+  时不发送任何 hook 事件（2.1.308 实测），此前没有任何代码收到“回合已结束”的信号。
+  现在 `UserPromptSubmit` 会启动一个 detached 观察进程，从 transcript 末尾跟踪
+  `[Request interrupted ...]` 标记，命中后直接向 Claude 进程的终端设备写入
+  OSC 0/1/2，把 tab 刷回 🟢；正常 `Stop`、下一条 prompt 或 Claude 退出时观察进程
+  自行结束。Windows 没有可写的 `/dev/ttys*`，该增强在 Windows 上自动跳过
+- 中断观察进程的竞态加固：按整批 transcript 处理，由“最新一条 user 记录”决定
+  是否中断（assistant `stop_sequence` 后 8–13ms 才写入的标记不会再被提前退出
+  漏掉；标记后紧跟的新 prompt 也不会再写过期绿灯）；`for tool use` 标记等 2s
+  settle，避免工具被拒绝但 Claude 继续回答时闪绿；回合结束等 1s 捕捉紧随其后的
+  标记；每次 prompt 写入 turn token，旧 watcher 不会覆盖新回合；状态文件加
+  `flock`，tty 以 `O_NONBLOCK` 打开避免 hook 卡死
+- 终端 tab 标题：关闭会话（`SessionEnd`）会删掉整个状态条目，`claude --resume`
+  后 AI 生成的标题丢失，只剩 `项目名 #短码`。现在 `SessionEnd` 只清理本轮
+  task/灯色，保留 `first_prompt` / `generated_title`，重开会话继续显示原标题
+- 终端 tab 标题：首次标题生成失败（空响应、超时、模型端点不可用）后不再重试，
+  整个会话都没有 AI 标题。现在后续每个真实 prompt 都会重试，两次尝试间隔小于
+  30s 时跳过以避免并发叠加；首条 prompt 太短（少于 10 字符，如 `hi`）时由下一条
+  真实 prompt 顶替，不再永久卡住标题生成
+- hook 版本升至 21，已部署实例会提示重新部署
+
 ## 0.7.3 — 2026-11-10
 
 ### 修复

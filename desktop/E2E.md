@@ -100,6 +100,31 @@ v4 弹窗把“当前任务”提升为 H1，把命令/工具名收敛到唯一�
 - `UserPromptSubmit` / `PostToolUse` → 🟡
 - `AskUserQuestion` / `ExitPlanMode` / `PermissionRequest` / `permission_prompt` → 🔴
 
+Ctrl+C / Esc 中断回合时 Claude Code **不发送任何 hook 事件**（2.1.308 实测：
+PreToolUse 之后按 Ctrl+C，直到回合结束都没有 Stop/PostToolUseFailure/SessionEnd；
+上游 issue `anthropics/claude-code#9516` 也确认 Stop 不会在用户中断时运行）。
+因此 `UserPromptSubmit` 时 hook 会启动一个 detached 观察进程：它从当前
+transcript 末尾开始 poll，发现中断标记就向 Claude 进程的终端设备
+（`ps -o tty=` → `/dev/ttysNNN`；hook 自己被 detached，不能用 `/dev/tty`）直接写
+OSC 0/1/2，把 tab 刷回 🟢，并同步状态灯。规则与 `tylerlaprade/claude-title` 一致：
+
+- **最新一条 user 记录决定状态**：标记之后若又出现 assistant 回复或新 prompt，
+  该标记作废，不写绿灯（避免新回合刚开始却显示绿色）
+- `[Request interrupted by user]`（整回合取消）立即刷绿；
+  `[Request interrupted by user for tool use]`（工具被拒绝）可能后接正常回答，
+  等 2s settle，期间 transcript 有新增内容就放弃
+- assistant `stop_reason` 不是可靠的回合结束信号：真实 transcript 里标记常在
+  `stop_sequence` 后 8–13ms 才写入，所以回合结束后再等 1s 捕捉紧随其后的标记
+- 每次 prompt 写一个 turn token；旧 watcher 写绿前校验 token，新回合不会被覆盖
+- 观察进程在正常 `Stop`、新 prompt 或 Claude 进程退出时结束；轮询 0.5s，最长 6h
+- 状态更新用 `flock` 串行化，tty 以 `O_NONBLOCK` 打开，避免 hook 卡住或覆盖
+  并发生成的标题
+
+Orca（Stably AI）也修过同一问题（`stablyai/orca#1141` / PR `#22476`），但它拥有
+pty，走的是“捕获 Ctrl+C/Esc + 500ms settle + hook 状态行基线 + OSC 7501”的
+guarded heuristic，并把标题重置为中性；hook 进程拿不到按键和 OSC 7501，因此这里
+采用 transcript 方案。POSIX 有效，Windows 无 `/dev/ttys*` 时跳过。
+
 标题与审批弹窗 H1 共用优先级：
 
 ```text
@@ -118,7 +143,9 @@ agent name
 交给终端 tab 视觉截断。配置写入 `claude_notify_config.json` 的
 `CLAUDE_NOTIFY_TAB_PREFIX` / `CLAUDE_NOTIFY_TAB_SUFFIX`。
 `custom-title` / `ai-title` 直接从 transcript 读取。`/clear` 触发
-`SessionStart(source=clear)` 时清掉旧任务，`resume` / `compact` 保留；状态灯按
+`SessionStart(source=clear)` 时清掉旧任务，`resume` / `compact` 保留；`SessionEnd`
+只清理本轮 task/灯色，保留 `first_prompt` / `generated_title`，所以关闭会话后
+`--resume` 仍显示原来的 AI 标题而不是 `项目名 #短码`。状态灯按
 session 缓存，`compact` 时恢复压缩前的灯色。首次进入、没有
 标题/任务时显示 `项目名 #短码`，不再显示应用品牌名；应用会话标题也用同样的兜底。
 红色状态追加阻塞详情（Bash 命令、编辑文件、WebFetch 主机、问题或计划确认）。审批
@@ -130,7 +157,11 @@ Claude Code 内置标题覆盖；关闭或移除时按记录恢复原值。**UI 
 env=off 为 3 条（`测试目的说明`）。因此 env=on 时按官方 `generateSessionTitle` 复刻：
 
 - system prompt 原文、`<session>` user prompt、JSON schema `{title}`
-- 输入取**第一条真实用户消息**；每条 session 只尝试一次；最短 10 字符
+- 输入取**第一条真实用户消息**；最短 10 字符；首条 prompt 太短（如 `hi`）时由下一条
+  真实 prompt 顶替
+- 首次生成失败（空响应/超时/端点不可用）后，后续每个真实 prompt 都会重试，直到标题
+  出现；两次尝试间隔小于 30s 时跳过，避免与仍在飞行中的 worker 叠加请求
+- 正常 `Stop` 后标题保留在状态文件里；关闭会话不会删掉它
 - 超过 2000 字符按官方 cap 形状保留 1500 头部 + 省略标记 + 尾部
 - 模型：`CLAUDE_NOTIFY_TITLE_MODEL` > `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_MODEL`
 - 异步子进程生成，写入 `claude_notify_tab_state.json`；不阻塞主 hook
@@ -147,10 +178,10 @@ E2E 的隔离 settings 已注入 `SessionStart`、`UserPromptSubmit`、`PreToolU
 `PostToolUse`、`PermissionRequest`、`Notification`、`Stop`、`SessionEnd` 的 tab hook，
 并把 `CLAUDE_NOTIFY_TAB_STATE` 指向临时目录，避免污染仓库。真实 `claude -p` 会执行
 它们；`stop` / `multi` / `resolved` / `timeout` 用例同时验证这些 hook 不会改变审批
-决策。但 `-p` 非交互模式下 Claude Code 会忽略 `terminalSequence`，因此真实 tab
-颜色/标题显示仍需人工验收。settings 合并、选项关闭后的清理、状态文件清理、`env`
-原值恢复和脚本事件映射由 `settings.test.ts`、`local.test.ts`、
-`tab-status-hook.test.ts` 覆盖。
+决策。但 `-p` 非交互模式下 Claude Code 会忽略 `terminalSequence`，而且进程没有 tty，
+中断观察进程会直接跳过，因此真实 tab 颜色/标题显示仍需人工验收。settings 合并、
+选项关闭后的清理、状态文件清理、`env` 原值恢复、事件映射、中断观察进程和标题重试
+由 `settings.test.ts`、`local.test.ts`、`tab-status-hook.test.ts` 覆盖。
 
 ### 明确不覆盖
 
@@ -396,3 +427,13 @@ E2E 需要显示窗口。Linux 无头环境用 `xvfb-run -a pnpm e2e:claude`；m
 确认修复后压缩不会再把工作中的会话刷成绿灯。空闲时手动 `/compact` 仍从 🟢 沿用 🟢。
 注意：该版本在 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 触发的 fork 快速压缩路径上不发
 `SessionStart(compact)`，也从不发绿，因此自动化验证要使用正常的阈值压缩路径。
+
+**2026-11-11 Ctrl+C 中断与标题恢复验证（Claude Code 2.1.308）**：在 tmux 交互式会话
+中只加载仓库里的 `claude_tab_status_hook.py`，发送一个 `Bash: sleep 60` 任务后按
+Ctrl+C。事件序列只有 `SessionStart` 🟢 → `UserPromptSubmit` 🟡 → `PreToolUse` 🟡，
+中断本身不产生任何 hook；观察进程在中断后约 1s 从 `pipe-pane` 写出了
+`OSC 0/1/2 = 🟢 <任务>`。tmux 在 alternate screen 里不更新 `pane_title`，但终端
+（iTerm2/Tabby）会正常应用这些序列。同一会话执行 `SessionEnd` 后再
+`SessionStart(source=resume)`，标题仍是 `generated_title`，没有退回 `项目名 #短码`。
+标题重试、冷却、短首条 prompt 顶替和观察进程的正常结束路径由
+`tab-status-hook.test.ts` 覆盖。

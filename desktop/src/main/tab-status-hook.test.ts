@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process'
 import {
+  closeSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync
@@ -117,6 +119,71 @@ function event(name: string, extra: Record<string, unknown> = {}): Record<string
 
 function title(dot: string, label: string): string {
   return `\x1b]0;${dot} ${label}\x07\x1b]1;${dot} ${label}\x07\x1b]2;${dot} ${label}\x07`
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function transcriptLine(entry: Record<string, unknown>): string {
+  return `${JSON.stringify(entry)}\n`
+}
+
+function appendTranscriptLine(entry: Record<string, unknown>): void {
+  writeFileSync(transcriptPath, transcriptLine(entry), { flag: 'a' })
+}
+
+function startInterruptWatcher(turnStartedAt = '0'): {
+  wait: () => Promise<number | null>
+  output: () => string
+} {
+  if (!python) throw new Error('python is unavailable')
+  const ttyPath = join(stateDir, 'tty.txt')
+  writeFileSync(ttyPath, '')
+  const ttyFd = openSync(ttyPath, 'w')
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_NOTIFY_TAB_STATE: statePath,
+    CLAUDE_NOTIFY_TAB_CONFIG: tabConfigPath,
+    CLAUDE_NOTIFY_TITLE_DISABLE: '1'
+  }
+  delete env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE
+  // Node has no pass_fds; hand the tty over as the fourth stdio entry, which
+  // the child sees as fd 3.
+  const child = spawn(
+    python.command,
+    [
+      ...python.args,
+      script,
+      '--watch-interrupt',
+      '3',
+      SESSION_ID,
+      transcriptPath,
+      '/tmp/demo',
+      String(process.pid),
+      turnStartedAt
+    ],
+    { env, stdio: ['ignore', 'ignore', 'ignore', ttyFd], windowsHide: true }
+  )
+  closeSync(ttyFd)
+  return {
+    wait: () =>
+      new Promise<number | null>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL')
+          reject(new Error('interrupt watcher did not exit in time'))
+        }, 10000)
+        child.on('error', (error) => {
+          clearTimeout(timer)
+          reject(error)
+        })
+        child.on('close', (code) => {
+          clearTimeout(timer)
+          resolve(code)
+        })
+      }),
+    output: () => readFileSync(ttyPath, 'utf-8')
+  }
 }
 
 function titleWorkerEnv(
@@ -325,7 +392,7 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     expect(text).toContain('title_attempted')
   })
 
-  it('stores the first prompt once and marks only one title attempt', () => {
+  it('stores the first prompt once and cools down repeated title attempts', () => {
     const firstPrompt = '实现终端 tab 的状态指示，用黄绿红表示运行/完成/阻塞'
     run(
       {
@@ -340,6 +407,8 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     let state = JSON.parse(readFileSync(statePath, 'utf-8'))
     expect(state[SESSION_ID].first_prompt).toBe(firstPrompt)
     expect(state[SESSION_ID].title_attempted).toBe(1)
+    const attemptedAt = state[SESSION_ID].title_attempted_at
+    expect(attemptedAt).toBeGreaterThan(0)
 
     run(
       {
@@ -354,6 +423,102 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     state = JSON.parse(readFileSync(statePath, 'utf-8'))
     expect(state[SESSION_ID].first_prompt).toBe(firstPrompt)
     expect(state[SESSION_ID].task).toBe('另一个任务')
+    // The first worker may still be in flight; do not stack another request.
+    expect(state[SESSION_ID].title_attempted_at).toBe(attemptedAt)
+  })
+
+  it('retries title generation on a later prompt when the first attempt failed', () => {
+    const firstPrompt = '实现终端 tab 的状态指示，用黄绿红表示运行/完成/阻塞'
+    run(
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo',
+        prompt: firstPrompt,
+        transcript_path: transcriptPath
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    const state = JSON.parse(readFileSync(statePath, 'utf-8'))
+    const attemptedAt = state[SESSION_ID].title_attempted_at
+
+    // Pretend the first worker failed long enough ago for the cooldown to
+    // expire; a fresh prompt must schedule another attempt.
+    state[SESSION_ID].title_attempted_at = attemptedAt - 600
+    delete state[SESSION_ID].generated_title
+    writeFileSync(statePath, JSON.stringify(state))
+
+    run(
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo',
+        prompt: '再帮我看一下另一个模块',
+        transcript_path: transcriptPath
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    const next = JSON.parse(readFileSync(statePath, 'utf-8'))
+    expect(next[SESSION_ID].first_prompt).toBe(firstPrompt)
+    expect(next[SESSION_ID].title_attempted_at).toBeGreaterThan(
+      attemptedAt - 600
+    )
+  })
+
+  it('does not retry after a title already exists', () => {
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: {
+          first_prompt: '实现终端 tab 的状态指示，用黄绿红表示运行/完成/阻塞',
+          generated_title: '终端 tab 状态指示',
+          generated_for: '实现终端 tab 的状态指示，用黄绿红表示运行/完成/阻塞',
+          title_attempted: 1,
+          title_attempted_at: 1,
+          ts: Date.now() / 1000
+        }
+      })
+    )
+    run(
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo',
+        prompt: '再帮我看一下另一个模块',
+        transcript_path: transcriptPath
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    const state = JSON.parse(readFileSync(statePath, 'utf-8'))
+    expect(state[SESSION_ID].title_attempted_at).toBe(1)
+  })
+
+  it('lets a later prompt replace a too-short first prompt', () => {
+    run(
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo',
+        prompt: 'hi',
+        transcript_path: transcriptPath
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    let state = JSON.parse(readFileSync(statePath, 'utf-8'))
+    expect(state[SESSION_ID].first_prompt).toBe('hi')
+
+    run(
+      {
+        hook_event_name: 'UserPromptSubmit',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo',
+        prompt: '修复登录超时并补充回归测试',
+        transcript_path: transcriptPath
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    state = JSON.parse(readFileSync(statePath, 'utf-8'))
+    expect(state[SESSION_ID].first_prompt).toBe('修复登录超时并补充回归测试')
   })
 
   it('classifies loopback targets but not public endpoints', () => {
@@ -561,6 +726,40 @@ print(json.dumps([
     expect(output.terminalSequence).toBe(title('🟢', 'demo #a1b2'))
   })
 
+  it('keeps the generated title across SessionEnd so resume shows it', () => {
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: {
+          first_prompt: '修复登录超时并补充回归测试',
+          generated_title: '登录超时修复',
+          generated_for: '修复登录超时并补充回归测试',
+          ts: Date.now() / 1000
+        }
+      })
+    )
+    let output = run(
+      {
+        hook_event_name: 'SessionEnd',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo'
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    expect(output.terminalSequence).toBe(title('🟢', '登录超时修复'))
+
+    output = run(
+      {
+        hook_event_name: 'SessionStart',
+        session_id: SESSION_ID,
+        cwd: '/tmp/demo',
+        source: 'resume'
+      },
+      { CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1' }
+    )
+    expect(output.terminalSequence).toBe(title('🟢', '登录超时修复'))
+  })
+
   it('resets the task when SessionStart reports source=clear', () => {
     event('UserPromptSubmit', { prompt: '修复登录超时' })
     let output = event('SessionStart', { source: 'clear' })
@@ -643,4 +842,275 @@ print(json.dumps([
     }
     expect(generatedTitle()).toBe('慢路由标题')
   }, 30000)
+
+  it('turns the tab green when the transcript records a user interrupt', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '修复登录超时' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: { task: '修复登录超时', ts: Date.now() / 1000 }
+      })
+    )
+    const watcher = startInterruptWatcher()
+    await delay(600)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'working' }],
+        stop_reason: null
+      }
+    })
+    appendTranscriptLine({
+      type: 'user',
+      message: { content: '[Request interrupted by user]' }
+    })
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe(title('🟢', '修复登录超时'))
+  }, 15000)
+
+  it('turns the tab green when an in-flight tool is interrupted', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '运行 sleep 60' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: { task: '运行 sleep 60', ts: Date.now() / 1000 }
+      })
+    )
+    const watcher = startInterruptWatcher()
+    await delay(600)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }],
+        stop_reason: 'tool_use'
+      }
+    })
+    appendTranscriptLine({
+      type: 'user',
+      message: { content: '[Request interrupted by user for tool use]' }
+    })
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe(title('🟢', '运行 sleep 60'))
+  }, 15000)
+
+  it('exits without writing when the turn ends normally', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '修复登录超时' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: { task: '修复登录超时', ts: Date.now() / 1000 }
+      })
+    )
+    const watcher = startInterruptWatcher()
+    await delay(600)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'done' }],
+        stop_reason: 'end_turn'
+      }
+    })
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe('')
+  }, 15000)
+
+  it('catches a marker written right after an assistant stop_sequence', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '修复登录超时' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: { task: '修复登录超时', ts: Date.now() / 1000 }
+      })
+    )
+    const watcher = startInterruptWatcher()
+    await delay(600)
+    // Real transcripts write the marker 8-13ms after stop_sequence; both
+    // lines can land in the same poll batch.
+    writeFileSync(
+      transcriptPath,
+      `${transcriptLine({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'text', text: 'partial' }],
+          stop_reason: 'stop_sequence'
+        }
+      })}${transcriptLine({
+        type: 'user',
+        message: { content: '[Request interrupted by user]' }
+      })}`,
+      { flag: 'a' }
+    )
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe(title('🟢', '修复登录超时'))
+  }, 15000)
+
+  it('does not turn green when a newer prompt follows the marker', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '修复登录超时' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: { task: '修复登录超时', ts: Date.now() / 1000 }
+      })
+    )
+    const watcher = startInterruptWatcher()
+    await delay(600)
+    writeFileSync(
+      transcriptPath,
+      `${transcriptLine({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'text', text: 'partial' }],
+          stop_reason: null
+        }
+      })}${transcriptLine({
+        type: 'user',
+        message: { content: '[Request interrupted by user]' }
+      })}${transcriptLine({
+        type: 'user',
+        message: { content: '先不要跑 e2e，先看这个故事' }
+      })}`,
+      { flag: 'a' }
+    )
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe('')
+  }, 15000)
+
+  it('does not turn green when Claude keeps working after a tool interrupt', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '运行 sleep 60' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: { task: '运行 sleep 60', ts: Date.now() / 1000 }
+      })
+    )
+    const watcher = startInterruptWatcher()
+    await delay(600)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }],
+        stop_reason: 'tool_use'
+      }
+    })
+    appendTranscriptLine({
+      type: 'user',
+      message: { content: '[Request interrupted by user for tool use]' }
+    })
+    await delay(500)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: '继续回答' }],
+        stop_reason: 'end_turn'
+      }
+    })
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe('')
+  }, 15000)
+
+  it('ignores an interrupt recorded for an older turn', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '修复登录超时' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: {
+          task: '修复登录超时',
+          turn_started_at: 1000,
+          ts: Date.now() / 1000
+        }
+      })
+    )
+    const watcher = startInterruptWatcher('2000')
+    await delay(600)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'partial' }],
+        stop_reason: null
+      }
+    })
+    appendTranscriptLine({
+      type: 'user',
+      message: { content: '[Request interrupted by user]' }
+    })
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe('')
+  }, 15000)
+
+  it('turns green for the current turn token', async () => {
+    writeFileSync(
+      transcriptPath,
+      transcriptLine({
+        type: 'user',
+        message: { content: '修复登录超时' }
+      })
+    )
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: {
+          task: '修复登录超时',
+          turn_started_at: 1000,
+          ts: Date.now() / 1000
+        }
+      })
+    )
+    const watcher = startInterruptWatcher('1000')
+    await delay(600)
+    appendTranscriptLine({
+      type: 'assistant',
+      message: {
+        content: [{ type: 'text', text: 'partial' }],
+        stop_reason: null
+      }
+    })
+    appendTranscriptLine({
+      type: 'user',
+      message: { content: '[Request interrupted by user]' }
+    })
+    expect(await watcher.wait()).toBe(0)
+    expect(watcher.output()).toBe(title('🟢', '修复登录超时'))
+  }, 15000)
 })
