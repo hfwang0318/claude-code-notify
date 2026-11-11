@@ -393,7 +393,13 @@ describe('deployLocal', () => {
       hookCommandText(candidate).includes('claude_approval_hook.py')
     )
     expect(entry).toBeDefined()
-    expect(hookCommandText(entry)).toMatch(/CLAUDE_APPROVAL_TIMEOUT='?600'?/)
+    // Windows passes env through claude_notify_config.json (exec form has no
+    // shell env prefix); POSIX also embeds it in the command.
+    const deployedConfig = JSON.parse(readFileSync(result.configPath, 'utf-8'))
+    expect(deployedConfig.CLAUDE_APPROVAL_TIMEOUT).toBe(600)
+    if (process.platform !== 'win32') {
+      expect(hookCommandText(entry)).toMatch(/CLAUDE_APPROVAL_TIMEOUT='?600'?/)
+    }
     // socket waits 600 + 600 + 30; Claude's hook timeout must exceed it.
     expect(entry.timeout).toBeGreaterThan(600 + 630)
   })
