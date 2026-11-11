@@ -1031,7 +1031,7 @@ print(json.dumps([
       windowsHide: true
     })
     expect(result.status).toBe(0)
-    expect(result.stdout.trim().split('\n')).toEqual(['A', 'a'])
+    expect(result.stdout.trim().split(/\r?\n/)).toEqual(['A', 'a'])
   })
 
   it('ignores titles recorded before /clear', () => {

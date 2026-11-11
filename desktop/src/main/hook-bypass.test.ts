@@ -451,7 +451,7 @@ print(module._is_direct_url("https://api.anthropic.com/v1/messages"))
     })
     expect(result.status, result.stderr).toBe(0)
     const [length, cut, totalFallback, totalCut, privateA, privateB, publicHost] =
-      result.stdout.trim().split('\n')
+      result.stdout.trim().split(/\r?\n/).map((line) => line.trim())
     expect(Number(length)).toBeLessThan(70000)
     expect(cut).toBe('True')
     expect(totalFallback).toBe('True')
