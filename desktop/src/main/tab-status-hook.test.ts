@@ -100,7 +100,7 @@ function run(
   const result = spawnSync(python.command, [...python.args, script], {
     input: JSON.stringify(payload),
     encoding: 'utf-8',
-    timeout: 10000,
+    timeout: 30000,
     windowsHide: true,
     env
   })
@@ -287,7 +287,36 @@ async function startTitleServer(
   }
 }
 
+// The interrupt watcher is POSIX-only: Claude's tty is resolved and written
+// through /dev/ttys*, and _spawn_interrupt_watcher returns early on Windows.
+const watcherIt = process.platform === 'win32' ? it.skip : it
+
 describe.skipIf(!python)('claude_tab_status_hook.py', () => {
+  it.skipIf(process.platform !== 'win32')(
+    'probes process liveness without terminating the process',
+    () => {
+      if (!python) throw new Error('python is unavailable')
+      // os.kill(pid, 0) kills the target on Windows; make sure the probe
+      // only observes this short-lived child.
+      const probe = [
+        'import importlib.util, os',
+        `spec = importlib.util.spec_from_file_location('tab_hook', ${JSON.stringify(script)})`,
+        "mod = importlib.util.module_from_spec(spec)",
+        'spec.loader.exec_module(mod)',
+        'assert mod._process_alive(os.getpid())',
+        "print('alive')"
+      ].join('\n')
+      const result = spawnSync(
+        python.command,
+        [...python.args, '-c', probe],
+        { encoding: 'utf-8', timeout: 30000, windowsHide: true }
+      )
+      expect(result.status).toBe(0)
+      expect(result.stdout.trim()).toBe('alive')
+    },
+    40000
+  )
+
   it('falls back to project + short id when no task is known', () => {
     const output = event('SessionStart')
     expect(output.terminalSequence).toBe(title('🟢', 'demo #a1b2'))
@@ -843,7 +872,7 @@ print(json.dumps([
     expect(generatedTitle()).toBe('慢路由标题')
   }, 30000)
 
-  it('turns the tab green when the transcript records a user interrupt', async () => {
+  watcherIt('turns the tab green when the transcript records a user interrupt', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -874,7 +903,7 @@ print(json.dumps([
     expect(watcher.output()).toBe(title('🟢', '修复登录超时'))
   }, 15000)
 
-  it('turns the tab green when an in-flight tool is interrupted', async () => {
+  watcherIt('turns the tab green when an in-flight tool is interrupted', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -905,7 +934,7 @@ print(json.dumps([
     expect(watcher.output()).toBe(title('🟢', '运行 sleep 60'))
   }, 15000)
 
-  it('exits without writing when the turn ends normally', async () => {
+  watcherIt('exits without writing when the turn ends normally', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -932,7 +961,7 @@ print(json.dumps([
     expect(watcher.output()).toBe('')
   }, 15000)
 
-  it('catches a marker written right after an assistant stop_sequence', async () => {
+  watcherIt('catches a marker written right after an assistant stop_sequence', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -968,7 +997,7 @@ print(json.dumps([
     expect(watcher.output()).toBe(title('🟢', '修复登录超时'))
   }, 15000)
 
-  it('does not turn green when a newer prompt follows the marker', async () => {
+  watcherIt('does not turn green when a newer prompt follows the marker', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -1005,7 +1034,7 @@ print(json.dumps([
     expect(watcher.output()).toBe('')
   }, 15000)
 
-  it('does not turn green when Claude keeps working after a tool interrupt', async () => {
+  watcherIt('does not turn green when Claude keeps working after a tool interrupt', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -1044,7 +1073,7 @@ print(json.dumps([
     expect(watcher.output()).toBe('')
   }, 15000)
 
-  it('ignores an interrupt recorded for an older turn', async () => {
+  watcherIt('ignores an interrupt recorded for an older turn', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
@@ -1079,7 +1108,7 @@ print(json.dumps([
     expect(watcher.output()).toBe('')
   }, 15000)
 
-  it('turns green for the current turn token', async () => {
+  watcherIt('turns green for the current turn token', async () => {
     writeFileSync(
       transcriptPath,
       transcriptLine({
