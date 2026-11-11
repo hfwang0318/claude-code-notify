@@ -121,7 +121,7 @@ TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
 # in settings.json gets the same budget added by the deploy code.
 PAUSE_BUDGET_SEC = 600
 SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
-HOOK_VERSION = "21"
+HOOK_VERSION = "22"
 CURRENT_EVENT = ""
 
 # urllib applies HTTP(S)_PROXY from the environment to every host, including

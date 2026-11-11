@@ -23,7 +23,11 @@
   整个会话都没有 AI 标题。现在后续每个真实 prompt 都会重试，两次尝试间隔小于
   30s 时跳过以避免并发叠加；首条 prompt 太短（少于 10 字符，如 `hi`）时由下一条
   真实 prompt 顶替，不再永久卡住标题生成
-- hook 版本升至 21，已部署实例会提示重新部署
+- 中断观察进程在 Windows 上会误杀宿主进程：Python 的 `os.kill(pid, 0)` 在
+  Windows 不是探测存活，而是直接 `TerminateProcess`。改用
+  `OpenProcess` + `WaitForSingleObject`；Windows 生产路径本就不启动观察进程，
+  但测试会直接运行它
+- hook 版本升至 22，已部署实例会提示重新部署
 
 ## 0.7.3 — 2026-11-10
 

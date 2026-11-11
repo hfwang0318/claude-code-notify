@@ -814,6 +814,26 @@ def _generate_title_worker(session_id: str) -> int:
 def _process_alive(pid: int) -> bool:
     if pid <= 0:
         return True
+    if os.name == "nt":
+        # os.kill(pid, 0) on Windows is not a probe: any signal other than
+        # CTRL_C_EVENT/CTRL_BREAK_EVENT terminates the target process. Ask the
+        # kernel whether the PID still exists instead.
+        try:
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+            if not handle:
+                # ERROR_INVALID_PARAMETER means the process is gone; access
+                # denied means it exists but we cannot query it.
+                return ctypes.get_last_error() != 87
+            try:
+                # WAIT_TIMEOUT (0x102) means it is still running.
+                return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
