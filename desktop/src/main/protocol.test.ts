@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { approvalFromPayload, buildNotification } from './protocol'
+import {
+  approvalFromPayload,
+  buildNotification,
+  normalizeSuggestions
+} from './protocol'
 
 describe('approvalFromPayload', () => {
   it('preserves multi-session identity, terminal metadata and risk', () => {
@@ -84,5 +88,23 @@ describe('buildNotification', () => {
     expect(notification.title).toContain('等待输入')
     expect(notification.title).not.toContain('等待审批')
     expect(notification.body).toContain('等待你的输入')
+  })
+})
+
+describe('normalizeSuggestions', () => {
+  it('keeps the original index after filtering and deduplication', () => {
+    const normalized = normalizeSuggestions([
+      { type: 'addRules' },
+      null,
+      { type: 'addRules' },
+      { type: 'setMode' }
+    ])
+    expect(normalized.map((suggestion) => suggestion.originalIndex)).toEqual([
+      0, 3
+    ])
+    expect(normalized.map((suggestion) => suggestion.type)).toEqual([
+      'addRules',
+      'setMode'
+    ])
   })
 })

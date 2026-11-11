@@ -1946,6 +1946,10 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                       <div className="popup-suggestions">
                         <div className="popup-suggestions-title">权限建议</div>
                         {item.suggestions.map((suggestion, index) => {
+                          const originalIndex =
+                            typeof suggestion.originalIndex === 'number'
+                              ? suggestion.originalIndex
+                              : index
                           const known = isKnownSuggestionType(suggestion)
                           const dangerous = suggestionNeedsConfirmation(suggestion)
                           const confirming = suggestionConfirm === index
@@ -1971,7 +1975,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
                                 void applyDecision(
                                   [item.id],
                                   'suggestion',
-                                  { index },
+                                  { index: originalIndex },
                                   `已应用权限建议 · ${item.tool}`
                                 )
                               }}

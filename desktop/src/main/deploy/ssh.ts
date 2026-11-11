@@ -229,6 +229,12 @@ function sftpChmod(sftp: SFTPWrapper, remotePath: string, mode: number): Promise
   })
 }
 
+function sftpUnlink(sftp: SFTPWrapper, remotePath: string): Promise<void> {
+  return new Promise((resolve) => {
+    sftp.unlink(remotePath, () => resolve())
+  })
+}
+
 function sftpRead(sftp: SFTPWrapper, remotePath: string): Promise<string | null> {
   return new Promise((resolve) => {
     sftp.readFile(remotePath, (error, data) => {
@@ -239,6 +245,82 @@ function sftpRead(sftp: SFTPWrapper, remotePath: string): Promise<string | null>
       resolve(data.toString('utf-8'))
     })
   })
+}
+
+/** Verify a JSON file before it replaces the live configuration. */
+export function buildJsonVerifyCommand(remotePath: string): string {
+  return `python3 -c "import json,sys;json.load(open(sys.argv[1], encoding='utf-8'))" ${shellQuote(remotePath)}`
+}
+
+/** Distinguish a missing remote file from a read/permission failure. */
+export function buildRemoteFileProbeCommand(remotePath: string): string {
+  return `python3 -c "import os,sys
+try:
+    os.stat(sys.argv[1]); print('exists')
+except FileNotFoundError: print('missing')
+except OSError: print('error')" ${shellQuote(remotePath)}`
+}
+
+/** Resolve symlinks so atomic replace updates the real dotfile, not the link. */
+export function buildRemoteRealPathCommand(remotePath: string): string {
+  return `python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" ${shellQuote(remotePath)}`
+}
+
+/** Same-directory rename: an interrupted upload cannot truncate the target. */
+export function buildAtomicReplaceCommand(tempPath: string, targetPath: string): string {
+  return `mv -f ${shellQuote(tempPath)} ${shellQuote(targetPath)}`
+}
+
+async function writeRemoteFileAtomic(
+  sftp: SFTPWrapper,
+  client: Client,
+  remotePath: string,
+  content: string,
+  signal: AbortSignal | undefined,
+  options: { verifyJson?: boolean } = {}
+): Promise<void> {
+  // A rename replaces a symlink itself; resolve it first so dotfiles links
+  // keep pointing at the file we update.
+  const real = await execCommand(
+    client,
+    buildRemoteRealPathCommand(remotePath),
+    15000,
+    signal
+  )
+  const targetPath =
+    real.code === 0 && real.stdout.trim() ? real.stdout.trim() : remotePath
+  const tempPath = `${targetPath}.claude-notify.${Date.now()}.tmp`
+  try {
+    await sftpWrite(sftp, tempPath, content)
+    if (options.verifyJson) {
+      const verify = await execCommand(
+        client,
+        buildJsonVerifyCommand(tempPath),
+        15000,
+        signal
+      )
+      if (verify.code !== 0) {
+        throw new Error(
+          `写入 ${remotePath} 前校验失败（exit=${verify.code}）：${verify.stderr.trim().slice(0, 300)}`
+        )
+      }
+    }
+    const replace = await execCommand(
+      client,
+      buildAtomicReplaceCommand(tempPath, targetPath),
+      15000,
+      signal
+    )
+    if (replace.code !== 0) {
+      throw new Error(
+        `替换 ${remotePath} 失败（exit=${replace.code}）：${replace.stderr.trim().slice(0, 300)}`
+      )
+    }
+  } catch (error) {
+    // An aborted signal would make an execCommand-based cleanup fail too.
+    await sftpUnlink(sftp, tempPath)
+    throw error
+  }
 }
 
 interface ConnectState {
@@ -495,15 +577,49 @@ export async function deployToServer(
 
       checkAborted(signal)
       const settingsPath = `${claudeDir}/settings.json`
-      const existing = (await sftpRead(sftp, settingsPath)) || ''
+      let existing = await sftpRead(sftp, settingsPath)
+      if (existing === null) {
+        // sftpRead returns null for both "missing" and read errors. Never
+        // treat an unreadable settings.json as empty: the merge would replace
+        // the user's permissions/env/third-party hooks without a backup.
+        const probe = await execCommand(
+          client,
+          buildRemoteFileProbeCommand(settingsPath),
+          15000,
+          signal
+        )
+        if (!probe.stdout.includes('missing')) {
+          throw new Error(
+            `无法读取远端 ${settingsPath}（可能是权限或磁盘错误），已中止部署`
+          )
+        }
+        existing = ''
+      }
       if (existing.trim()) {
+        // Validate before backing up so a broken file cannot become the
+        // "latest backup" the restore action would pick.
+        try {
+          const parsed = JSON.parse(existing) as unknown
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('根节点必须是对象')
+          }
+        } catch (error) {
+          throw new Error(
+            `远端 settings.json 不是合法 JSON 对象，请先修复：${(error as Error).message}`
+          )
+        }
         const backupPath = `${settingsPath}.bak.${timestamp()}`
-        await execCommand(
+        const backup = await execCommand(
           client,
           `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`,
           30000,
           signal
         )
+        if (backup.code !== 0) {
+          throw new Error(
+            `备份 settings.json 失败（exit=${backup.code}）：${backup.stderr.trim().slice(0, 200)}`
+          )
+        }
         log(`已备份现有配置 → ${backupPath}`)
       }
 
@@ -575,13 +691,6 @@ export async function deployToServer(
         terminalTitle,
         preToolMatcher: DEFAULT_PRE_TOOL_MATCHER
       })
-      await sftpWrite(sftp, settingsPath, merged)
-      await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
-      log(`已写入 ${settingsPath}`)
-      if (tabStatusEnabled) {
-        log('终端 tab 状态已开启（新启动的 Claude Code 会话生效）')
-      }
-
       if (tabStatusEnabled) {
         const remoteConfig: Record<string, unknown> = {
           CLAUDE_NOTIFY_TAB_PREFIX: JSON.stringify(
@@ -596,10 +705,13 @@ export async function deployToServer(
               ? TERMINAL_TITLE_UNSET
               : ownedTitlePrevious
         }
-        await sftpWrite(
+        await writeRemoteFileAtomic(
           sftp,
+          client,
           remoteConfigPath,
-          `${JSON.stringify(remoteConfig, null, 2)}\n`
+          `${JSON.stringify(remoteConfig, null, 2)}\n`,
+          signal,
+          { verifyJson: true }
         )
         await execCommand(
           client,
@@ -633,9 +745,21 @@ export async function deployToServer(
             signal
           )
           const next = `${removeEnvBlock(current)}\n${block}\n`
-          await sftpWrite(sftp, rcFile, next)
+          await writeRemoteFileAtomic(sftp, client, rcFile, next, signal)
           log(`写入环境变量 → ${rcFile}（${info.label}）`)
         }
+      }
+
+      // Write settings.json last: everything above is recoverable, while an
+      // interrupted settings write would leave Claude Code with a truncated
+      // file. Upload to a temp path and rename atomically.
+      await writeRemoteFileAtomic(sftp, client, settingsPath, merged, signal, {
+        verifyJson: true
+      })
+      await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
+      log(`已写入 ${settingsPath}`)
+      if (tabStatusEnabled) {
+        log('终端 tab 状态已开启（新启动的 Claude Code 会话生效）')
       }
     } finally {
       sftp.end()
@@ -714,14 +838,6 @@ export async function removeDeployFromServer(
           throw new Error('无法读取服务器 settings.json，已中止移除，未删除任何 hook 配置')
         }
       } else if (existing.trim()) {
-        const backupPath = `${settingsPath}.bak.${timestamp()}`
-        await execCommand(
-          client,
-          `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`,
-          30000,
-          signal
-        )
-        log(`已备份现有配置 → ${backupPath}`)
         const stripped = stripSettingsJson(
           existing,
           previousTitle !== undefined
@@ -734,8 +850,21 @@ export async function removeDeployFromServer(
             'settings.json 中仍存在 Claude Notify hook，但格式无法识别；为避免误删第三方配置，已中止移除'
           )
         }
+        const backupPath = `${settingsPath}.bak.${timestamp()}`
+        const backup = await execCommand(
+          client,
+          `cp ${shellQuote(settingsPath)} ${shellQuote(backupPath)}`,
+          30000,
+          signal
+        )
+        if (backup.code !== 0) {
+          throw new Error(`备份 settings.json 失败（exit=${backup.code}）`)
+        }
+        log(`已备份现有配置 → ${backupPath}`)
         if (stripped.changed) {
-          await sftpWrite(sftp, settingsPath, stripped.text)
+          await writeRemoteFileAtomic(sftp, client, settingsPath, stripped.text, signal, {
+            verifyJson: true
+          })
           await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
           const verify = await sftpRead(sftp, settingsPath)
           if (!verify || settingsHaveOurHooks(verify)) {
@@ -764,7 +893,7 @@ export async function removeDeployFromServer(
           if (!current) continue
           const next = removeEnvBlock(current)
           if (next !== current) {
-            await sftpWrite(sftp, rcFile, `${next}\n`)
+            await writeRemoteFileAtomic(sftp, client, rcFile, `${next}\n`, signal)
             log(`已从 ${info.label} 配置移除 Token 环境变量`)
           }
         }
@@ -808,19 +937,58 @@ export async function restoreDeployBackup(
     const restoredFrom = listed.stdout.trim().split('\n')[0]
     if (!restoredFrom) throw new Error('服务器上没有找到 settings.json 备份')
     checkAborted(signal)
+    const restored = await execCommand(
+      client,
+      `cat ${shellQuote(restoredFrom)}`,
+      30000,
+      signal
+    )
+    if (restored.code !== 0) {
+      throw new Error(`无法读取备份 ${restoredFrom}，未做任何修改`)
+    }
+    const restoredText = restored.stdout
+    try {
+      const parsed = JSON.parse(restoredText) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('备份根节点不是对象')
+      }
+    } catch (error) {
+      throw new Error(`备份不是合法的 settings.json 对象：${(error as Error).message}`)
+    }
     const safety = `${settingsPath}.pre-restore.${timestamp()}`
-    await execCommand(
+    const safetyResult = await execCommand(
       client,
       `cp ${shellQuote(settingsPath)} ${shellQuote(safety)}`,
       30000,
       signal
     )
-    await execCommand(
+    if (safetyResult.code !== 0) {
+      throw new Error(
+        `恢复前备份当前配置失败（exit=${safetyResult.code}），未做任何修改`
+      )
+    }
+    const tempPath = `${settingsPath}.claude-notify.${Date.now()}.tmp`
+    const staged = await execCommand(
       client,
-      `cp ${shellQuote(restoredFrom)} ${shellQuote(settingsPath)}`,
+      `cp ${shellQuote(restoredFrom)} ${shellQuote(tempPath)}`,
       30000,
       signal
     )
+    if (staged.code !== 0) {
+      throw new Error(`暂存备份失败（exit=${staged.code}）：${staged.stderr.trim().slice(0, 200)}`)
+    }
+    const replaced = await execCommand(
+      client,
+      `mv -f ${shellQuote(tempPath)} ${shellQuote(settingsPath)}`,
+      15000,
+      signal
+    )
+    if (replaced.code !== 0) {
+      await execCommand(client, `rm -f ${shellQuote(tempPath)}`, 15000, signal).catch(
+        () => undefined
+      )
+      throw new Error(`替换 settings.json 失败（exit=${replaced.code}）`)
+    }
     await execCommand(client, `chmod 600 ${shellQuote(settingsPath)}`, 15000, signal)
     log(`已恢复 ${settingsPath} ← ${restoredFrom}`, 'notify')
     return {

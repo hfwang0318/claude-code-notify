@@ -263,6 +263,20 @@ export function deployLocal(
   let existing = ''
   if (existsSync(settingsPath) && statSync(settingsPath).isFile()) {
     existing = readFileSync(settingsPath, 'utf-8')
+    // Validate before backing up: otherwise a broken settings.json becomes
+    // the "latest backup" and restoring it cannot recover the user.
+    if (existing.trim()) {
+      try {
+        const parsed = JSON.parse(existing) as unknown
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('根节点必须是对象')
+        }
+      } catch (error) {
+        throw new Error(
+          `现有 settings.json 不是合法 JSON 对象，请先修复：${(error as Error).message}`
+        )
+      }
+    }
     const backupPath = `${settingsPath}.bak.${timestamp()}`
     writeFileSync(backupPath, existing, 'utf-8')
     onProgress('info', `已备份本机配置 → ${backupPath}`)
@@ -322,7 +336,11 @@ export function deployLocal(
   const merged = mergeSettingsJson(existing, {
     mode: config.mode,
     hookEntry,
-    hookTimeout: 300,
+    // The hook socket waits timeoutSec + PAUSE_BUDGET + 30s; Claude Code's
+    // hook timeout is hookTimeout + PAUSE_BUDGET. Keep at least a 30s margin
+    // so a large user-configured timeout plus a pause cannot get the hook
+    // killed with the approval still pending.
+    hookTimeout: Math.max(300, (config.timeoutSec ?? 240) + 60),
     questionEntry: hookEntry,
     stopEntry,
     sessionEndEntry: stopEntry,
@@ -407,6 +425,30 @@ export interface LocalInstallState {
   configPath: string
   settingsPath: string
   latestBackup: string | null
+}
+
+export interface LocalRedeployOptions {
+  mode: DeployMode
+  tabStatus: boolean
+  tabPrefix: TabInfoItem[]
+  tabSuffix: TabInfoItem[]
+}
+
+/**
+ * Arguments for refreshing an existing local install. Automatic upgrades must
+ * carry the user's tab settings; calling deploy with defaults silently turns
+ * the tab hook back on and clears custom prefix/suffix items.
+ */
+export function localRedeployOptions(
+  state: LocalInstallState
+): LocalRedeployOptions | null {
+  if (!state.mode) return null
+  return {
+    mode: state.mode,
+    tabStatus: state.tabStatus,
+    tabPrefix: state.tabPrefix,
+    tabSuffix: state.tabSuffix
+  }
 }
 
 function latestBackup(settingsPath: string): string | null {
@@ -502,8 +544,6 @@ export function removeLocalDeploy(
   let backupPath = ''
   if (existsSync(settingsPath)) {
     const existing = readFileSync(settingsPath, 'utf-8')
-    backupPath = `${settingsPath}.bak.${timestamp()}`
-    writeFileSync(backupPath, existing, 'utf-8')
     const stripped = stripSettingsJson(
       existing,
       previousTitle !== undefined
@@ -516,6 +556,10 @@ export function removeLocalDeploy(
         'settings.json 中仍存在 Claude Notify hook，但格式无法识别；为避免误删第三方配置，已中止移除'
       )
     }
+    // Back up only after the file passed validation, so a broken file cannot
+    // become the "latest backup" the restore action would pick.
+    backupPath = `${settingsPath}.bak.${timestamp()}`
+    writeFileSync(backupPath, existing, 'utf-8')
     if (stripped.changed) {
       writePrivate(settingsPath, stripped.text)
       const verify = readFileSync(settingsPath, 'utf-8')

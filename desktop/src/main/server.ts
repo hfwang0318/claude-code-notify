@@ -15,6 +15,9 @@ import {
 
 const MAX_BODY_BYTES = 1024 * 1024
 const DEFAULT_TIMEOUT_SECONDS = 50
+// The hook keeps its socket open for the approval timeout plus this budget;
+// a pause that outlives it would make the popup disappear with no decision.
+const PAUSE_BUDGET_MS = 9 * 60 * 1000
 const MAX_TIMEOUT_SECONDS = 600
 const DEDUP_SECONDS = 3
 const REQUEST_TIMEOUT_MS = 15_000
@@ -28,6 +31,8 @@ export interface NotifyServerOptions {
   requestTimeoutMs?: number
   headersTimeoutMs?: number
   maxConnections?: number
+  /** Hard cap on how long an approval may stay paused. Defaults to 9 minutes. */
+  pauseBudgetMs?: number
 }
 
 type ApprovalResult = {
@@ -41,12 +46,16 @@ type ApprovalResult = {
 interface PendingRequest {
   itemId: string
   requestId: string
+  promise: Promise<ApprovalResult>
   resolve: (payload: ApprovalResult) => void
   timer: NodeJS.Timeout
   finished: boolean
   timeoutAt: number
   paused: boolean
   remainingMs: number
+  pausedTotalMs: number
+  pauseStartedAt?: number
+  pauseTimer?: NodeJS.Timeout
 }
 
 export interface ServerCallbacks {
@@ -75,7 +84,8 @@ export class NotifyServer {
       bodyTimeoutMs: options.bodyTimeoutMs ?? BODY_TIMEOUT_MS,
       requestTimeoutMs: options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS,
       headersTimeoutMs: options.headersTimeoutMs ?? HEADERS_TIMEOUT_MS,
-      maxConnections: options.maxConnections ?? MAX_CONNECTIONS
+      maxConnections: options.maxConnections ?? MAX_CONNECTIONS,
+      pauseBudgetMs: options.pauseBudgetMs ?? PAUSE_BUDGET_MS
     }
   }
 
@@ -106,11 +116,18 @@ export class NotifyServer {
       server.requestTimeout = this.options.requestTimeoutMs
       server.headersTimeout = this.options.headersTimeoutMs
       server.maxConnections = this.options.maxConnections
-      server.once('error', (error) => {
+      const onStartError = (error: Error): void => {
         this.server = null
         reject(error)
-      })
+      }
+      server.once('error', onStartError)
       server.listen(this.port, this.host, () => {
+        // Keep only a runtime logger: the start listener would null out a
+        // healthy server and break stop()/restart after a late error.
+        server.off('error', onStartError)
+        server.on('error', (error) => {
+          console.error('[http] server error', error)
+        })
         this.server = server
         this.listening = true
         const address = server.address()
@@ -181,8 +198,20 @@ export class NotifyServer {
     if (!pending || pending.finished || pending.paused) return null
     const remainingMs = Math.max(0, pending.timeoutAt - Date.now())
     pending.paused = true
+    pending.pauseStartedAt = Date.now()
     pending.remainingMs = remainingMs
     clearTimeout(pending.timer)
+    // Let the hook fall back to the terminal before its socket/hook timeout.
+    // The budget is cumulative across pauses, and never cuts the original
+    // countdown short (a 600s approval paused at t=0 must still get 600s).
+    const allowed = Math.max(
+      0,
+      this.options.pauseBudgetMs - pending.pausedTotalMs
+    )
+    pending.pauseTimer = setTimeout(() => {
+      this.finish(pending, { status: 'ok', decision: 'timeout' })
+    }, Math.max(remainingMs, allowed))
+    pending.pauseTimer.unref?.()
     return { remainingMs }
   }
 
@@ -191,6 +220,11 @@ export class NotifyServer {
     const pending = this.pending.get(itemId)
     if (!pending || pending.finished || !pending.paused) return null
     const wait = Math.max(0, remainingMs ?? pending.remainingMs)
+    clearTimeout(pending.pauseTimer)
+    if (pending.pauseStartedAt) {
+      pending.pausedTotalMs += Date.now() - pending.pauseStartedAt
+      pending.pauseStartedAt = undefined
+    }
     pending.paused = false
     pending.remainingMs = wait
     pending.timeoutAt = Date.now() + wait
@@ -206,6 +240,7 @@ export class NotifyServer {
     pending.finished = true
     this.pending.delete(pending.itemId)
     clearTimeout(pending.timer)
+    clearTimeout(pending.pauseTimer)
     // UI/persistence callbacks must never block the HTTP response: a throwing
     // onResolved used to leave the hook waiting until its own timeout.
     try {
@@ -336,6 +371,16 @@ export class NotifyServer {
         this.log('warn', `未知 suggestion 类型 ${unknown.join(', ')}，将用通用标签显示并原样回传`)
       }
 
+      // The same request_id can be delivered twice (retry, copied hook).
+      // Share the first decision instead of showing a second popup that only
+      // /claude-approval-resolved would cancel.
+      const duplicate = this.findByRequestId(item.requestId)
+      if (duplicate) {
+        const shared = await duplicate.promise
+        sendJson(response, 200, shared)
+        return
+      }
+
       let resolvePending!: (payload: ApprovalResult) => void
       const result = new Promise<ApprovalResult>((resolve) => {
         resolvePending = resolve
@@ -344,11 +389,13 @@ export class NotifyServer {
       const pending: PendingRequest = {
         itemId,
         requestId: item.requestId,
+        promise: result,
         resolve: resolvePending,
         finished: false,
         timeoutAt: deadline,
         paused: false,
         remainingMs: timeoutSec * 1000,
+        pausedTotalMs: 0,
         timer: setTimeout(() => {
           this.finish(pending, { status: 'ok', decision: 'timeout' })
         }, timeoutSec * 1000)

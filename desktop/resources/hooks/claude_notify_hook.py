@@ -44,7 +44,7 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-HOOK_VERSION = "22"
+HOOK_VERSION = "25"
 TASK_MAX_CHARS = 60
 TASK_TAIL_BYTES = 256 * 1024
 
@@ -233,7 +233,8 @@ TIMEOUT = 10
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _is_loopback_url(url: str) -> bool:
+def _is_direct_url(url: str) -> bool:
+    """Loopback, link-local and RFC1918 targets bypass HTTP(S)_PROXY."""
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
     except ValueError:
@@ -242,13 +243,16 @@ def _is_loopback_url(url: str) -> bool:
     if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return bool(
+        address.is_loopback or address.is_private or address.is_link_local
+    )
 
 
 def _open_url(request: urllib.request.Request, timeout: float):
-    if _is_loopback_url(request.full_url):
+    if _is_direct_url(request.full_url):
         return _DIRECT_OPENER.open(request, timeout=timeout)
     return urllib.request.urlopen(request, timeout=timeout)
 
@@ -263,6 +267,10 @@ def main() -> None:
         hook_input = json.loads(sys.stdin.read() or "{}")
     except json.JSONDecodeError:
         note("stdin 不是合法 JSON，跳过本次通知")
+        sys.exit(0)
+
+    if not isinstance(hook_input, dict):
+        note("stdin 不是 JSON 对象，跳过本次通知")
         sys.exit(0)
 
     if not TOKEN:

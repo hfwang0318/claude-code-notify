@@ -112,10 +112,15 @@ OSC 0/1/2，把 tab 刷回 🟢，并同步状态灯。规则与 `tylerlaprade/c
   该标记作废，不写绿灯（避免新回合刚开始却显示绿色）
 - `[Request interrupted by user]`（整回合取消）立即刷绿；
   `[Request interrupted by user for tool use]`（工具被拒绝）可能后接正常回答，
-  等 2s settle，期间 transcript 有新增内容就放弃
+  等 5s settle，期间 transcript 有新增内容就放弃
 - assistant `stop_reason` 不是可靠的回合结束信号：真实 transcript 里标记常在
   `stop_sequence` 后 8–13ms 才写入，所以回合结束后再等 1s 捕捉紧随其后的标记
-- 每次 prompt 写一个 turn token；旧 watcher 写绿前校验 token，新回合不会被覆盖
+- 每次 prompt 写一个 turn token；旧 watcher 写绿前校验 token，新回合不会被覆盖；
+  token 缺失（state 不可读）时不写绿
+- 回合中途的 compact 摘要（`isCompactSummary: true` 的合成 user 记录）不算新
+  prompt，watcher 继续观察，compact 后的中断仍能刷绿
+- 父进程启动 watcher 时就把当前 transcript 大小作为起始 offset 传下去：
+  解释器启动期间立刻按 Ctrl+C 写下的标记不会落在 offset 之前
 - 观察进程在正常 `Stop`、新 prompt 或 Claude 进程退出时结束；轮询 0.5s，最长 6h
 - 状态更新用 `flock` 串行化，tty 以 `O_NONBLOCK` 打开，避免 hook 卡住或覆盖
   并发生成的标题
@@ -261,6 +266,29 @@ E2E_REQUIRE_CLAUDE=1 pnpm e2e:claude
 
 - `0`：通过；或缺少 Claude/认证且未设置 `E2E_REQUIRE_CLAUDE=1`（跳过）
 - `1`：断言失败、Claude 不可用但要求必须跑、或构建失败
+
+
+### Linux（Docker）验证
+
+Linux 上的 hook 行为用 Docker 复现（macOS 主机不需要装 Linux 工具链）。以下命令在 `desktop/` 下执行：
+
+```bash
+# 完整单元/集成测试（29 个文件）
+docker run --rm -v "$PWD":/app -w /app -v cn-linux-node-modules:/app/node_modules \
+  node:22-bookworm bash -lc '
+    apt-get update -qq && apt-get install -y -qq python3 procps
+    corepack enable && corepack prepare pnpm@10.33.0 --activate
+    pnpm install --frozen-lockfile --ignore-scripts
+    pnpm test
+  '
+```
+
+真实 pty + 祖先链（claude → shell → hook）：用 `script(1)` 分配 pty，把
+`/tmp/claude` 符号链接到 `python3` 并以它启动一个调用 `/bin/sh -c` 的父进程，
+在子进程里调用 `_claude_pid()` / `_claude_tty()` / `_spawn_interrupt_watcher()`。
+2026-11-11 实测结果：`COMM=claude`、`TTY=/dev/pts/0`，transcript 写入中断标记
+后 typescript 中捕获到三条 `🟢 修复登录超时` OSC；完整套件
+`283 passed | 1 skipped`。Windows-only 的存活探测用例如期跳过。
 
 ### 远程 SSH 部署（Docker 容器）
 

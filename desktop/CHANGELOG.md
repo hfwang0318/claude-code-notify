@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.7.5 — 2026-11-11
+
+### 修复（审查发现的异常/超时/时序问题）
+
+- 中断观察进程：回合中途的 compact 摘要（`isCompactSummary`）不再被误判为新
+  prompt 导致 watcher 提前退出；tool-use 中断的 settle 从 2s 放宽到 5s，避免慢
+  思考模型续写时提前变绿；父进程在 spawn 时记录 transcript 起始 offset，解释器
+  启动期间的中断标记不再丢失；没有 turn token 时拒绝写绿
+- 状态文件：一次瞬时读失败（EIO/EACCES/损坏 JSON）不再被当成空状态写回，避免
+  一次异常清空所有会话的标题/任务；写失败会向上返回；SessionEnd 后没有内容的
+  条目不再占用 50 条上限
+- 标题：重试不再要求当前 prompt 是"有效 prompt"（只回"继续"也会重试）；用
+  in-flight 标记防止 30s 冷却短于 worker 生命周期导致叠加请求；标题扫描改为从
+  文件末尾分块回溯，不再受 128KB 尾部限制；优先 small/fast/haiku 模型；
+  `_parse_title` 支持混合 prose/多个 JSON 对象；`/clear` 用 transcript offset
+  忽略旧会话标题；确认词判断先剥离 `<system-reminder>`
+- 安全：统一过滤 C1 控制字符（U+0080–U+009F），避免终端转义注入；标题/任务
+  长度设上限
+- Linux tty 解析：`ps -o tty=` 返回的 `pts/0` 含 `/`，0.7.5 新增的 tty 白名单会把它
+  误判为非法路径，导致 Linux 上 watcher 永远拿不到终端、Ctrl+C 不刷绿；改为
+  `_tty_device()` 只接受普通设备名或 `/dev/*`，并拒绝 `..`
+- 审批 hook：`CLAUDE_APPROVAL_TIMEOUT` 支持浮点/非法值并 clamp 到 15–600；
+  非对象 stdin 安静回退；`tool_input` 单字符串 64KB、总大小 900KB 截断，避免
+  Write/Edit 大文件触发桌面端 1MB 413；私网/链路本地回调地址绕过
+  `HTTP(S)_PROXY`；先做 3s `/health` 探测，端点接受但不响应时快速回退终端；
+  状态路径支持 `CLAUDE_NOTIFY_TAB_STATE` 隔离
+- 桌面端：远端 `settings.json` 先写临时文件、校验 JSON 再原子 `mv`，并把
+  settings 放到最后写入；本机/远端都在备份前校验现有 JSON；本机 hook 超时按
+  用户配置的 `timeoutSec` 调整为 `max(300, timeoutSec+60)`，长时间暂停不会让
+  Claude 先杀掉 hook；小时级暂停有 9 分钟硬预算，到点回退终端；同一
+  `request_id` 复用第一个决定，不再产生幽灵弹窗；suggestion 返回原始索引；
+  自动升级携带原 tab 开关/前后缀，不再静默重置；server 启动后的迟到 error
+  不再把健康实例置空
+- 回归审查补丁：Windows CI 恢复跳过 POSIX-only watcher 测试；ExitPlanMode 的
+  `updatedInput` 使用原始完整计划而不是截断副本；`tool_input` 总量按 UTF-8
+  字节判断；审批 URL 无路径时健康探测不再恒失败；远端原子替换先解析符号链接，
+  避免把 dotfiles 链接替换成普通文件；远端读取失败不再当空文件覆盖；移除/恢复
+  也改为原子写并校验备份；损坏的 tab 状态文件隔离一次后自愈；暂停预算按累计
+  时长计算且不缩短原倒计时；手动“立即更新/重新接入”保留 tab 开关和前后缀
+- hook 版本升至 25，已部署实例会提示重新部署
+
 ## 0.7.4 — 2026-11-11
 
 ### 修复

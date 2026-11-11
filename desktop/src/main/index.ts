@@ -106,6 +106,7 @@ import {
 import {
   deployLocal,
   detectLocalState,
+  localRedeployOptions,
   removeLocalDeploy,
   restoreLocalBackup
 } from './deploy/local'
@@ -2600,8 +2601,16 @@ async function regenerateToken(): Promise<void> {
     mainWindow && !mainWindow.isDestroyed()
       ? await dialog.showMessageBox(mainWindow, options)
       : await dialog.showMessageBox(options)
-  if (result.response === 1 && store.get().deploy.localMode) {
-    applyLocalDeploy(store.get().prefs.mode)
+  if (result.response === 1) {
+    const deploy = store.get().deploy
+    if (deploy.localMode) {
+      applyLocalDeploy(
+        deploy.localMode,
+        deploy.localTabStatus ?? true,
+        deploy.localTabPrefix,
+        deploy.localTabSuffix
+      )
+    }
   }
 }
 
@@ -4072,8 +4081,14 @@ async function bootstrap(): Promise<void> {
   }
 
   if (local.stale) {
-    if (local.mode && !isDemo) {
-      const updated = applyLocalDeploy(local.mode)
+    const redeploy = localRedeployOptions(local)
+    if (redeploy && !isDemo) {
+      const updated = applyLocalDeploy(
+        redeploy.mode,
+        redeploy.tabStatus,
+        redeploy.tabPrefix,
+        redeploy.tabSuffix
+      )
       if (updated.ok) {
         log('info', `本机钩子版本 ${local.version || '未知'} 已自动更新到 ${HOOK_VERSION}`)
       } else {

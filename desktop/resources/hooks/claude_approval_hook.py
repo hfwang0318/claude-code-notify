@@ -74,6 +74,7 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 import time
 import uuid
 from contextlib import contextmanager
@@ -110,18 +111,34 @@ WINDOWS_URL = cfg(
     "CLAUDE_APPROVAL_URL",
     "http://localhost:18765/claude-approval",
 )
+
+
+def _url_base(url: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return url.rsplit("/", 1)[0]
+
+
 RESOLUTION_URL = cfg(
     "CLAUDE_APPROVAL_RESOLUTION_URL",
-    WINDOWS_URL.rsplit("/", 1)[0] + "/claude-approval-resolved",
+    _url_base(WINDOWS_URL) + "/claude-approval-resolved",
 )
 TOKEN = cfg("CLAUDE_NOTIFY_TOKEN")
-TIMEOUT = int(cfg("CLAUDE_APPROVAL_TIMEOUT", "240"))
+def _int_setting(name: str, default: int, low: int, high: int) -> int:
+    try:
+        value = int(float(cfg(name, str(default))))
+    except (TypeError, ValueError, OverflowError):
+        value = default
+    return max(low, min(high, value))
+
+TIMEOUT = _int_setting("CLAUDE_APPROVAL_TIMEOUT", 240, 15, 600)
 # The popup countdown can be paused for long typing; keep the HTTP request
 # alive longer than the initial approval window. The Claude Code hook timeout
 # in settings.json gets the same budget added by the deploy code.
 PAUSE_BUDGET_SEC = 600
 SOCKET_TIMEOUT = TIMEOUT + PAUSE_BUDGET_SEC + 30
-HOOK_VERSION = "22"
+HOOK_VERSION = "25"
 CURRENT_EVENT = ""
 
 # urllib applies HTTP(S)_PROXY from the environment to every host, including
@@ -133,7 +150,8 @@ CURRENT_EVENT = ""
 _DIRECT_OPENER = None
 
 
-def _is_loopback_url(url: str) -> bool:
+def _is_direct_url(url: str) -> bool:
+    """Loopback, link-local and RFC1918 targets bypass HTTP(S)_PROXY."""
     import ipaddress
     import urllib.parse
 
@@ -145,16 +163,19 @@ def _is_loopback_url(url: str) -> bool:
     if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return bool(
+        address.is_loopback or address.is_private or address.is_link_local
+    )
 
 
 def _open_url(request, timeout: float):
     import urllib.request
 
     global _DIRECT_OPENER
-    if _is_loopback_url(request.full_url):
+    if _is_direct_url(request.full_url):
         if _DIRECT_OPENER is None:
             _DIRECT_OPENER = urllib.request.build_opener(
                 urllib.request.ProxyHandler({})
@@ -163,7 +184,74 @@ def _open_url(request, timeout: float):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
-TASK_MAX_CHARS = None
+def _desktop_reachable() -> bool:
+    """Fail fast when the endpoint accepts but never answers.
+
+    urlopen's timeout covers connect and read, so without this probe a hung
+    desktop would keep the terminal's permission prompt waiting for the full
+    approval socket timeout (about 15 minutes).
+    """
+    import urllib.error
+    import urllib.request
+
+    health = _url_base(WINDOWS_URL) + "/health"
+    try:
+        with _open_url(urllib.request.Request(health), timeout=5):
+            return True
+    except urllib.error.HTTPError:
+        # Any HTTP response means the server is alive (older builds lack /health).
+        return True
+    except Exception:
+        return False
+
+
+TASK_MAX_CHARS = 500
+TOOL_INPUT_STRING_LIMIT = 64 * 1024
+
+
+def _cap_tool_input(value):
+    """Keep the approval payload below the desktop's 1MB body limit.
+
+    Write/Edit payloads carry whole file contents, but the popup only shows a
+    short detail. Truncate long strings (marking it) instead of letting the
+    server reject the whole hook with 413. Many medium strings can still add
+    up past the limit, so fall back to a small marker in that case.
+    """
+    capped, truncated = _cap_tool_input_value(value)
+    try:
+        if len(json.dumps(capped, ensure_ascii=False).encode("utf-8")) > 900_000:
+            return {"truncated": True}, True
+    except (TypeError, ValueError):
+        return {"truncated": True}, True
+    return capped, truncated
+
+
+def _cap_tool_input_value(value):
+    if isinstance(value, str):
+        if len(value) <= TOOL_INPUT_STRING_LIMIT:
+            return value, False
+        return (
+            value[:TOOL_INPUT_STRING_LIMIT]
+            + f"\n[… {len(value)} characters truncated …]",
+            True,
+        )
+    if isinstance(value, list):
+        out = []
+        truncated = False
+        for item in value:
+            capped, cut = _cap_tool_input_value(item)
+            out.append(capped)
+            truncated = truncated or cut
+        return out, truncated
+    if isinstance(value, dict):
+        out = {}
+        truncated = False
+        for key, item in value.items():
+            capped, cut = _cap_tool_input_value(item)
+            out[key] = capped
+            truncated = truncated or cut
+        return out, truncated
+    return value, False
 INTENT_MAX_CHARS = 160
 TASK_TAIL_BYTES = 256 * 1024
 HEADLINE_MAX_CHARS = None
@@ -179,7 +267,7 @@ TAB_ITEM_IDS = {
     "cwd",
     "task",
 }
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SEPARATORS = re.compile(r"[/\\]")
 
 
@@ -370,10 +458,19 @@ def _short_session_id(session_id: str) -> str:
     return match.group(0) if match else ""
 
 
+def _tab_state_path() -> str:
+    override = os.environ.get("CLAUDE_NOTIFY_TAB_STATE")
+    if override:
+        return override
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), TAB_STATE_NAME
+    )
+
+
 def _tab_custom_title(session_id: str) -> str:
     if not session_id:
         return ""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TAB_STATE_NAME)
+    path = _tab_state_path()
     try:
         with open(path, "r", encoding="utf-8") as file:
             state = json.load(file)
@@ -386,29 +483,60 @@ def _tab_custom_title(session_id: str) -> str:
 
 
 def _transcript_titles(transcript_path: str) -> tuple[str, str]:
+    """Scan backwards in chunks so long sessions keep their AI title."""
+    if not transcript_path:
+        return "", ""
+    try:
+        size = os.path.getsize(transcript_path)
+    except OSError:
+        return "", ""
     custom = ""
     ai_title = ""
-    for raw_line in reversed(_read_transcript_lines(transcript_path)):
-        try:
-            entry = json.loads(raw_line)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(entry, dict):
-            continue
-        kind = entry.get("type")
-        if kind == "custom-title" and not custom:
-            custom = _clean_label(entry.get("customTitle"))
-        elif kind == "ai-title" and not ai_title:
-            ai_title = _clean_label(entry.get("aiTitle"))
-        if custom and ai_title:
-            break
+    carry = b""
+    try:
+        with open(transcript_path, "rb") as file:
+            pos = size
+            while pos > 0 and not (custom and ai_title):
+                read_start = max(0, pos - AI_TITLE_TAIL_BYTES)
+                file.seek(read_start)
+                data = file.read(pos - read_start) + carry
+                lines = data.split(b"\n")
+                if read_start > 0:
+                    carry = lines[0]
+                    lines = lines[1:]
+                else:
+                    carry = b""
+                for raw_line in reversed(lines):
+                    if not raw_line:
+                        continue
+                    if (
+                        b'"custom-title"' not in raw_line
+                        and b'"ai-title"' not in raw_line
+                    ):
+                        continue
+                    try:
+                        entry = json.loads(raw_line.decode("utf-8", "ignore"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    kind = entry.get("type")
+                    if kind == "custom-title" and not custom:
+                        custom = _clean_label(entry.get("customTitle"))
+                    elif kind == "ai-title" and not ai_title:
+                        ai_title = _clean_label(entry.get("aiTitle"))
+                    if custom and ai_title:
+                        break
+                pos = read_start
+    except (OSError, ValueError):
+        return "", ""
     return custom, ai_title
 
 
 def _tab_generated_title(session_id: str) -> str:
     if not session_id:
         return ""
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TAB_STATE_NAME)
+    path = _tab_state_path()
     try:
         with open(path, "r", encoding="utf-8") as file:
             state = json.load(file)
@@ -1215,6 +1343,10 @@ def main() -> None:
         note("stdin 不是合法 JSON，交给终端处理")
         sys.exit(0)  # 解析失败 → 交给终端
 
+    if not isinstance(hook_input, dict):
+        note("stdin 不是 JSON 对象，交给终端处理")
+        sys.exit(0)
+
     # 探测记录：在 Matcher/Token 检查之前，任何触发都留痕
     maybe_dump(hook_input)
 
@@ -1255,6 +1387,10 @@ def main() -> None:
     tool_input = hook_input.get("tool_input")
     if not isinstance(tool_input, dict):
         tool_input = {}
+    # Keep the original for updatedInput (ExitPlanMode must echo the full
+    # plan); only the popup payload uses the capped copy.
+    original_tool_input = tool_input
+    tool_input, tool_input_truncated = _cap_tool_input(tool_input)
 
     # 普通 PreToolUse 只记录官方 tool_use_id，绝不做审批决定。
     # AskUserQuestion 保留原有桌面代答流程。
@@ -1342,6 +1478,7 @@ def main() -> None:
         "branch": git_branch(cwd),
         "tool_name": tool_name,
         "tool_input": tool_input,
+        "tool_input_truncated": tool_input_truncated,
         "message": message,
         "options": build_options(tool_name),
         "timeout_seconds": TIMEOUT - 10,
@@ -1364,6 +1501,10 @@ def main() -> None:
             "Content-Type": "application/json",
         },
     )
+
+    if not _desktop_reachable():
+        note(f"桌面端 {WINDOWS_URL} 无响应，交给终端处理")
+        sys.exit(0)
 
     stop_watcher = threading.Event()
     watcher = threading.Thread(
@@ -1401,7 +1542,7 @@ def main() -> None:
     if event == "PreToolUse":
         handle_result_pretooluse(result, questions)
     else:
-        handle_result(result, suggestions, tool_name, tool_input)
+        handle_result(result, suggestions, tool_name, original_tool_input)
 
     sys.exit(0)
 

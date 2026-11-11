@@ -289,6 +289,72 @@ describe('NotifyServer', () => {
     expect(await (await promise).json()).toMatchObject({ status: 'ok', decision: 'allow' })
   })
 
+  it('ends a paused approval when the pause budget runs out', async () => {
+    const local = new NotifyServer(0, TOKEN, callbacks, { pauseBudgetMs: 6000 })
+    await local.start()
+    try {
+      const promise = fetch(
+        `http://127.0.0.1:${local.getPort()}/claude-approval`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${TOKEN}`
+          },
+          body: JSON.stringify({
+            request_id: 'req_pause_budget',
+            tool_name: 'Bash',
+            cwd: '/tmp/project',
+            message: 'test',
+            timeout_seconds: 5
+          })
+        }
+      )
+      const item = await waitFor(() => approvals[0] || null)
+      expect(local.pause(item.id)).not.toBeNull()
+      // The budget (6s) is longer than the original countdown (5s): the
+      // approval must still be pending just after the original deadline.
+      await new Promise((resolve) => setTimeout(resolve, 5500))
+      expect(resolutions).toHaveLength(0)
+      const result = await (await promise).json()
+      expect(result).toMatchObject({ status: 'ok', decision: 'timeout' })
+    } finally {
+      await local.stop()
+    }
+  }, 12000)
+
+  it('shares one decision for a duplicate request_id', async () => {
+    const post = (): Promise<Response> =>
+      fetch(`http://127.0.0.1:${port}/claude-approval`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${TOKEN}`
+        },
+        body: JSON.stringify({
+          request_id: 'req_duplicate',
+          tool_name: 'Bash',
+          cwd: '/tmp/project',
+          message: 'test',
+          timeout_seconds: 30
+        })
+      })
+    const first = post()
+    const item = await waitFor(() => approvals[0] || null)
+    const second = post()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(approvals).toHaveLength(1)
+    server.respond(item.id, 'allow')
+    expect(await (await first).json()).toMatchObject({
+      status: 'ok',
+      decision: 'allow'
+    })
+    expect(await (await second).json()).toMatchObject({
+      status: 'ok',
+      decision: 'allow'
+    })
+  })
+
   it('resolves an approval from the terminal', async () => {
     const promise = fetch(`http://127.0.0.1:${port}/claude-approval`, {
       method: 'POST',

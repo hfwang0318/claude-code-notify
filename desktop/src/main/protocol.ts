@@ -64,13 +64,16 @@ export function normalizeSuggestions(raw: unknown): ApprovalSuggestion[] {
   if (!Array.isArray(raw)) return []
   const seen = new Set<string>()
   const suggestions: ApprovalSuggestion[] = []
-  for (const item of raw) {
+  for (let originalIndex = 0; originalIndex < raw.length; originalIndex += 1) {
+    const item = raw[originalIndex]
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue
     const suggestion = item as ApprovalSuggestion
     const key = stableStringify(suggestion)
     if (seen.has(key)) continue
     seen.add(key)
-    suggestions.push(suggestion)
+    // The popup must return the index into the hook's original array, not
+    // into this filtered/deduplicated list; the hook echoes it verbatim.
+    suggestions.push({ ...suggestion, originalIndex })
   }
   return suggestions.slice(0, MAX_SUGGESTIONS)
 }

@@ -174,7 +174,8 @@ module.emit_allow()
   maybe('still requests approval in default mode', async () => {
     const result = await runHook('default')
     expect(result.code, result.stderr).toBe(0)
-    expect(result.requests).toBe(1)
+    // One health probe plus the approval request.
+    expect(result.requests).toBe(2)
     expect(result.stdout).toContain('allow')
   })
 
@@ -197,7 +198,7 @@ module.emit_allow()
       }
     )
     expect(result.code, result.stderr).toBe(0)
-    expect(result.requests, result.stderr).toBe(1)
+    expect(result.requests, result.stderr).toBe(2)
     expect(result.stdout).toContain('allow')
   })
 
@@ -273,5 +274,190 @@ print(json.dumps(module.task_summary(${JSON.stringify(transcript)})))
     } finally {
       rmSync(dataDir, { recursive: true, force: true })
     }
+  })
+
+  maybe('accepts a fractional approval timeout instead of crashing', async () => {
+    const result = await runHookPayload(
+      {
+        hook_event_name: 'PermissionRequest',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'pwd' },
+        session_id: 'hook-test-timeout'
+      },
+      { CLAUDE_APPROVAL_TIMEOUT: '240.5' }
+    )
+    expect(result.code, result.stderr).toBe(0)
+  })
+
+  maybe('exits cleanly when stdin is not a JSON object', () => {
+    const result = spawnSync(python, [hookPath], {
+      input: '[]',
+      encoding: 'utf-8',
+      timeout: 15000,
+      env: { ...process.env, CLAUDE_NOTIFY_TOKEN: 'test-token' }
+    })
+    expect(result.status, result.stderr).toBe(0)
+  })
+
+  maybe('falls back quickly when the desktop accepts but never answers', async () => {
+    const hung = createServer(() => undefined)
+    await new Promise<void>((resolve) =>
+      hung.listen(0, '127.0.0.1', () => resolve())
+    )
+    const address = hung.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    try {
+      const started = Date.now()
+      const child = spawn(python, [hookPath], {
+        env: {
+          ...process.env,
+          CLAUDE_NOTIFY_TOKEN: 'test-token',
+          CLAUDE_APPROVAL_URL: `http://127.0.0.1:${port}/claude-approval`,
+          CLAUDE_APPROVAL_TIMEOUT: '600'
+        },
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+      child.stdin.end(
+        JSON.stringify({
+          hook_event_name: 'PermissionRequest',
+          permission_mode: 'default',
+          tool_name: 'Bash',
+          tool_input: { command: 'pwd' },
+          session_id: 'hook-test-hung'
+        })
+      )
+      const code = await new Promise<number | null>((resolve) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL')
+          resolve(null)
+        }, 12000)
+        child.on('exit', (value) => {
+          clearTimeout(timer)
+          resolve(value)
+        })
+      })
+      expect(code).toBe(0)
+      expect(Date.now() - started).toBeLessThan(8000)
+    } finally {
+      hung.close()
+    }
+  }, 20000)
+
+
+  maybe('echoes the full ExitPlanMode plan after truncating the popup copy', async () => {
+    const plan = `# Plan\n${'x'.repeat(100000)}`
+    const result = await runHookPayload({
+      hook_event_name: 'PermissionRequest',
+      permission_mode: 'default',
+      tool_name: 'ExitPlanMode',
+      tool_input: { plan },
+      session_id: 'hook-test-exit-plan'
+    })
+    expect(result.code, result.stderr).toBe(0)
+    const output = JSON.parse(result.stdout.trim())
+    expect(
+      output.hookSpecificOutput.decision.updatedInput.plan
+    ).toHaveLength(plan.length)
+  })
+
+  maybe('accepts an approval URL without a path', async () => {
+    const server = createServer((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({ status: 'ok', decision: 'allow' })
+        )
+      })
+    })
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', () => resolve())
+    )
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    try {
+      const child = spawn(python, [hookPath], {
+        env: {
+          ...process.env,
+          CLAUDE_NOTIFY_TOKEN: 'test-token',
+          CLAUDE_APPROVAL_URL: `http://127.0.0.1:${port}`
+        },
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+      let stdout = ''
+      child.stdout.on('data', (chunk) => (stdout += String(chunk)))
+      child.stdin.end(
+        JSON.stringify({
+          hook_event_name: 'PermissionRequest',
+          permission_mode: 'default',
+          tool_name: 'Bash',
+          tool_input: { command: 'pwd' },
+          session_id: 'hook-test-no-path'
+        })
+      )
+      const code = await new Promise<number | null>((resolve) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL')
+          resolve(null)
+        }, 8000)
+        child.on('exit', (value) => {
+          clearTimeout(timer)
+          resolve(value)
+        })
+      })
+      expect(code).toBe(0)
+      expect(stdout).toContain('allow')
+    } finally {
+      server.close()
+    }
+  }, 15000)
+
+  maybe('accepts an infinite approval timeout without crashing', async () => {
+    const result = await runHookPayload(
+      {
+        hook_event_name: 'PermissionRequest',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'pwd' },
+        session_id: 'hook-test-inf'
+      },
+      { CLAUDE_APPROVAL_TIMEOUT: 'inf' }
+    )
+    expect(result.code, result.stderr).toBe(0)
+  })
+
+  maybe('caps oversized tool input and bypasses proxies for private hosts', () => {
+    const script = `
+import importlib.util
+spec = importlib.util.spec_from_file_location("approval_hook", ${JSON.stringify(
+      hookPath
+    )})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+capped, cut = module._cap_tool_input({"content": "x" * 200000})
+print(len(capped["content"]))
+print(cut)
+many = module._cap_tool_input({str(i): "中" * 30000 for i in range(12)})
+print(many[0] == {"truncated": True})
+print(many[1])
+print(module._is_direct_url("http://192.168.1.20:18765/claude-approval"))
+print(module._is_direct_url("http://10.0.0.5:18765/claude-approval"))
+print(module._is_direct_url("https://api.anthropic.com/v1/messages"))
+`
+    const result = spawnSync(python, ['-c', script], {
+      encoding: 'utf-8',
+      timeout: 15000
+    })
+    expect(result.status, result.stderr).toBe(0)
+    const [length, cut, totalFallback, totalCut, privateA, privateB, publicHost] =
+      result.stdout.trim().split('\n')
+    expect(Number(length)).toBeLessThan(70000)
+    expect(cut).toBe('True')
+    expect(totalFallback).toBe('True')
+    expect(totalCut).toBe('True')
+    expect(privateA).toBe('True')
+    expect(privateB).toBe('True')
+    expect(publicHost).toBe('False')
   })
 })

@@ -9,6 +9,10 @@ import {
   DEPLOY_CANCELLED,
   PYTHON_COMPILE_SNIPPET,
   SSH_COMMAND_TIMEOUT,
+  buildAtomicReplaceCommand,
+  buildJsonVerifyCommand,
+  buildRemoteFileProbeCommand,
+  buildRemoteRealPathCommand,
   buildPythonCompileCommand,
   execCommand,
   humanizeSshError,
@@ -125,5 +129,20 @@ describe('humanizeSshError', () => {
     expect(humanizeSshError(error)).toBe('部署已取消')
     expect(isDeployCancelled(error)).toBe(true)
     expect(isDeployCancelled(new Error('other'))).toBe(false)
+  })
+})
+
+describe('remote atomic writes', () => {
+  it('verifies JSON in the temp file before replacing the target', () => {
+    expect(buildJsonVerifyCommand("/home/u/.claude/settings.json.tmp")).toContain(
+      'json.load'
+    )
+    expect(buildAtomicReplaceCommand('/a/settings.json.tmp', '/a/settings.json')).toBe(
+      "mv -f '/a/settings.json.tmp' '/a/settings.json'"
+    )
+    const probe = buildRemoteFileProbeCommand('/home/u/.claude/settings.json')
+    expect(probe).toContain("print('missing')")
+    expect(probe).toContain('/home/u/.claude/settings.json')
+    expect(buildRemoteRealPathCommand('/home/u/.zshrc')).toContain('realpath')
   })
 })

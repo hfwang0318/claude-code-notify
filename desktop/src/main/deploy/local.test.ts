@@ -1,6 +1,7 @@
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -14,6 +15,7 @@ import {
   deployLocal,
   detectLocalDeploy,
   detectLocalState,
+  localRedeployOptions,
   removeLocalDeploy,
   restoreLocalBackup
 } from './local'
@@ -325,6 +327,102 @@ describe('deployLocal', () => {
     delete config[HOOK_VERSION_KEY]
     writeFileSync(configPath, JSON.stringify(config, null, 2))
     expect(detectLocalState(claudeDir).stale).toBe(true)
+  })
+
+  it('does not back up or overwrite an invalid settings.json', () => {
+    const claudeDir = tempDir()
+    writeFileSync(join(claudeDir, 'settings.json'), '{broken')
+    expect(() =>
+      deployLocal(
+        {
+          mode: 'popup',
+          token: 'test-token',
+          port: 18765,
+          timeoutSec: 240,
+          writeEnv: false,
+          envShells: [],
+          claudeDir,
+          hooksDir: join(process.cwd(), 'resources', 'hooks')
+        },
+        () => undefined
+      )
+    ).toThrow(/不是合法 JSON/)
+    expect(readFileSync(join(claudeDir, 'settings.json'), 'utf-8')).toBe('{broken')
+    expect(
+      readdirSync(claudeDir).some((name) => name.includes('.bak.'))
+    ).toBe(false)
+
+    writeFileSync(join(claudeDir, 'settings.json'), '[]')
+    expect(() =>
+      deployLocal(
+        {
+          mode: 'popup',
+          token: 'test-token',
+          port: 18765,
+          timeoutSec: 240,
+          writeEnv: false,
+          envShells: [],
+          claudeDir,
+          hooksDir: join(process.cwd(), 'resources', 'hooks')
+        },
+        () => undefined
+      )
+    ).toThrow(/JSON 对象/)
+  })
+
+  it('keeps the hook timeout above the socket timeout for long approvals', () => {
+    const claudeDir = tempDir()
+    const result = deployLocal(
+      {
+        mode: 'popup',
+        token: 'test-token',
+        port: 18765,
+        timeoutSec: 600,
+        writeEnv: false,
+        envShells: [],
+        claudeDir,
+        hooksDir: join(process.cwd(), 'resources', 'hooks')
+      },
+      () => undefined
+    )
+    const settings = JSON.parse(readFileSync(result.settingsPath, 'utf-8'))
+    const entry = settings.hooks.PermissionRequest.flatMap(
+      (group: { hooks: Array<{ command?: string; args?: string[] }> }) =>
+        group.hooks
+    ).find((candidate: { command?: string; args?: string[] }) =>
+      hookCommandText(candidate).includes('claude_approval_hook.py')
+    )
+    expect(entry).toBeDefined()
+    expect(hookCommandText(entry)).toMatch(/CLAUDE_APPROVAL_TIMEOUT='?600'?/)
+    // socket waits 600 + 600 + 30; Claude's hook timeout must exceed it.
+    expect(entry.timeout).toBeGreaterThan(600 + 630)
+  })
+
+  it('keeps the user tab settings when refreshing an install', () => {
+    const claudeDir = tempDir()
+    deployLocal(
+      {
+        mode: 'popup',
+        token: 'test-token',
+        port: 18765,
+        timeoutSec: 240,
+        writeEnv: false,
+        envShells: [],
+        claudeDir,
+        hooksDir: join(process.cwd(), 'resources', 'hooks'),
+        tabStatus: true,
+        tabPrefix: ['branch'],
+        tabSuffix: ['cwd']
+      },
+      () => undefined
+    )
+    const local = detectLocalState(claudeDir)
+    expect(localRedeployOptions(local)).toEqual({
+      mode: 'popup',
+      tabStatus: true,
+      tabPrefix: ['branch'],
+      tabSuffix: ['cwd']
+    })
   })
 
   it('is idempotent on repeated local deploys', () => {

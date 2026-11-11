@@ -2,6 +2,7 @@
 .serena/
 
 # Dependencies and build outputs
+.pnpm-store/
 node_modules/
 out/
 dist/

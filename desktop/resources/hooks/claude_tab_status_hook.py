@@ -88,6 +88,9 @@ TITLE_REQUEST_TIMEOUT_SEC = 25
 # avoids stacking another request onto a prompt submitted while the previous
 # worker is still thinking.
 TITLE_RETRY_COOLDOWN_SEC = 30
+# A detached worker can spend up to 3 x 25s on retries (plus a
+# schema retry), so the cooldown alone cannot prevent overlap.
+TITLE_WORKER_TTL_SEC = 180
 # Claude Code fires no hook on Ctrl+C/Esc, so UserPromptSubmit starts a
 # detached watcher that tails the transcript for the interrupt marker.
 # Claude writes "[Request interrupted by user for tool use]" when a tool was
@@ -95,7 +98,7 @@ TITLE_RETRY_COOLDOWN_SEC = 30
 # also be followed by a normal reply, so it needs a short settle window.
 PLAIN_INTERRUPT = "[Request interrupted by user]"
 TOOL_INTERRUPT = "[Request interrupted by user for tool use]"
-TOOL_INTERRUPT_GRACE_SEC = 2.0
+TOOL_INTERRUPT_GRACE_SEC = 5.0
 # An assistant stop_reason is not a reliable turn-end signal: real transcripts
 # write the interrupt marker 8-13ms after stop_sequence. Wait a moment before
 # giving up so a marker in the next poll batch is still caught.
@@ -123,7 +126,7 @@ LANGUAGE_FALLBACK = (
     "English of these instructions."
 )
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SEPARATORS = re.compile(r"[/\\]")
 _BLOCKING_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 _BLOCKING_NOTIFICATIONS = {"permission_prompt", "elicitation_dialog"}
@@ -222,16 +225,33 @@ def _state_path() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), STATE_NAME)
 
 
-def _read_state() -> dict:
+def _read_state_with_status() -> tuple[dict, bool]:
+    path = _state_path()
     try:
-        with open(_state_path(), "r", encoding="utf-8") as file:
+        with open(path, "r", encoding="utf-8") as file:
             data = json.load(file)
-        return data if isinstance(data, dict) else {}
+        return (data if isinstance(data, dict) else {}), True
+    except FileNotFoundError:
+        return {}, True
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Permanent corruption would otherwise disable all future writes.
+        # Quarantine it once, then start from a clean state.
+        try:
+            os.replace(path, f"{path}.corrupt.{int(time.time())}")
+        except OSError:
+            pass
+        return {}, True
     except Exception:
-        return {}
+        # A transient read error (EIO, EACCES, NFS hiccup) must not be treated
+        # as an empty state: writing it back would drop every other session.
+        return {}, False
 
 
-def _write_state(state: dict) -> None:
+def _read_state() -> dict:
+    return _read_state_with_status()[0]
+
+
+def _write_state(state: dict) -> bool:
     path = _state_path()
     temp = ""
     try:
@@ -250,12 +270,14 @@ def _write_state(state: dict) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+        return True
     except Exception:
         try:
             if temp:
                 os.unlink(temp)
         except Exception:
             pass
+        return False
 
 
 def _prune_state(state: dict) -> dict:
@@ -263,6 +285,10 @@ def _prune_state(state: dict) -> dict:
     items: list[tuple[float, str, dict]] = []
     for key, value in state.items():
         if not isinstance(value, dict):
+            continue
+        # A SessionEnd entry with only a timestamp has nothing worth keeping
+        # and would otherwise occupy one of the 50 slots.
+        if not (set(value) - {"ts"}):
             continue
         stamp = value.get("ts")
         if not isinstance(stamp, (int, float)) or stamp < cutoff:
@@ -302,6 +328,17 @@ def _state_snapshot(session_id: str) -> dict:
             if isinstance(entry.get("turn_started_at"), (int, float))
             else 0.0
         ),
+        "title_started_at": (
+            float(entry.get("title_started_at"))
+            if isinstance(entry.get("title_started_at"), (int, float))
+            else 0.0
+        ),
+        "transcript_cutoff": (
+            int(entry.get("transcript_cutoff"))
+            if isinstance(entry.get("transcript_cutoff"), (int, float))
+            and entry.get("transcript_cutoff") > 0
+            else 0
+        ),
         "generated": _clean_label(entry.get("generated_title"), TITLE_MAX_CHARS),
         "generated_for": (
             str(entry.get("generated_for")).replace("\x00", "").strip()
@@ -317,7 +354,9 @@ def _acquire_state_lock():
 
     The state file is replaced atomically, but two writers that both read the
     old copy can still lose each other's fields (for example the watcher's dot
-    overwriting a freshly generated title).
+    overwriting a freshly generated title). Windows has no fcntl here, so its
+    read-modify-write window remains unsynchronized; the Windows watcher is
+    disabled, which keeps the remaining writers low-frequency.
     """
     if fcntl is None:
         return None
@@ -364,6 +403,8 @@ def _update_state(
     generated_for: object = _UNSET,
     dot: object = _UNSET,
     turn_started_at: object = _UNSET,
+    title_started_at: object = _UNSET,
+    transcript_cutoff: object = _UNSET,
     expected_turn_at: object = _UNSET,
     delete: bool = False,
 ) -> bool:
@@ -371,11 +412,13 @@ def _update_state(
         return False
     lock = _acquire_state_lock()
     try:
-        state = _prune_state(_read_state())
+        raw, readable = _read_state_with_status()
+        if not readable:
+            return False
+        state = _prune_state(raw)
         if delete:
             state.pop(session_id, None)
-            _write_state(state)
-            return True
+            return _write_state(state)
         entry = state.get(session_id)
         entry = dict(entry) if isinstance(entry, dict) else {}
 
@@ -388,8 +431,10 @@ def _update_state(
                 current = float(entry.get("turn_started_at"))
             except (TypeError, ValueError):
                 current = 0.0
-            if expected > 0 and abs(current - expected) > 1e-6:
-                # A newer prompt started; its own hook owns the status now.
+            if expected <= 0 or abs(current - expected) > 1e-6:
+                # Without a token we cannot tell which turn the caller means;
+                # never let an untokened writer override the current status.
+                # A newer prompt also owns the status now.
                 return False
 
         if task is not _UNSET:
@@ -450,14 +495,31 @@ def _update_state(
                 entry["turn_started_at"] = stamp
             else:
                 entry.pop("turn_started_at", None)
+        if title_started_at is not _UNSET:
+            try:
+                stamp = float(title_started_at)
+            except (TypeError, ValueError):
+                stamp = 0.0
+            if stamp > 0:
+                entry["title_started_at"] = stamp
+            else:
+                entry.pop("title_started_at", None)
+        if transcript_cutoff is not _UNSET:
+            try:
+                cutoff = int(transcript_cutoff)
+            except (TypeError, ValueError):
+                cutoff = 0
+            if cutoff > 0:
+                entry["transcript_cutoff"] = cutoff
+            else:
+                entry.pop("transcript_cutoff", None)
 
-        if entry:
+        if entry and (set(entry) - {"ts"}):
             entry["ts"] = time.time()
             state[session_id] = entry
         else:
             state.pop(session_id, None)
-        _write_state(state)
-        return True
+        return _write_state(state)
     finally:
         _release_state_lock(lock)
 
@@ -468,34 +530,72 @@ def _ai_title_enabled() -> bool:
     return os.environ.get("CLAUDE_CODE_DISABLE_TERMINAL_TITLE") != "1"
 
 
-def _transcript_titles(transcript_path: str) -> tuple[str, str]:
+def _transcript_titles(
+    transcript_path: str, start_offset: int = 0
+) -> tuple[str, str]:
+    """Return the latest custom/AI titles at or after start_offset.
+
+    Titles can be older than the last 128KB of a long transcript, so scan
+    backwards in chunks instead of reading only the tail. Backwards order keeps
+    both memory and I/O bounded once the latest titles are found.
+    """
     if not transcript_path:
         return "", ""
     try:
         size = os.path.getsize(transcript_path)
-        with open(transcript_path, "rb") as file:
-            if size > AI_TITLE_TAIL_BYTES:
-                file.seek(size - AI_TITLE_TAIL_BYTES)
-            data = file.read().decode("utf-8", "ignore")
-    except (OSError, ValueError):
+    except OSError:
         return "", ""
+    try:
+        start = max(0, min(int(start_offset or 0), size))
+    except (TypeError, ValueError):
+        start = 0
 
     custom = ""
     ai_title = ""
-    for raw_line in reversed(data.splitlines()):
-        try:
-            entry = json.loads(raw_line)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(entry, dict):
-            continue
-        kind = entry.get("type")
-        if kind == "custom-title" and not custom:
-            custom = _clean_label(entry.get("customTitle"), LABEL_MAX_CHARS)
-        elif kind == "ai-title" and not ai_title:
-            ai_title = _clean_label(entry.get("aiTitle"), LABEL_MAX_CHARS)
-        if custom and ai_title:
-            break
+    need_ai = _ai_title_enabled()
+    carry = b""
+    try:
+        with open(transcript_path, "rb") as file:
+            pos = size
+            while pos > start and not (custom and (ai_title or not need_ai)):
+                read_start = max(start, pos - AI_TITLE_TAIL_BYTES)
+                file.seek(read_start)
+                data = file.read(pos - read_start) + carry
+                lines = data.split(b"\n")
+                if read_start > start:
+                    # The first line may continue in the block already read.
+                    carry = lines[0]
+                    lines = lines[1:]
+                else:
+                    carry = b""
+                for raw_line in reversed(lines):
+                    if not raw_line:
+                        continue
+                    if (
+                        b'"custom-title"' not in raw_line
+                        and b'"ai-title"' not in raw_line
+                    ):
+                        continue
+                    try:
+                        entry = json.loads(raw_line.decode("utf-8", "ignore"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    kind = entry.get("type")
+                    if kind == "custom-title" and not custom:
+                        custom = _clean_label(
+                            entry.get("customTitle"), LABEL_MAX_CHARS
+                        )
+                    elif kind == "ai-title" and need_ai and not ai_title:
+                        ai_title = _clean_label(
+                            entry.get("aiTitle"), LABEL_MAX_CHARS
+                        )
+                    if custom and (ai_title or not need_ai):
+                        break
+                pos = read_start
+    except (OSError, ValueError):
+        return "", ""
     return custom, ai_title
 
 
@@ -576,9 +676,13 @@ def _api_token() -> str:
 
 def _title_model() -> str:
     env = _effective_env()
+    # Titles are cheap metadata: prefer the small/fast model. Only fall back
+    # to ANTHROPIC_MODEL when nothing cheaper is configured, otherwise a
+    # title would cost as much as a real turn (and retries multiply it).
     for key in (
         "CLAUDE_NOTIFY_TITLE_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "ANTHROPIC_MODEL",
     ):
         value = env.get(key)
@@ -606,7 +710,13 @@ def _base_url() -> str:
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _is_loopback_url(url: str) -> bool:
+def _is_direct_url(url: str) -> bool:
+    """True for loopback, link-local and RFC1918 targets.
+
+    A proxy in HTTP_PROXY usually cannot route private addresses, so remote
+    deployments on 10/172.16/192.168 must connect directly even though they
+    are not literal loopback.
+    """
     try:
         host = urllib.parse.urlsplit(url).hostname or ""
     except ValueError:
@@ -615,13 +725,16 @@ def _is_loopback_url(url: str) -> bool:
     if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return bool(
+        address.is_loopback or address.is_private or address.is_link_local
+    )
 
 
 def _open_url(request: urllib.request.Request, timeout: float):
-    if _is_loopback_url(request.full_url):
+    if _is_direct_url(request.full_url):
         return _DIRECT_OPENER.open(request, timeout=timeout)
     return urllib.request.urlopen(request, timeout=timeout)
 
@@ -661,22 +774,35 @@ def _title_user_prompt(content: str) -> str:
 
 def _parse_title(text: str) -> str:
     # The official path parses the model's JSON output and requires a "title"
-    # field; plain prose is not accepted.
+    # field; plain prose is not accepted. Routers sometimes wrap the JSON in
+    # prose or emit several objects, so try the whole string first and then
+    # every balanced object in order instead of a greedy regex.
     candidate = text.strip()
+    if not candidate:
+        return ""
+    candidates: list[object] = []
     try:
-        data = json.loads(candidate)
+        candidates.append(json.loads(candidate))
     except Exception:
-        match = re.search(r"\{.*\}", candidate, flags=re.S)
-        if not match:
-            return ""
+        pass
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(candidate):
+        start = candidate.find("{", index)
+        if start < 0:
+            break
         try:
-            data = json.loads(match.group(0))
-        except Exception:
-            return ""
-    if isinstance(data, dict):
-        title = data.get("title")
-        if isinstance(title, str):
-            return _clean_label(title, TITLE_MAX_CHARS)
+            data, end = decoder.raw_decode(candidate[start:])
+        except ValueError:
+            index = start + 1
+            continue
+        candidates.append(data)
+        index = start + max(1, end)
+    for data in candidates:
+        if isinstance(data, dict):
+            title = data.get("title")
+            if isinstance(title, str) and title.strip():
+                return _clean_label(title, TITLE_MAX_CHARS)
     return ""
 
 
@@ -788,6 +914,15 @@ def _spawn_title_worker(session_id: str) -> None:
 
 
 def _generate_title_worker(session_id: str) -> int:
+    try:
+        return _generate_title_worker_inner(session_id)
+    finally:
+        # Clear the in-flight marker even when the worker fails or is killed
+        # between attempts, so a later prompt can retry after the cooldown.
+        _update_state(session_id, title_started_at=None)
+
+
+def _generate_title_worker_inner(session_id: str) -> int:
     snapshot = _state_snapshot(session_id)
     first_prompt = snapshot["first_prompt"]
     if not first_prompt or len(first_prompt) < 10:
@@ -822,6 +957,15 @@ def _process_alive(pid: int) -> bool:
             import ctypes
 
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.OpenProcess.argtypes = [
+                ctypes.c_uint32,
+                ctypes.c_int,
+                ctypes.c_uint32,
+            ]
+            kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+            kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
             handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
             if not handle:
                 # ERROR_INVALID_PARAMETER means the process is gone; access
@@ -845,6 +989,58 @@ def _process_alive(pid: int) -> bool:
     return True
 
 
+def _claude_pid() -> int:
+    """Resolve the Claude Code process that owns this hook.
+
+    Hooks are often launched through a shell wrapper, so getppid() can be the
+    shell instead of Claude. Walk a few ancestors looking for `claude`;
+    CLAUDE_PID, when set, still wins.
+    """
+    raw = os.environ.get("CLAUDE_PID")
+    if raw and str(raw).strip().isdigit():
+        return int(str(raw).strip())
+    pid = os.getppid()
+    for _ in range(5):
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=,comm=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+            fields = result.stdout.strip().split(None, 1)
+            if not fields:
+                break
+            parent = int(fields[0])
+            comm = fields[1] if len(fields) > 1 else ""
+            if "claude" in comm.lower():
+                return pid
+            if parent <= 1:
+                break
+            pid = parent
+        except Exception:
+            break
+    return os.getppid()
+
+
+def _tty_device(name: str) -> str:
+    """Map ps' tty column (pts/0, ttys003, …) to an absolute device path.
+
+    Reject anything that is not a plain device name or a /dev path; ps comes
+    from PATH and its output must not become an arbitrary file write.
+    """
+    name = name.strip()
+    if not name or name in {"?", "??", "-"}:
+        return ""
+    if name.startswith("/"):
+        if ".." in name or not re.fullmatch(r"/dev/[A-Za-z0-9._/-]+", name):
+            return ""
+        return name
+    if ".." in name or not re.fullmatch(r"[A-Za-z0-9._/-]+", name):
+        return ""
+    return f"/dev/{name}"
+
+
 def _claude_tty() -> str:
     """Resolve the terminal device Claude Code is attached to.
 
@@ -856,20 +1052,23 @@ def _claude_tty() -> str:
     """
     if os.name == "nt":
         return ""
-    pid = os.environ.get("CLAUDE_PID") or str(os.getppid())
+    override = os.environ.get("CLAUDE_NOTIFY_TAB_TTY")
+    if override:
+        return override
+    pid = str(_claude_pid())
     try:
         result = subprocess.run(
-            ["ps", "-o", "tty=", "-p", str(pid)],
+            ["ps", "-o", "tty=", "-p", pid],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=0.5,
         )
     except Exception:
         return ""
     name = result.stdout.strip()
-    if not name or name in {"?", "??", "-"} or name.lower().startswith("not"):
+    if name.lower().startswith("not"):
         return ""
-    return name if name.startswith("/") else f"/dev/{name}"
+    return _tty_device(name)
 
 
 def _spawn_interrupt_watcher(payload: dict) -> None:
@@ -884,8 +1083,19 @@ def _spawn_interrupt_watcher(payload: dict) -> None:
     tty_path = _claude_tty()
     if not tty_path:
         return
-    claude_pid = os.environ.get("CLAUDE_PID") or str(os.getppid())
+    claude_pid = str(_claude_pid())
     turn_started_at = _state_snapshot(session_id)["turn_started_at"]
+    if turn_started_at <= 0:
+        # Without a token the watcher cannot prove it is writing for the
+        # current turn; a stale green is worse than no green.
+        return
+    # Record the starting point now: the child's interpreter startup can take
+    # long enough for an immediate Ctrl+C marker to land before it would
+    # otherwise call getsize(), losing the interrupt.
+    try:
+        start_offset = os.path.getsize(transcript)
+    except OSError:
+        start_offset = 0
     # O_NONBLOCK keeps the hook from hanging when the terminal peer is gone;
     # the watcher restores blocking mode before writing.
     flags = os.O_WRONLY | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -905,6 +1115,7 @@ def _spawn_interrupt_watcher(payload: dict) -> None:
                 str(payload.get("cwd") or ""),
                 claude_pid,
                 str(turn_started_at),
+                str(start_offset),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -973,7 +1184,11 @@ def _watch_action(lines: list[str], saw_assistant: bool) -> tuple[bool, str]:
             if stop in {"end_turn", "stop_sequence", "max_tokens"}:
                 ended = True
             continue
-        if kind != "user" or entry.get("isMeta") is True:
+        if (
+            kind != "user"
+            or entry.get("isMeta") is True
+            or entry.get("isCompactSummary") is True
+        ):
             continue
         text = _transcript_text(entry).lstrip()
         if not text:
@@ -986,7 +1201,7 @@ def _watch_action(lines: list[str], saw_assistant: bool) -> tuple[bool, str]:
             interrupt_kind = "plain"
             ended = False
             continue
-        if saw_assistant:
+        if saw_assistant and not _is_noise_prompt(text):
             return saw_assistant, "next_turn"
         # The prompt that opened this turn is ignored: no assistant message has
         # been seen yet, so it is not a newer prompt.
@@ -1020,7 +1235,9 @@ def _read_complete_lines(path: str, offset: int) -> tuple[list[str], int]:
     if end < 0:
         return [], offset
     text = data[: end + 1].decode("utf-8", "ignore")
-    return text.splitlines(), offset + end + 1
+    # split("\n"), not splitlines(): U+2028/U+2029 are valid inside JSON
+    # strings and must not split a record.
+    return text.split("\n"), offset + end + 1
 
 
 def _write_terminal_title(sink, dot: str, label: str) -> None:
@@ -1037,6 +1254,8 @@ def _write_interrupt_title(
     sink, session_id: str, transcript: str, cwd: str, expected_turn: float
 ) -> bool:
     """Turn the tab green unless a newer prompt already owns the turn."""
+    if expected_turn <= 0:
+        return False
     payload = {
         "session_id": session_id,
         "transcript_path": transcript,
@@ -1046,9 +1265,17 @@ def _write_interrupt_title(
         session_id, dot=GREEN, expected_turn_at=expected_turn
     ):
         return False
-    titles = _transcript_titles(transcript)
-    label = _priority_label(payload, "Stop", titles)
-    _write_terminal_title(sink, GREEN, label)
+    try:
+        snapshot = _state_snapshot(session_id)
+        titles = _transcript_titles(transcript, snapshot["transcript_cutoff"])
+        label = _priority_label(payload, "Stop", titles)
+        _write_terminal_title(sink, GREEN, label)
+    except Exception:
+        # The terminal may have gone away (SSH closed, tab closed). Revert the
+        # persisted dot so a later compact does not carry a green that was
+        # never shown.
+        _update_state(session_id, dot=YELLOW, expected_turn_at=expected_turn)
+        return False
     return True
 
 
@@ -1059,6 +1286,7 @@ def _watch_interrupt(
     cwd: str,
     claude_pid: str,
     turn_started_at: str,
+    start_offset: str | None = None,
 ) -> int:
     try:
         # The parent opened the tty with O_NONBLOCK so a dead peer cannot hang
@@ -1072,9 +1300,16 @@ def _watch_interrupt(
         return 0
     try:
         try:
-            offset = os.path.getsize(transcript)
+            offset = (
+                max(0, int(start_offset))
+                if start_offset is not None
+                else os.path.getsize(transcript)
+            )
+        except (TypeError, ValueError):
+            offset = 0
         except OSError:
-            return 0
+            # A brand-new session may not have created the transcript yet.
+            offset = 0
         try:
             pid = int(claude_pid)
         except (TypeError, ValueError):
@@ -1146,17 +1381,39 @@ def _watch_interrupt(
     return 0
 
 
+def _clear_session(payload: dict) -> int:
+    """Drop the previous conversation's title state at /clear.
+
+    The transcript file may be reused, so record its current size; title
+    lookups then ignore everything written before the clear.
+    """
+    session_id = str(payload.get("session_id") or "")
+    transcript = str(payload.get("transcript_path") or "")
+    try:
+        cutoff = os.path.getsize(transcript)
+    except OSError:
+        cutoff = 0
+    _update_state(
+        session_id,
+        task=None,
+        dot=None,
+        first_prompt=None,
+        custom=None,
+        generated_title=None,
+        generated_for=None,
+        transcript_cutoff=cutoff or None,
+    )
+    return cutoff
+
+
 def _task(payload: dict, event: str, titles: tuple[str, str]) -> str:
     session_id = str(payload.get("session_id") or "")
     if event == "SessionStart" and str(payload.get("source") or "") == "clear":
-        _update_state(session_id, delete=True)
+        _clear_session(payload)
         return ""
 
     if event == "UserPromptSubmit":
         prompt = payload.get("prompt")
-        # Every prompt starts a new turn. The token lets a watcher spawned for
-        # an older turn avoid writing a stale green over the new turn.
-        _update_state(session_id, turn_started_at=time.time())
         # UserPromptSubmit carries session_title only while a custom title
         # exists; its absence means the custom title was cleared.
         if "session_title" in payload:
@@ -1164,21 +1421,26 @@ def _task(payload: dict, event: str, titles: tuple[str, str]) -> str:
         else:
             _update_state(session_id, custom=None)
 
+        # Strip appended <system-reminder> blocks before deciding whether this
+        # is a real prompt; otherwise "继续" plus context is not recognised as
+        # a confirmation.
+        cleaned_prompt = _clean_task_text(prompt if isinstance(prompt, str) else "")
+        valid_prompt = (
+            bool(cleaned_prompt)
+            and not _is_noise_prompt(cleaned_prompt)
+            and not _is_confirmation_prompt(cleaned_prompt)
+        )
         snapshot = _state_snapshot(session_id)
         task = ""
-        valid_prompt = isinstance(prompt, str) and not _is_noise_prompt(
-            prompt
-        ) and not _is_confirmation_prompt(prompt)
         if valid_prompt:
-            task = _clean_label(_clean_task_text(prompt), TASK_MAX_CHARS)
+            task = _clean_label(cleaned_prompt, TASK_MAX_CHARS)
             if task:
                 _update_state(session_id, task=task)
 
-        if valid_prompt:
             # A short opener ("hi", "thanks") cannot title a session. Let the
             # next real prompt become the title source instead of keeping an
             # untitleable first_prompt forever.
-            prompt_text = _first_prompt_text(prompt)
+            prompt_text = _first_prompt_text(cleaned_prompt)
             first_prompt = snapshot["first_prompt"]
             if prompt_text and (
                 not first_prompt
@@ -1186,36 +1448,44 @@ def _task(payload: dict, event: str, titles: tuple[str, str]) -> str:
             ):
                 _update_state(session_id, first_prompt=prompt_text)
                 snapshot = _state_snapshot(session_id)
-                first_prompt = snapshot["first_prompt"]
 
-            # The official generator runs once per session, only when the
-            # terminal title feature is enabled and no custom/AI/agent title
-            # exists. When the env disables it, replicate it with the same
-            # prompt/model endpoint. If the first attempt produced nothing,
-            # retry on later prompts until a title exists.
-            has_title = bool(
-                titles[0]
-                or snapshot["custom"]
-                or (
-                    snapshot["generated"]
-                    and snapshot["generated_for"] == first_prompt
-                )
+        # Title retry does not depend on this prompt being title-worthy: after
+        # a failed first attempt, a bare "继续" must still retry. The in-flight
+        # marker prevents stacking workers whose requests outlive the cooldown.
+        snapshot = _state_snapshot(session_id)
+        first_prompt = snapshot["first_prompt"]
+        has_title = bool(
+            titles[0]
+            or snapshot["custom"]
+            or (
+                snapshot["generated"]
+                and snapshot["generated_for"] == first_prompt
             )
-            recently_attempted = (
-                snapshot["attempted_at"] > 0
-                and time.time() - snapshot["attempted_at"] < TITLE_RETRY_COOLDOWN_SEC
+        )
+        now = time.time()
+        in_flight = (
+            snapshot["title_started_at"] > 0
+            and now - snapshot["title_started_at"] < TITLE_WORKER_TTL_SEC
+        )
+        recently_attempted = (
+            snapshot["attempted_at"] > 0
+            and now - snapshot["attempted_at"] < TITLE_RETRY_COOLDOWN_SEC
+        )
+        if (
+            not _ai_title_enabled()
+            and not has_title
+            and first_prompt
+            and len(first_prompt) >= 10
+            and not recently_attempted
+            and not in_flight
+        ):
+            _update_state(
+                session_id,
+                attempted=True,
+                attempted_at=now,
+                title_started_at=now,
             )
-            if (
-                not _ai_title_enabled()
-                and not has_title
-                and first_prompt
-                and len(first_prompt) >= 10
-                and not recently_attempted
-            ):
-                _update_state(
-                    session_id, attempted=True, attempted_at=time.time()
-                )
-                _spawn_title_worker(session_id)
+            _spawn_title_worker(session_id)
 
         # Claude Code sends no hook on Ctrl+C/Esc; keep a watcher alive that
         # turns the tab green when the transcript records the interrupt. This
@@ -1487,10 +1757,24 @@ def main() -> int:
 
     event = str(payload.get("hook_event_name") or "")
     session_id = str(payload.get("session_id") or "")
+    if event == "SessionStart" and str(payload.get("source") or "") == "clear":
+        # Apply the cutoff before reading titles, otherwise the old session's
+        # custom/AI title is still in the tail we would scan.
+        _clear_session(payload)
     if session_id:
         # Remember the dot so SessionStart(source=compact) can carry it over.
-        _update_state(session_id, dot=dot)
-    titles = _transcript_titles(str(payload.get("transcript_path") or ""))
+        # A new prompt advances the turn token in the same write that turns
+        # the tab yellow, closing the window where an old watcher still sees
+        # its token as current.
+        if event == "UserPromptSubmit":
+            _update_state(session_id, dot=dot, turn_started_at=time.time())
+        else:
+            _update_state(session_id, dot=dot)
+    snapshot = _state_snapshot(session_id)
+    titles = _transcript_titles(
+        str(payload.get("transcript_path") or ""),
+        snapshot["transcript_cutoff"],
+    )
     label = _priority_label(payload, event, titles)
     title = f"{dot} {label}"
     if dot == RED:
@@ -1525,6 +1809,7 @@ if __name__ == "__main__":
                 sys.argv[5],
                 sys.argv[6],
                 sys.argv[7] if len(sys.argv) >= 8 else "0",
+                sys.argv[8] if len(sys.argv) >= 9 else None,
             )
         )
     raise SystemExit(main())

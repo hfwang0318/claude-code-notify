@@ -90,7 +90,20 @@ export default function App(): React.JSX.Element {
   const connectLocal = async (): Promise<void> => {
     if (!state) return
     setLocalBusy(true)
-    const response = await api.localDeploy(state.prefs.mode)
+    // Refreshing an existing install must keep its mode and tab settings;
+    // otherwise the "立即更新" banner silently turns the tab hook back on and
+    // clears a custom prefix/suffix.
+    const existing = state.deploy.localMode
+    const response = await api.localDeploy(
+      existing ?? state.prefs.mode,
+      existing
+        ? {
+            tabStatus: state.deploy.localTabStatus,
+            tabPrefix: state.deploy.localTabPrefix,
+            tabSuffix: state.deploy.localTabSuffix
+          }
+        : undefined
+    )
     setLocalBusy(false)
     if (response.ok && !state.onboarding.done) void api.finishOnboarding()
   }
