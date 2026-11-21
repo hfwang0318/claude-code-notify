@@ -60,6 +60,14 @@ export interface CompletionNotice {
   body: string
   sessionKey: string
   createdAt: number
+  /**
+   * `terminal` is a read-only "go handle this in the terminal" reminder shown
+   * when the approval already returned to the terminal; defaults to a
+   * completion notice.
+   */
+  kind?: 'completion' | 'terminal'
+  /** Auto-close delay, so the footer never advertises the wrong duration. */
+  durationMs?: number
   /** Session identity, so a completion notice is as distinguishable as an approval. */
   sessionTitle?: string
   sessionLabel?: string
@@ -390,6 +398,8 @@ export interface Prefs {
   localIp: string
   admissionControl: boolean
   maxPending: number
+  /** 审批只提醒、立即回退终端：不弹出可操作卡片，也不让会话等待。 */
+  approvalInTerminal: boolean
   quietHoursEnabled: boolean
   /** Local time in HH:mm, inclusive start. */
   quietHoursStart: string
@@ -443,7 +453,9 @@ export interface DesktopApi {
   collapsePopup(): Promise<void>
   pauseAll(paused: boolean): Promise<void>
   muteAll(minutes: number): Promise<void>
-  dismissNotice(): Promise<void>
+  dismissNotice(id: string): Promise<void>
+  /** Keep a transient notice on screen until the user dismisses it. */
+  holdNotice(id: string): void
   selectApproval(id: string): Promise<void>
   onSelectApproval(callback: (id: string) => void): () => void
   onFocusSession(callback: (sessionKey: string) => void): () => void

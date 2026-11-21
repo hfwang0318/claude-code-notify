@@ -65,6 +65,7 @@ export interface UiConfig {
   localIp?: string
   admissionControl?: boolean
   maxPending?: number
+  approvalInTerminal?: boolean
   quietHoursEnabled?: boolean
   quietHoursStart?: string
   quietHoursEnd?: string

@@ -28,8 +28,25 @@ E2E PASS · all · 80.5s
 | `multi` | 两路真实 Claude 会话同时请求 Bash 权限 | 弹窗出现 2 个会话/2 条待审批；会话颜色不重复；标签不包含 `dumb`；队列文案正确；H1 是当前任务摘要且切换会话后变化；身份条有 4 位短码；两个会话条名称不同；点击会话条能切换到第二路；逐条批准；两路都输出 `DONE` 且生成 `result.txt`；history 为 `allow/popup` |
 | `resolved` | 一路真实 Claude 请求权限，然后模拟终端侧已处理 | 调用 `/claude-approval-resolved` 返回 `resolved`；pending 清空；history 为 `cancelled/terminal` |
 | `timeout` | 一路真实 Claude 请求权限，使用 20s hook 超时（服务端 10s），并先暂停 6s 再恢复 | 不做决定时 pending 清空；`expired` 出现；history 为 `timeout/timeout`；调用确认后 `expired` 清空 |
+| `terminal` | 先让一路真实 Claude 请求 Bash 权限进入队列，再通过主窗口 preload 打开 `approvalInTerminal`；随后添加一条全局自动放行规则并再启动一路真实 Claude 请求权限 | 已有待审批立即回退、pending 清空；新请求全程 pending=0（不弹可操作卡片），规则也没有静默批准；两次 history 都是 `ask/terminal`；会话在 120s 内自行结束，没有被审批卡住；用例结束关闭开关并清理规则 |
 
 测试还会校验 `pending.json`、`history.jsonl`、`sessions.json` 的真实落盘内容。
+
+### 仅提醒模式（审批回终端）
+
+设置 → 提醒 → 审批方式 → “仅提醒，回终端处理” 打开后，应用收到
+`/claude-approval` 会立即返回 `ask`（hook 不输出决策），审批只在终端处理：
+
+- 不进入 `pending`，弹窗只显示一张不可操作的“请在终端处理”提醒卡（15 秒后自动
+  关闭，不抢焦点；悬停、触摸或点“保留”可取消自动关闭），没有倒计时和稍后提醒；
+- 同时发送聚合系统通知（遵守会话静音、免打扰和“系统通知”总开关），点击通知在主
+  窗口定位会话；
+- history 记录为 `ask/terminal`，来源是终端回退；
+- 所有审批都由用户在终端亲自决定：开启期间自动放行规则暂停，规则命中的请求同样
+  回退终端，不会在后台静默批准。
+
+`terminal` 用例覆盖真实 hook 链路；系统通知本身（通知中心标题/聚合/点击）在无头
+E2E 中无法断言，需要真机验收。
 
 `bypass` 用例的回归背景：旧版 `claude_approval_hook.py` 没有读取 `permission_mode`，在 bypass 下仍会把 Bash/文件工具转发到桌面。当前 hook 会跳过 `bypassPermissions` / `dontAsk`；应用启动时若检测到本机 hook 版本过期，会自动备份并更新。
 
@@ -171,6 +188,16 @@ env=off 为 3 条（`测试目的说明`）。因此 env=on 时按官方 `genera
 - 模型：`CLAUDE_NOTIFY_TITLE_MODEL` > `ANTHROPIC_SMALL_FAST_MODEL` > `ANTHROPIC_MODEL`
 - 异步子进程生成，写入 `claude_notify_tab_state.json`；不阻塞主 hook
 - 路由器偶发 thinking-only 时重试 3 次（官方是单次；这是对路由模型的适配）
+- 标题请求与 Claude Code 主会话一样带 `stream: true`，并解析 SSE
+  （`content_block_delta` 的 `text_delta`，兼容 `input_json_delta`）；只注册了流式
+  `/v1/messages` 路由的自建路由器不会再 404。直接返回整段 JSON 的端点仍按原方式
+  解析
+- 端点拒绝流式或结构化输出（400/404/405/415/422）时按
+  `stream + output_format` → `stream` → 非流式 逐级回退，老代理仍能拿到标题；
+  全部拒绝时 worker 安静退出，不影响 Claude Code，后续 prompt 再重试
+- 排障：`CLAUDE_NOTIFY_DEBUG=<文件路径>`（进程环境或 `settings.json` 的 `env`）
+  会把形状、HTTP 状态和错误消息追加写入该文件（截断 200 字符、去控制字符、
+  0600 权限），不记录 token；未设置时没有任何输出
 - 单次请求超时 25s：`json_schema` 结构化输出在思考型路由上要 10~16s，8s 会把斜杠
   会话的请求全部掐断
 - loopback 模型路由（`localhost` / `127.0.0.0/8` / `::1`）绕过 `HTTP(S)_PROXY`

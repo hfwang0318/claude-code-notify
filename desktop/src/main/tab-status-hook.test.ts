@@ -43,6 +43,34 @@ function findPython(): { command: string; args: string[] } | null {
 }
 
 const python = findPython()
+
+// Load the hook module and evaluate a snippet, printing `value` as JSON.
+// Used for the pure parsing helpers, where a fake response is easier and more
+// deterministic than driving a real HTTP server.
+function runHookProbe(
+  code: string,
+  extraEnv: NodeJS.ProcessEnv = {}
+): unknown {
+  if (!python) throw new Error('python is unavailable')
+  const probe = [
+    'import importlib.util, json',
+    `spec = importlib.util.spec_from_file_location('tab_hook', ${JSON.stringify(script)})`,
+    'mod = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(mod)',
+    code,
+    'print(json.dumps(value))'
+  ].join('\n')
+  const result = spawnSync(python.command, [...python.args, '-c', probe], {
+    encoding: 'utf-8',
+    env: { ...process.env, ...extraEnv },
+    timeout: 20000,
+    windowsHide: true
+  })
+  if (result.status !== 0) {
+    throw new Error(result.stderr || 'python probe failed')
+  }
+  return JSON.parse(result.stdout.trim())
+}
 let stateDir = ''
 let statePath = ''
 let transcriptPath = ''
@@ -301,6 +329,289 @@ async function startTitleServer(
   }
 }
 
+// Some self-hosted routers only register a model on the streaming route, so a
+// non-streaming /v1/messages request misses the route and fails with 404. The
+// title worker must stream like Claude Code's own client and parse SSE deltas.
+//
+// `holdOpen` leaves the connection open after `message_stop`, which is how a
+// proxy that keeps the stream alive behaves: the worker must stop at the
+// terminator instead of waiting for EOF (and the 25s socket timeout).
+async function startStreamingTitleServer(
+  options: { holdOpen?: boolean } = {}
+): Promise<{
+  url: string
+  bodies: () => Record<string, unknown>[]
+  close: () => Promise<void>
+}> {
+  const bodies: Record<string, unknown>[] = []
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString('utf-8')))
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache'
+      })
+      const events = [
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_title',
+            type: 'message',
+            role: 'assistant',
+            content: []
+          }
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' }
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          // Splitting inside the title string makes duplicate accumulation
+          // produce a different title, so the assertion below catches it.
+          delta: { type: 'text_delta', text: '{"title": "流式' }
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '路由标题"}' }
+        },
+        { type: 'content_block_stop', index: 0 },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+        { type: 'message_stop' }
+      ]
+      // The SSE spec allows one event to span several `data:` lines; split
+      // the first delta's JSON across two lines to cover that shape.
+      const splitEvent = JSON.stringify(events[2])
+      const cut = splitEvent.indexOf(',"delta"')
+      const payloads = events.map((event, index) => {
+        if (index !== 2) {
+          return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+        }
+        return (
+          `event: ${event.type}\ndata: ${splitEvent.slice(0, cut)},\n` +
+          `data: ${splitEvent.slice(cut + 1)}\n\n`
+        )
+      })
+      response.write(payloads.join(''))
+      if (options.holdOpen) {
+        // Proxies append keepalive comments after the final event; the reader
+        // must still notice message_stop inside the same chunk.
+        response.write(`: ${'keepalive '.repeat(32)}\n\n`)
+      } else {
+        response.end()
+      }
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('streaming title server did not bind a port')
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    bodies: () => bodies,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections()
+        server.close((error) => (error ? reject(error) : resolve()))
+      })
+  }
+}
+
+// An endpoint that predates streaming support rejects `stream: true`; the
+// title worker must step back to the non-streaming request shape instead of
+// losing the title silently.
+async function startStreamRejectingTitleServer(
+  status = 400
+): Promise<{
+  url: string
+  bodies: () => Record<string, unknown>[]
+  close: () => Promise<void>
+}> {
+  const bodies: Record<string, unknown>[] = []
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
+      bodies.push(body)
+      if (body.stream === true) {
+        response.writeHead(status, { 'content-type': 'application/json' })
+        response.end(
+          JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: 'stream is not supported'
+            }
+          })
+        )
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(
+        JSON.stringify({
+          content: [
+            { type: 'text', text: JSON.stringify({ title: '非流式回退标题' }) }
+          ]
+        })
+      )
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('stream-rejecting title server did not bind a port')
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    bodies: () => bodies,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+  }
+}
+
+// Streaming is rejected and every shape that is accepted returns no title, so
+// the worker retries the last accepted shape. Shapes the endpoint rejected
+// must not be replayed on those retries.
+async function startRejectingEmptyTitleServer(): Promise<{
+  url: string
+  bodies: () => Record<string, unknown>[]
+  close: () => Promise<void>
+}> {
+  const bodies: Record<string, unknown>[] = []
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
+      bodies.push(body)
+      if (body.stream === true) {
+        response.writeHead(400, { 'content-type': 'application/json' })
+        response.end('{"type":"error","error":{"type":"invalid_request_error"}}')
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ content: [] }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('empty-title server did not bind a port')
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    bodies: () => bodies,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+  }
+}
+
+// Some proxies reject streaming by dropping the connection instead of
+// answering 4xx; the worker must step down to the non-streaming shape.
+async function startStreamDroppingTitleServer(): Promise<{
+  url: string
+  bodies: () => Record<string, unknown>[]
+  close: () => Promise<void>
+}> {
+  const bodies: Record<string, unknown>[] = []
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
+      bodies.push(body)
+      if (body.stream === true) {
+        request.socket.destroy()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(
+        JSON.stringify({
+          content: [
+            { type: 'text', text: JSON.stringify({ title: '断开回退标题' }) }
+          ]
+        })
+      )
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('stream-dropping title server did not bind a port')
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    bodies: () => bodies,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections()
+        server.close((error) => (error ? reject(error) : resolve()))
+      })
+  }
+}
+
+// A gateway may answer a streaming request with HTTP 200 and an SSE error
+// event instead of a 4xx. That is a soft rejection: the worker must step down
+// to the next request shape rather than retrying the same unusable stream.
+async function startErroringStreamTitleServer(): Promise<{
+  url: string
+  bodies: () => Record<string, unknown>[]
+  close: () => Promise<void>
+}> {
+  const bodies: Record<string, unknown>[] = []
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
+      bodies.push(body)
+      if (body.stream === true) {
+        response.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache'
+        })
+        response.end(
+          'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n' +
+            'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        )
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(
+        JSON.stringify({
+          content: [
+            { type: 'text', text: JSON.stringify({ title: '回退后的标题' }) }
+          ]
+        })
+      )
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    throw new Error('erroring stream title server did not bind a port')
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    bodies: () => bodies,
+    close: () =>
+      new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve()))
+      )
+  }
+}
+
 // The interrupt watcher is POSIX-only: Claude's tty is resolved and written
 // through /dev/ttys*, and _spawn_interrupt_watcher returns early on Windows.
 const watcherIt = process.platform === 'win32' ? it.skip : it
@@ -330,6 +641,162 @@ describe.skipIf(!python)('claude_tab_status_hook.py', () => {
     },
     40000
   )
+
+  it('concatenates each SSE delta exactly once', () => {
+    // The title is split inside the JSON string: a parser that appends an
+    // event twice would produce a different value, which _parse_title alone
+    // would hide by scanning to the first balanced object.
+    const sse = [
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"{\\"title\\": \\"流式"}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"路由标题\\"}"}}',
+      ''
+    ].join('\n')
+    expect(runHookProbe(`value = mod._stream_text(${JSON.stringify(sse)})`)).toBe(
+      '{"title": "流式路由标题"}'
+    )
+  })
+
+  it('stops at the terminator, not at marker words inside the title', () => {
+    const sse = [
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Fix message_stop"}}',
+      '',
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":" handling"}}',
+      '',
+      'data: [DONE]',
+      ''
+    ].join('\n')
+    // 8-byte reads force the terminator to straddle chunks.
+    const value = runHookProbe(`
+class Fake:
+    headers = {'content-type': 'text/event-stream'}
+    def __init__(self, data):
+        self.data = data
+    def read1(self, size):
+        chunk, self.data = self.data[:8], self.data[8:]
+        return chunk
+value = mod._read_response(Fake(${JSON.stringify(sse)}.encode()))[0]
+`)
+    expect(value).toContain('handling')
+    expect(value).toContain('[DONE]')
+  })
+
+  it('treats a read that failed before any bytes as unusable', () => {
+    const value = runHookProbe(`
+class Broken:
+    headers = {'content-type': 'application/json'}
+    def read1(self, size):
+        raise OSError('reset')
+value = list(mod._read_response(Broken()))
+`)
+    expect(value).toEqual(['', false])
+  })
+
+  it('treats an empty clean body as a transient empty response', () => {
+    const value = runHookProbe(`
+class Empty:
+    headers = {}
+    def read1(self, size):
+        return b''
+value = list(mod._read_response(Empty()))
+`)
+    expect(value).toEqual(['', false])
+  })
+
+  it('stops at a CRLF [DONE] without another read', () => {
+    const sse =
+      'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"标题"}}\r\n\r\n' +
+      'data: [DONE]\r\n'
+    const value = runHookProbe(`
+class Fake:
+    headers = {'content-type': 'text/event-stream'}
+    def __init__(self, data):
+        self.data = data
+        self.calls = 0
+    def read1(self, size):
+        self.calls += 1
+        if self.calls == 1:
+            return self.data
+        return b''
+fake = Fake(${JSON.stringify(sse)}.encode())
+text, usable = mod._read_response(fake)
+value = [mod._stream_text(text), fake.calls]
+`)
+    expect(value).toEqual(['标题', 1])
+  })
+
+  it('steps down when the endpoint hangs before response headers', () => {
+    const body = JSON.stringify({
+      content: [{ type: 'text', text: JSON.stringify({ title: '超时回退' }) }]
+    })
+    const value = runHookProbe(
+      `
+import socket
+
+calls = {'n': 0}
+
+class Resp:
+    headers = {'content-type': 'application/json'}
+    def __init__(self, data):
+        self.data = data
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return False
+    def read1(self, size):
+        chunk, self.data = self.data[:size], self.data[size:]
+        return chunk
+
+def fake_open(request, timeout):
+    calls['n'] += 1
+    if calls['n'] == 1:
+        raise socket.timeout('timed out')
+    return Resp(${JSON.stringify(body)}.encode())
+
+mod._open_url = fake_open
+value = [mod._request_title('修复登录超时并补充回归测试'), calls['n']]
+`,
+      titleWorkerEnv('http://127.0.0.1:1')
+    )
+    expect(value).toEqual(['超时回退', 2])
+  })
+
+  it('does not clear a newer title worker in-flight marker', () => {
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        [SESSION_ID]: {
+          first_prompt: '',
+          title_started_at: 456,
+          ts: Date.now() / 1000
+        }
+      })
+    )
+    const value = runHookProbe(
+      `value = mod._generate_title_worker(${JSON.stringify(SESSION_ID)}, 123.0)`,
+      titleWorkerEnv('http://127.0.0.1:1')
+    )
+    expect(value).toBe(0)
+    const entry = JSON.parse(readFileSync(statePath, 'utf-8'))[SESSION_ID]
+    expect(entry.title_started_at).toBe(456)
+  })
+
+  it('redacts the credential from debug output', () => {
+    const debugPath = join(stateDir, 'title-debug.log')
+    const value = runHookProbe(
+      `
+mod._debug('auth failed: my-secret-token', secret='my-secret-token')
+value = True
+`,
+      { CLAUDE_NOTIFY_DEBUG: debugPath }
+    )
+    expect(value).toBe(true)
+    const text = readFileSync(debugPath, 'utf-8')
+    expect(text).toContain('[redacted]')
+    expect(text).not.toContain('my-secret-token')
+  })
 
   it('falls back to project + short id when no task is known', () => {
     const output = event('SessionStart')
@@ -904,6 +1371,109 @@ print(json.dumps([
       await server.close()
     }
     expect(generatedTitle()).toBe('慢路由标题')
+  }, 30000)
+
+  it('streams the title request so a streaming-only router serves it', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startStreamingTitleServer()
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('流式路由标题')
+    expect(server.bodies()).toHaveLength(1)
+    expect(server.bodies()[0]).toMatchObject({ stream: true })
+  }, 30000)
+
+  it('stops reading a stream that stays open after message_stop', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startStreamingTitleServer({ holdOpen: true })
+    const startedAt = Date.now()
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('流式路由标题')
+    // Waiting for EOF would sit on the 25s socket timeout instead.
+    expect(Date.now() - startedAt).toBeLessThan(10000)
+  }, 30000)
+
+  it('steps down when a stream answers 200 with an error event', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startErroringStreamTitleServer()
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('回退后的标题')
+    const bodies = server.bodies()
+    expect(bodies[0]).toMatchObject({ stream: true })
+    expect(bodies[bodies.length - 1]).not.toHaveProperty('stream')
+  }, 30000)
+
+  it('falls back to a non-streaming request when streaming is rejected', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startStreamRejectingTitleServer()
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('非流式回退标题')
+    const bodies = server.bodies()
+    expect(bodies[0]).toMatchObject({ stream: true })
+    expect(bodies[bodies.length - 1]).not.toHaveProperty('stream')
+  }, 30000)
+
+  it('falls back when a proxy drops the streaming connection', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startStreamDroppingTitleServer()
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('断开回退标题')
+    expect(server.bodies()[server.bodies().length - 1]).not.toHaveProperty('stream')
+  }, 30000)
+
+  it('treats a 429 on the streaming shape as transient and falls back', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startStreamRejectingTitleServer(429)
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    expect(generatedTitle()).toBe('非流式回退标题')
+    expect(server.bodies()[server.bodies().length - 1]).not.toHaveProperty('stream')
+  }, 30000)
+
+  it('does not replay a rejected shape when it retries', async () => {
+    const firstPrompt = '修复登录超时并补充回归测试，避免标题请求失败'
+    writeTitleState(firstPrompt)
+    const server = await startRejectingEmptyTitleServer()
+    try {
+      await runTitleWorker(titleWorkerEnv(server.url))
+    } finally {
+      await server.close()
+    }
+    // The streaming shapes are rejected in the first pass; no later request
+    // may use them again.
+    const bodies = server.bodies()
+    const firstNonStream = bodies.findIndex((body) => body.stream !== true)
+    expect(firstNonStream).toBeGreaterThan(0)
+    expect(bodies.slice(firstNonStream).every((body) => body.stream !== true)).toBe(true)
+    expect(generatedTitle()).toBeUndefined()
   }, 30000)
 
   it('reaches a loopback model router even when HTTP(S)_PROXY is set', async () => {

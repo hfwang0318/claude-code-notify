@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppState,
   ApprovalItem,
@@ -60,14 +60,31 @@ function emptyDrafts(item: ApprovalItem): QuestionDraft[] {
 function CompletionNotice({
   notice,
   platform,
-  onDismiss
+  onDismiss,
+  onHold
 }: {
   notice: CompletionNoticeInfo
   platform: string
-  onDismiss: () => void
+  onDismiss: (id: string) => void
+  onHold: (id: string) => void
 }): React.JSX.Element {
   const cardRef = useRef<HTMLElement>(null)
   const padding = platform === 'win32' ? 8 : 18
+  const [held, setHeld] = useState(false)
+  const heldRef = useRef(false)
+  const hold = useCallback((): void => {
+    if (heldRef.current) return
+    heldRef.current = true
+    setHeld(true)
+    onHold(notice.id)
+  }, [notice.id, onHold])
+  // A replacement notice inherits this component's state (broadcasts are
+  // coalesced, so it may never unmount); start each notice un-held.
+  useEffect(() => {
+    heldRef.current = false
+    setHeld(false)
+  }, [notice.id])
+  const seconds = Math.round((notice.durationMs ?? 0) / 1000)
 
   useEffect(() => {
     const card = cardRef.current
@@ -107,13 +124,16 @@ function CompletionNotice({
 
   useEffect(() => {
     const handler = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null
       if (event.key !== 'Escape' && event.key !== 'Enter') return
+      // A focused button handles Enter itself; Esc still closes the notice.
+      if (event.key === 'Enter' && target?.tagName === 'BUTTON') return
       event.preventDefault()
-      onDismiss()
+      onDismiss(notice.id)
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onDismiss])
+  }, [notice.id, onDismiss])
 
   return (
     <div className="popup-stage" data-platform={platform}>
@@ -123,6 +143,8 @@ function CompletionNotice({
         role="status"
         aria-live="polite"
         tabIndex={-1}
+        onMouseEnter={hold}
+        onTouchStart={hold}
       >
         <div className="popup-drag" aria-hidden="true">
           <span />
@@ -131,14 +153,16 @@ function CompletionNotice({
         </div>
         <button
           className="popup-close"
-          onClick={onDismiss}
-          aria-label="关闭完成提醒"
+          onClick={() => onDismiss(notice.id)}
+          aria-label={notice.kind === 'terminal' ? '关闭提醒' : '关闭完成提醒'}
           title="关闭"
         >
           ×
         </button>
         <header className="popup-head">
-          <span className="popup-kicker">已完成</span>
+          <span className="popup-kicker">
+            {notice.kind === 'terminal' ? '待终端处理' : '已完成'}
+          </span>
           <span className="popup-time">{formatTime(notice.createdAt)}</span>
         </header>
         <h1 className="popup-title">{notice.title}</h1>
@@ -156,11 +180,25 @@ function CompletionNotice({
         ) : null}
         <p className="popup-sub notice-body">{notice.body}</p>
         <div className="popup-actions inline">
-          <button className="popup-btn allow" onClick={onDismiss}>
+          <button
+            className="popup-btn neutral"
+            onClick={hold}
+            aria-disabled={held}
+          >
+            {held ? '已保留' : '保留'}
+          </button>
+          <button
+            className="popup-btn neutral"
+            onClick={() => onDismiss(notice.id)}
+          >
             知道了
           </button>
         </div>
-        <div className="popup-foot">7 秒后自动关闭 · Enter / Esc 关闭</div>
+        <div className="popup-foot">
+          {held
+            ? '已保留 · 点“知道了”关闭'
+            : `${seconds > 0 ? `${seconds} 秒后自动关闭` : '不会自动关闭'} · 可点“保留”保持显示`}
+        </div>
       </section>
     </div>
   )
@@ -378,6 +416,15 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     return () => window.clearInterval(timer)
   }, [])
 
+  // Stable handlers: the notice re-renders every 250ms with the clock, and an
+  // inline arrow would tear down/rebind its keydown listener on each tick.
+  const dismissNotice = useCallback((id: string): void => {
+    void api.dismissNotice(id)
+  }, [])
+  const holdNotice = useCallback((id: string): void => {
+    api.holdNotice(id)
+  }, [])
+
   const pending = useMemo(
     () =>
       state
@@ -539,6 +586,8 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     crossConfirm,
     commandExpanded,
     moreOpen,
+    // A notice replaces the card, so remeasure when it comes and goes.
+    state?.notice?.id,
     popupPadding
   ])
 
@@ -546,7 +595,7 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
     const card = cardRef.current
     if (!card) return
     window.setTimeout(() => card.focus(), 30)
-  }, [item?.id])
+  }, [item?.id, state?.notice?.id])
 
   const remaining =
     item && !isExpired
@@ -926,6 +975,10 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
 
   useEffect(() => {
     if (!item) return
+    // The notice card handles Enter/Esc itself. While it covers an expired
+    // record, the approval shortcuts must not also acknowledge that expired
+    // batch behind it.
+    if (state?.notice && pending.length === 0) return
     const focusQuestion = (index: number): void => {
       setActiveQuestion(index)
       window.setTimeout(() => {
@@ -1173,15 +1226,22 @@ export default function Popup(): React.JSX.Element | null {  const [state, setSt
   ])
 
   if (!state) return null
-  if (!item) {
-    return state.notice ? (
+  // A notice must win over an unacknowledged expired record. The main process
+  // keeps the window hidden until the notice reports its measured height, so
+  // rendering the stale expired panel instead would leave the user with no
+  // reminder at all (and a hidden window). Pending cards still take priority.
+  if (state.notice && pending.length === 0) {
+    return (
       <CompletionNotice
+        key={state.notice.id}
         notice={state.notice}
         platform={state.app.platform}
-        onDismiss={() => void api.dismissNotice()}
+        onDismiss={dismissNotice}
+        onHold={holdNotice}
       />
-    ) : null
+    )
   }
+  if (!item) return null
 
   const queue = pending.filter((entry) => entry.id !== item.id)
   const urgentQueued = queue

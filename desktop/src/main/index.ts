@@ -147,6 +147,11 @@ const QUIT_FORCE_EXIT_MS = 10_000
 const BROADCAST_INTERVAL_MS = 16
 const MAIN_QUEUE_FLUSH_DELAY_MS = 30
 const MAIN_QUEUE_MAX = 200
+/** Bursts within this window collapse into one system notification. */
+const NOTIFICATION_AGGREGATE_MS = 1200
+const COMPLETION_NOTICE_MS = 7000
+/** "Go handle it in the terminal" reminders stay a little longer. */
+const TERMINAL_NOTICE_MS = 15_000
 
 const isCapture = process.argv.includes('--capture')
 const isSelfTest = process.argv.includes('--self-test')
@@ -192,6 +197,8 @@ let lastTraySignature = ''
 let trayRefreshTimer: NodeJS.Timeout | null = null
 let notificationQueue: ApprovalItem[] = []
 let notificationTimer: NodeJS.Timeout | null = null
+let terminalNotifyQueue: ApprovalItem[] = []
+let terminalNotifyTimer: NodeJS.Timeout | null = null
 let noticeTimer: NodeJS.Timeout | null = null
 let popupCollapsed = false
 let deferPopupShow = false
@@ -1288,6 +1295,14 @@ function handleResolved(itemId: string, decision: string): void {
         : 'popup')
   decisionSources.delete(itemId)
   itemCache.delete(itemId)
+  // A request settled before the 1.2s aggregate fired must not produce a
+  // "waiting approval" toast. The terminal-only reminder is separate: it is
+  // intentional for an 'ask' decision (the user is being sent to the
+  // terminal), so only that queue keeps the entry.
+  dropQueuedApprovalNotifications(new Set([itemId]))
+  if (decision !== 'ask') {
+    dropQueuedTerminalNotifications(new Set([itemId]))
+  }
   if (!item) return
   store.removePending(itemId)
   finishItem(item, decision, source)
@@ -1317,6 +1332,9 @@ function respond(
     store.removePending(itemId)
     finishItem(item, decision, source)
   }
+  // Local (non-server) approvals do not pass through handleResolved.
+  dropQueuedApprovalNotifications(new Set([itemId]))
+  if (decision !== 'ask') dropQueuedTerminalNotifications(new Set([itemId]))
   syncPopup()
 }
 
@@ -1497,20 +1515,12 @@ function sessionTaskFor(item: ApprovalItem): string {
   )
 }
 
-function flushApprovalNotifications(): void {
-  notificationTimer = null
-  const items = notificationQueue
-  notificationQueue = []
-  if (items.length === 0 || !Notification.isSupported() || headless) return
-  const uniqueSessions = new Set(items.map((item) => item.sessionKey))
-  const earliest = Math.min(
-    ...items.filter((item) => !item.paused).map((item) => remainingSeconds(item.timeoutAt))
-  )
-  const left = Number.isFinite(earliest) ? ` · 最早 ${earliest}s` : ''
-  const title =
-    items.length === 1
-      ? `${sessionTitleFor(items[0])} 等待审批${left}`
-      : `${uniqueSessions.size} 个会话 · ${items.length} 条待审批${left}`
+/** Shared OS toast for an aggregated approval burst. */
+function showApprovalNotification(
+  items: ApprovalItem[],
+  title: string,
+  open: () => void
+): void {
   const body = items
     .slice(0, 4)
     .map((item) => {
@@ -1528,10 +1538,53 @@ function flushApprovalNotifications(): void {
       ? { actions: [{ type: 'button' as const, text: '打开' }], closeButtonText: '关闭' }
       : {})
   })
-  const open = (): void => focusApproval(items[0].id)
   notification.on('click', open)
   notification.on('action', open)
   notification.show()
+}
+
+/**
+ * Drop queued "waiting approval" toasts for requests that were just settled
+ * elsewhere. Without this, turning on terminal-only mode fires an aggregate
+ * notification for requests that no longer exist, and its "open" action
+ * focuses a deleted id.
+ */
+function dropQueuedApprovalNotifications(ids: Set<string>): void {
+  const approvals = notificationQueue.filter((item) => !ids.has(item.id))
+  if (approvals.length === notificationQueue.length) return
+  notificationQueue = approvals
+  if (notificationQueue.length === 0 && notificationTimer) {
+    clearTimeout(notificationTimer)
+    notificationTimer = null
+  }
+}
+
+/** The "go handle it in the terminal" queue, kept across an `ask` decision. */
+function dropQueuedTerminalNotifications(ids: Set<string>): void {
+  const terminal = terminalNotifyQueue.filter((item) => !ids.has(item.id))
+  if (terminal.length === terminalNotifyQueue.length) return
+  terminalNotifyQueue = terminal
+  if (terminalNotifyQueue.length === 0 && terminalNotifyTimer) {
+    clearTimeout(terminalNotifyTimer)
+    terminalNotifyTimer = null
+  }
+}
+
+function flushApprovalNotifications(): void {
+  notificationTimer = null
+  const items = notificationQueue
+  notificationQueue = []
+  if (items.length === 0 || !Notification.isSupported() || headless) return
+  const uniqueSessions = new Set(items.map((item) => item.sessionKey))
+  const earliest = Math.min(
+    ...items.filter((item) => !item.paused).map((item) => remainingSeconds(item.timeoutAt))
+  )
+  const left = Number.isFinite(earliest) ? ` · 最早 ${earliest}s` : ''
+  const title =
+    items.length === 1
+      ? `${sessionTitleFor(items[0])} 等待审批${left}`
+      : `${uniqueSessions.size} 个会话 · ${items.length} 条待审批${left}`
+  showApprovalNotification(items, title, () => focusApproval(items[0].id))
 }
 
 function notifyApproval(item: ApprovalItem): void {
@@ -1568,7 +1621,72 @@ function notifyApproval(item: ApprovalItem): void {
   if (popupWindow?.isFocused()) return
   notificationQueue.push(item)
   if (notificationTimer) return
-  notificationTimer = setTimeout(flushApprovalNotifications, 1200)
+  notificationTimer = setTimeout(flushApprovalNotifications, NOTIFICATION_AGGREGATE_MS)
+}
+
+/**
+ * 仅提醒模式：审批请求已立即交回终端，这里只告诉用户“去终端处理”，不提供
+ * 任何可操作卡片。系统通知失败不影响终端流程。
+ */
+function notifyTerminalApproval(item: ApprovalItem): void {
+  const state = store.get()
+  const sessionMuted = muted(item.sessionKey)
+  if (sessionMuted) {
+    // Mirrors notifyApproval: a muted session must not beep either, not just
+    // skip the system notification.
+    log('info', `${item.sessionLabel} 已静音提醒；审批仍在终端等待`)
+    return
+  }
+  const quiet = inQuietHours()
+  const highRisk = item.risk.level === 'high'
+  if (!headless && state.prefs.sound && (!quiet || highRisk) && Date.now() - lastBeepAt > 1200) {
+    lastBeepAt = Date.now()
+    shell.beep()
+  }
+  const supported = Notification.isSupported()
+  if (
+    !canDeliverSystemNotification({
+      headless,
+      enabled: state.prefs.systemNotifications,
+      muted: sessionMuted,
+      supported,
+      quietHours: quiet,
+      highRisk
+    })
+  ) {
+    // Name the reason, like notifyApproval: “unavailable” alone leaves users
+    // unable to tell a disabled switch from quiet hours.
+    const reason = !state.prefs.systemNotifications
+      ? '系统通知已关闭'
+      : quiet
+        ? '当前处于免打扰时段'
+        : !supported
+          ? '系统不支持通知'
+          : '通知不可用'
+    log('info', `${item.sessionLabel} 仅提醒模式：${reason}；审批仍在终端等待`)
+    return
+  }
+  // The user is already looking at the reminder card.
+  if (popupWindow?.isFocused()) return
+  terminalNotifyQueue.push(item)
+  if (terminalNotifyTimer) return
+  terminalNotifyTimer = setTimeout(
+    flushTerminalApprovalNotifications,
+    NOTIFICATION_AGGREGATE_MS
+  )
+}
+
+function flushTerminalApprovalNotifications(): void {
+  terminalNotifyTimer = null
+  const items = terminalNotifyQueue
+  terminalNotifyQueue = []
+  if (items.length === 0 || !Notification.isSupported() || headless) return
+  const uniqueSessions = new Set(items.map((item) => item.sessionKey))
+  const title =
+    items.length === 1
+      ? `${sessionTitleFor(items[0])} · 请在终端审批`
+      : `${uniqueSessions.size} 个会话 · ${items.length} 条审批待终端处理`
+  showApprovalNotification(items, title, () => focusSession(items[0].sessionKey))
 }
 
 /** One aggregated system notice when a burst silently pushes work to the terminal. */
@@ -1642,7 +1760,10 @@ function clearCompletionNotice(): void {
   if (store.get().notice) store.setNotice(null)
 }
 
-function showCompletionNotice(notice: CompletionNotice): void {
+function showCompletionNotice(
+  notice: CompletionNotice,
+  durationMs = COMPLETION_NOTICE_MS
+): void {
   // The notice replaces a taller approval card. Hide the old card immediately
   // and keep the window hidden until CompletionNotice reports its measured
   // height; otherwise the old card is shown for a frame at the old height and
@@ -1650,16 +1771,51 @@ function showCompletionNotice(notice: CompletionNotice): void {
   if (popupWindow && !popupWindow.isDestroyed() && popupWindow.isVisible()) {
     popupWindow.hide()
   }
+  // A notice must be visible even if the user collapsed the popup while an
+  // unacknowledged expired batch was showing: the collapse gate would hide
+  // the window and revealDeferredPopup would refuse to reveal it, so a
+  // terminal-only reminder would never be seen.
+  popupCollapsed = false
+  clearCollapseReveal()
   deferPopupShow = true
-  store.setNotice(notice)
+  store.setNotice({ ...notice, durationMs })
   if (noticeTimer) clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => {
     noticeTimer = null
     if (store.get().notice?.id !== notice.id) return
     clearCompletionNotice()
     syncPopup('none')
-  }, 7000)
+  }, durationMs)
   syncPopup('none')
+}
+
+/**
+ * 仅提醒模式的应用内提示：卡片只说明“去终端处理”，没有可操作按钮，也不占用
+ * pending（hook 已经拿到 ask，会话不再等待）。
+ */
+function showTerminalApprovalNotice(item: ApprovalItem, count = 1): void {
+  const sessionInfo = store
+    .get()
+    .sessions.find((session) => session.key === item.sessionKey)
+  const summary = (approvalCommand(item) || item.message).replace(/\s+/g, ' ').slice(0, 140)
+  const extra = count > 1 ? `（另有 ${count - 1} 条已回退终端）` : ''
+  showCompletionNotice(
+    {
+      id: `notice_${randomUUID()}`,
+      kind: 'terminal',
+      title: `${sessionTitleFor(item)} 请在终端处理`,
+      body: `${item.tool}：${summary}${extra}`,
+      sessionKey: item.sessionKey,
+      createdAt: Date.now(),
+      sessionTitle: sessionInfo?.title,
+      sessionLabel: sessionInfo?.label,
+      shortId: sessionInfo?.shortId,
+      color: sessionInfo?.color,
+      task: sessionTaskFor(item),
+      branch: item.branch || sessionInfo?.branch
+    },
+    TERMINAL_NOTICE_MS
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,6 +1828,32 @@ function handleApproval(item: ApprovalItem): void {
   sessions.observe(item)
   refreshSessions()
   const state = store.get()
+
+  // 仅提醒模式：所有审批都由用户在终端亲自决定。规则也在这里暂停——否则
+  // 保存的自动放行规则会先静默批准，终端根本看不到权限提示。请求不进入待
+  // 审批队列（没有卡片、倒计时和阻塞），立即回退终端，只用系统通知提醒。
+  if (state.prefs.approvalInTerminal) {
+    decisionSources.set(item.id, 'terminal')
+    log(
+      'notify',
+      `仅提醒模式：${item.sessionLabel} · ${item.tool} 弹窗仅提醒，审批回退终端`
+    )
+    store.setToast(`${sessionTitleFor(item)} · ${item.tool} 请在终端处理`)
+    showTerminalApprovalNotice(item)
+    notifyTerminalApproval(item)
+    if (!server.respond(item.id, 'ask')) {
+      // The hook may have timed out or disconnected before the request was
+      // handled here. Say so instead of leaving per-item bookkeeping to leak.
+      log(
+        'warn',
+        `仅提醒模式：${item.sessionLabel} · ${item.tool} 的 hook 已断开，ask 未送达`
+      )
+      decisionSources.delete(item.id)
+      itemCache.delete(item.id)
+    }
+    return
+  }
+
   const rule = matchingRule(state.rules, item)
   if (rule && item.risk.level !== 'high') {
     decisionSources.set(item.id, 'rule')
@@ -1816,11 +1998,19 @@ function localApprovalItem(mode: 'approval' | 'question'): ApprovalItem {
 
 async function testApproval(): Promise<void> {
   const item = localApprovalItem('approval')
+  sessions.observe(item)
+  if (store.get().prefs.approvalInTerminal) {
+    refreshSessions()
+    showTerminalApprovalNotice(item)
+    notifyTerminalApproval(item)
+    log('notify', '测试审批 · 仅提醒模式：只提示回终端处理')
+    store.setToast('仅提醒模式：审批需在终端处理')
+    return
+  }
   const result = new Promise<string>((resolve) => {
     localApprovals.set(item.id, resolve)
   })
   itemCache.set(item.id, item)
-  sessions.observe(item)
   store.addPending(item)
   refreshSessions()
   scheduleLocalTimeout(item.id, item.timeoutSec)
@@ -2008,6 +2198,8 @@ function cancelLocalApprovals(): void {
     decisionSources.set(itemId, 'server-stop')
     store.removePending(itemId)
     finishItem(item, 'cancelled', 'server-stop')
+    dropQueuedApprovalNotifications(new Set([itemId]))
+    dropQueuedTerminalNotifications(new Set([itemId]))
   }
 }
 
@@ -2625,7 +2817,43 @@ function applyPrefs(incoming: Partial<Prefs>): void {
   delete patch.port
   delete patch.bindMode
   store.setPrefs(patch)
-  saveUiConfig(patch as Partial<UiConfig>)
+  let saveError: unknown = null
+  try {
+    saveUiConfig(patch as Partial<UiConfig>)
+  } catch (error) {
+    // Keep running with the in-memory pref but leave a durable trace: the
+    // renderer shows the failure, and the log explains the restart rollback.
+    saveError = error
+    log(
+      'error',
+      `偏好保存失败：${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+  // Run the switch's side effects even if persisting the config failed: the
+  // running app has already adopted the pref, and leaving queued approvals
+  // blocked until their hooks time out is worse than a lost write.
+  if (patch.approvalInTerminal === true) {
+    // 开启后不再弹可操作卡片：已经在队列里的请求也立即交回终端，否则它们的
+    // hook 仍会等到超时才释放，和“不阻塞会话”的语义矛盾。
+    const waiting = store.get().pending
+    if (waiting.length > 0) {
+      log('info', `仅提醒模式已开启：${waiting.length} 条待审批立即回退终端`)
+      // 排队中的“等待审批”通知马上就会指向不存在的条目，先作废。
+      const waitingIds = new Set(waiting.map((item) => item.id))
+      dropQueuedApprovalNotifications(waitingIds)
+      dropQueuedTerminalNotifications(waitingIds)
+      respondMany(
+        waiting.map((item) => item.id),
+        'ask',
+        undefined,
+        'terminal'
+      )
+      // 批量回退同样要告诉用户“去终端处理”：只有这一条路径原本什么都不提示，
+      // 用户会以为审批凭空消失了。通知队列会把这些条目聚合成一条。
+      showTerminalApprovalNotice(waiting[0], waiting.length)
+      for (const item of waiting) notifyTerminalApproval(item)
+    }
+  }
   if (patch.theme) {
     const previous = currentTheme
     nativeTheme.themeSource = patch.theme
@@ -2649,6 +2877,7 @@ function applyPrefs(incoming: Partial<Prefs>): void {
     refreshDeployHealth()
   }
   log('info', `偏好已更新 · 位置=${store.get().prefs.position} · 模式=${store.get().prefs.mode}`)
+  if (saveError) throw saveError
 }
 
 // ---------------------------------------------------------------------------
@@ -2690,9 +2919,20 @@ function registerIpc(): void {
   ipcMain.handle('popup:collapse', () => {
     collapsePopup()
   })
-  ipcMain.handle('notice:dismiss', () => {
+  ipcMain.handle('notice:dismiss', (_event, id: string) => {
+    // A late dismiss for a replaced notice must not close the new one.
+    if (id && store.get().notice?.id !== id) return
     clearCompletionNotice()
     syncPopup('none')
+  })
+  // Hovering or touching the card (or pressing “保留”) cancels auto-close;
+  // the notice then stays until the user dismisses it. The id makes a late
+  // hold from a replaced card harmless.
+  ipcMain.on('notice:hold', (_event, id: string) => {
+    if (!noticeTimer) return
+    if (store.get().notice?.id !== id) return
+    clearTimeout(noticeTimer)
+    noticeTimer = null
   })
   ipcMain.handle('approval:select', (_event, id: string) => {
     focusApproval(id)
@@ -3892,6 +4132,7 @@ async function bootstrap(): Promise<void> {
     localIp: preferred,
     admissionControl: ui.admissionControl !== false,
     maxPending: typeof ui.maxPending === 'number' ? ui.maxPending : 8,
+    approvalInTerminal: ui.approvalInTerminal === true,
     quietHoursEnabled: ui.quietHoursEnabled === true,
     quietHoursStart: typeof ui.quietHoursStart === 'string' ? ui.quietHoursStart : '22:00',
     quietHoursEnd: typeof ui.quietHoursEnd === 'string' ? ui.quietHoursEnd : '08:00',

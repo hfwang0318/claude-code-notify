@@ -44,7 +44,7 @@ def load_config() -> dict:
 
 
 CONFIG = load_config()
-HOOK_VERSION = "25"
+HOOK_VERSION = "26"
 TASK_MAX_CHARS = 60
 TASK_TAIL_BYTES = 256 * 1024
 

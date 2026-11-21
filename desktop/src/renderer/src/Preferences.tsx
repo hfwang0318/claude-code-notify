@@ -110,6 +110,10 @@ export default function Preferences({
   const [ruleOrigin, setRuleOrigin] = useState('')
   const [ruleExpiry, setRuleExpiry] = useState<'forever' | '1h' | '24h'>('forever')
   const [ruleMessage, setRuleMessage] = useState('')
+  const [saveMessage, setSaveMessage] = useState('')
+  // Tracks which pref keys failed to persist, so an unrelated successful save
+  // does not clear the error for a field that is still only in memory.
+  const failedKeys = useRef<Set<string>>(new Set())
   const dialogRef = useRef<HTMLElement>(null)
 
   useFocusTrap(open, dialogRef, onClose)
@@ -126,6 +130,15 @@ export default function Preferences({
     setRuleOrigin('')
     if (state.pending[0]) setRuleProject(state.pending[0].project)
   }, [open, state.prefs.port, state.prefs.bindMode, state.prefs.timeoutSec, state.prefs.maxPending])
+
+  // Clear a previous save error only when the dialog opens. Tying it to the
+  // prefs reset effect ran it again on the state broadcast that follows the
+  // failed write itself, hiding the error it had just shown.
+  useEffect(() => {
+    if (!open) return
+    failedKeys.current.clear()
+    setSaveMessage('')
+  }, [open])
 
   const previews = useMemo(() => state.sessions.slice(0, 8), [state.sessions])
   const waitingCount = state.sessions.filter((session) => session.state === 'waiting').length
@@ -144,7 +157,22 @@ export default function Preferences({
   if (!open) return null
 
   const save = (patch: Partial<Prefs>): void => {
-    void api.setPrefs(patch)
+    // A failed write used to be an unhandled rejection: the switch looked on
+    // but the pref was never persisted, so say so. Only a success that covers
+    // the failed fields may clear the message; an unrelated successful save
+    // does not persist them.
+    void api.setPrefs(patch).then(
+      () => {
+        for (const key of Object.keys(patch)) failedKeys.current.delete(key)
+        if (failedKeys.current.size === 0) setSaveMessage('')
+      },
+      (error: unknown) => {
+        for (const key of Object.keys(patch)) failedKeys.current.add(key)
+        setSaveMessage(
+          `设置保存失败：${error instanceof Error ? error.message : String(error)}`
+        )
+      }
+    )
   }
 
   const applyNetwork = async (): Promise<void> => {
@@ -519,6 +547,19 @@ export default function Preferences({
               </div>
 
               <div className="form-section">
+                <div className="form-section-title">审批方式</div>
+                <Toggle
+                  checked={state.prefs.approvalInTerminal}
+                  onChange={(value) => save({ approvalInTerminal: value })}
+                  label="仅提醒，回终端处理"
+                  hint="所有审批都由你在终端决定：立即交回终端，弹一张不可操作的提醒卡并发送系统通知（受系统通知、免打扰和会话静音设置约束），不让会话等待"
+                />
+                <div className="form-note">
+                  适用于已部署弹窗钩子的场景：开关立即生效，无需重新部署；开启期间自动放行规则暂停生效，队列中已有的待审批也会立即回退终端。若本机模式已切换为“系统通知 · 仅提醒”，审批不会到达应用，此开关无额外效果。
+                </div>
+              </div>
+
+              <div className="form-section">
                 <div className="form-section-title">超时回退</div>
                 <div className="form-grid two">
                   <label className="field">
@@ -884,11 +925,15 @@ export default function Preferences({
         </div>
 
         <footer className="modal-actions">
-          <span className="settings-footnote">
-            {waitingCount > 0
-              ? `${waitingCount} 个会话等待中 · 审批不会因打开设置而暂停`
-              : `Claude Notify ${state.app.version} · 设置会立即保存`}
-          </span>
+          {saveMessage ? (
+            <span className="form-error">{saveMessage}</span>
+          ) : (
+            <span className="settings-footnote">
+              {waitingCount > 0
+                ? `${waitingCount} 个会话等待中 · 审批不会因打开设置而暂停`
+                : `Claude Notify ${state.app.version} · 设置会立即保存`}
+            </span>
+          )}
           <button className="btn" onClick={onClose}>
             完成
           </button>

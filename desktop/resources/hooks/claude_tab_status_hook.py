@@ -38,10 +38,12 @@ transcript；一旦出现 `[Request interrupted ...]` 标记，就直接向 Clau
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -84,12 +86,33 @@ STATE_MAX_ENTRIES = 50
 # this timeout only bounds the worker's lifetime: leave room for the model to
 # finish instead of cutting the request off mid-thinking.
 TITLE_REQUEST_TIMEOUT_SEC = 25
+# The shape ladder plus its retries share one wall-clock budget. A gateway
+# that keeps a stuck stream alive with heartbeats could otherwise make each
+# attempt outlast TITLE_WORKER_TTL_SEC, letting a second worker overlap (and
+# multiply the requests to an already struggling endpoint).
+TITLE_TOTAL_BUDGET_SEC = 100
+# A streaming server can keep the connection open after its final event, so
+# the reader stops at the SSE terminator instead of waiting for EOF. The byte
+# cap bounds a misbehaving endpoint.
+TITLE_MAX_RESPONSE_BYTES = 1024 * 1024
+TITLE_READ_CHUNK_BYTES = 64 * 1024
+TITLE_MAX_DEBUG_BODY_BYTES = 2048
+# Match structural markers, not bare words: a title may itself contain
+# "message_stop" or "[DONE]", and a literal newline cannot occur inside a JSON
+# string, so these cannot match delta text.
+_TITLE_STREAM_END = (
+    b'"type":"message_stop"',
+    b'"type": "message_stop"',
+    b"data: [DONE]\n",
+    b"data: [DONE]\r",
+)
 # A failed title attempt is retried on later real prompts. A short cooldown
 # avoids stacking another request onto a prompt submitted while the previous
 # worker is still thinking.
 TITLE_RETRY_COOLDOWN_SEC = 30
-# A detached worker can spend up to 3 x 25s on retries (plus a
-# schema retry), so the cooldown alone cannot prevent overlap.
+# A detached worker stops after TITLE_TOTAL_BUDGET_SEC plus a small socket
+# overrun (the timeout is derived from the remaining budget); the TTL must
+# stay above that so a new prompt does not start an overlapping worker.
 TITLE_WORKER_TTL_SEC = 180
 # Claude Code fires no hook on Ctrl+C/Esc, so UserPromptSubmit starts a
 # detached watcher that tails the transcript for the interrupt marker.
@@ -127,6 +150,11 @@ LANGUAGE_FALLBACK = (
 )
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+)", re.IGNORECASE)
+_URL_USERINFO = re.compile(r"(://)[^/@\s]+@")
+_SETTINGS_ERROR = ""
+_STATE_READ_DEBUGGED = False
+_STATE_WRITE_DEBUGGED = False
 _SEPARATORS = re.compile(r"[/\\]")
 _BLOCKING_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 _BLOCKING_NOTIFICATIONS = {"permission_prompt", "elicitation_dialog"}
@@ -241,9 +269,13 @@ def _read_state_with_status() -> tuple[dict, bool]:
         except OSError:
             pass
         return {}, True
-    except Exception:
+    except Exception as error:
         # A transient read error (EIO, EACCES, NFS hiccup) must not be treated
         # as an empty state: writing it back would drop every other session.
+        global _STATE_READ_DEBUGGED
+        if not _STATE_READ_DEBUGGED:
+            _STATE_READ_DEBUGGED = True
+            _debug(f"state read failed ({type(error).__name__})")
         return {}, False
 
 
@@ -271,12 +303,16 @@ def _write_state(state: dict) -> bool:
         except OSError:
             pass
         return True
-    except Exception:
+    except Exception as error:
         try:
             if temp:
                 os.unlink(temp)
         except Exception:
             pass
+        global _STATE_WRITE_DEBUGGED
+        if not _STATE_WRITE_DEBUGGED:
+            _STATE_WRITE_DEBUGGED = True
+            _debug(f"state write failed ({type(error).__name__})")
         return False
 
 
@@ -406,6 +442,7 @@ def _update_state(
     title_started_at: object = _UNSET,
     transcript_cutoff: object = _UNSET,
     expected_turn_at: object = _UNSET,
+    expected_title_at: object = _UNSET,
     delete: bool = False,
 ) -> bool:
     if not session_id:
@@ -435,6 +472,21 @@ def _update_state(
                 # Without a token we cannot tell which turn the caller means;
                 # never let an untokened writer override the current status.
                 # A newer prompt also owns the status now.
+                return False
+
+        if expected_title_at is not _UNSET:
+            # Same ownership guard as expected_turn_at, but for the in-flight
+            # title worker: a slow worker must not clear a newer worker's
+            # marker (that would let a third worker overlap).
+            try:
+                expected = float(expected_title_at)
+            except (TypeError, ValueError):
+                expected = 0.0
+            try:
+                current = float(entry.get("title_started_at"))
+            except (TypeError, ValueError):
+                current = 0.0
+            if expected <= 0 or abs(current - expected) > 1e-6:
                 return False
 
         if task is not _UNSET:
@@ -633,12 +685,20 @@ def _short_id(payload: dict) -> str:
 
 
 def _settings() -> dict:
+    global _SETTINGS_ERROR
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
     try:
         with open(path, "r", encoding="utf-8") as file:
             data = json.load(file)
+        _SETTINGS_ERROR = ""
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except FileNotFoundError:
+        _SETTINGS_ERROR = ""
+        return {}
+    except Exception as error:
+        # A broken/unreadable settings file must not masquerade as "no token
+        # configured"; _debug appends this to its line.
+        _SETTINGS_ERROR = f"{type(error).__name__}: {error}"[:100]
         return {}
 
 
@@ -650,6 +710,48 @@ def _effective_env() -> dict:
         for key, value in raw_env.items():
             env.setdefault(str(key), str(value))
     return env
+
+
+def _debug(message: str, secret: str | None = None) -> None:
+    """Append a failure note when CLAUDE_NOTIFY_DEBUG names a file.
+
+    The worker runs with stderr on DEVNULL so it can never disturb Claude
+    Code; this is the opt-in trail for "why is there no title". The message
+    may contain server-controlled text (an error body), so strip control
+    characters and cap it, create the file owner-only, and never pass the
+    token or request headers here.
+    """
+    env = _effective_env()
+    path = env.get("CLAUDE_NOTIFY_DEBUG")
+    if not path:
+        return
+    try:
+        clean = _CONTROL.sub(" ", str(message))
+        # Server-controlled text may echo the credential (auth errors often
+        # do); redact the caller's credential, the configured values and
+        # common token shapes. apiKeyHelper tokens are only known to the
+        # caller, hence the explicit secret.
+        if isinstance(secret, str) and secret.strip():
+            clean = clean.replace(secret.strip(), "[redacted]")
+        for key in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            secret = env.get(key)
+            if isinstance(secret, str) and secret.strip():
+                clean = clean.replace(secret.strip(), "[redacted]")
+        clean = _SECRET_PATTERN.sub("[redacted]", clean)
+        # A base URL like https://user:pass@gateway echoes the password in
+        # URL parsing errors too.
+        clean = _URL_USERINFO.sub(r"\1[redacted]@", clean)
+        if _SETTINGS_ERROR:
+            # Prepended, not appended: a long message must not truncate away
+            # the reason the settings could not be read.
+            clean = f"[settings: {_SETTINGS_ERROR}] {clean}"
+        clean = clean[:200]
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as file:
+            file.write(f"{stamp} {clean}\n")
+    except Exception:
+        pass
 
 
 def _api_token() -> str:
@@ -669,8 +771,9 @@ def _api_token() -> str:
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip().splitlines()[0].strip()
-        except Exception:
-            pass
+            _debug(f"title: apiKeyHelper exited {result.returncode} without a key")
+        except Exception as error:
+            _debug(f"title: apiKeyHelper failed ({type(error).__name__})")
     return ""
 
 
@@ -806,16 +909,214 @@ def _parse_title(text: str) -> str:
     return ""
 
 
+def _sse_events(raw: str):
+    """Yield the data payload of each server-sent event.
+
+    One event may span several ``data:`` lines (joined with newlines per the
+    SSE spec), so split on blank lines rather than per line. Only CR/LF are
+    line breaks here; ``str.splitlines()`` would also split a JSON string on
+    U+2028/U+2029 and corrupt it.
+    """
+    data: list[str] = []
+    for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not line:
+            if data:
+                yield "\n".join(data)
+                data = []
+            continue
+        if not line.startswith("data:"):
+            continue
+        value = line[5:]
+        if value.startswith(" "):
+            value = value[1:]
+        data.append(value)
+    if data:
+        yield "\n".join(data)
+
+
+def _stream_text(raw: str) -> str:
+    """Concatenate text deltas from a Messages API SSE stream.
+
+    Routers may register a model only on the streaming route: a non-streaming
+    request then misses the route and fails, while Claude Code's own client
+    (which always streams) works. The title request therefore streams too.
+    """
+    text = ""
+    for body in _sse_events(raw):
+        if not body or body == "[DONE]":
+            continue
+        try:
+            event = json.loads(body)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        delta = event.get("delta")
+        if isinstance(delta, dict):
+            if delta.get("type") == "text_delta":
+                piece = delta.get("text")
+            elif delta.get("type") == "input_json_delta":
+                piece = delta.get("partial_json")
+            else:
+                piece = None
+            if isinstance(piece, str):
+                text += piece
+            continue
+        # Some routers wrap a complete message (instead of deltas) in a single
+        # ``data:`` event, either at the top level or under ``message`` (the
+        # native ``message_start`` shape). A ``content_block_start`` may also
+        # carry the whole text.
+        block = event.get("content_block")
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(
+            block.get("text"), str
+        ):
+            text += block["text"]
+            continue
+        blocks = event.get("content")
+        if not isinstance(blocks, list):
+            message = event.get("message")
+            blocks = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            ):
+                text += block["text"]
+    return text
+
+
+def _response_text(raw: str) -> str:
+    """Read a title reply as either an SSE stream or a single JSON body.
+
+    Direct Anthropic endpoints may answer with one complete message; the SSE
+    parser returns nothing for that shape, so fall back to ``content``.
+    """
+    if not raw:
+        return ""
+    streamed = _stream_text(raw)
+    if streamed:
+        return streamed
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return ""
+    blocks = data.get("content") if isinstance(data, dict) else None
+    if not isinstance(blocks, list):
+        return ""
+    return "".join(
+        block.get("text", "")
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def _response_error(raw: str) -> str:
+    """Extract the error message from an error event or error body."""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        event = data
+    else:
+        event = None
+        for body in _sse_events(raw):
+            try:
+                candidate = json.loads(body)
+            except ValueError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("type") == "error":
+                event = candidate
+                break
+    if not isinstance(event, dict) or event.get("type") != "error":
+        return ""
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return ""
+    message = error.get("message") or error.get("type")
+    return str(message) if message else ""
+
+
+def _read_response(
+    response,
+    deadline: float | None = None,
+    max_bytes: int = TITLE_MAX_RESPONSE_BYTES,
+) -> tuple[str, bool]:
+    """Read a body without waiting on a stream that never closes.
+
+    ``read()`` waits for EOF, but a streaming server may keep the connection
+    open after ``message_stop``; the socket timeout would then discard an
+    already complete title. Stop at the SSE terminator, the byte cap, or the
+    overall deadline, and keep whatever arrived if the read fails. The
+    markers are structural (``"type":"message_stop"``, a ``data: [DONE]``
+    line), so they cannot match a title's own text; scanning is therefore not
+    gated on the content type, which proxies often mislabel.
+
+    The flag is False only when no byte arrived: that endpoint never answered,
+    and the caller must not treat it as an empty 200 (which would replay the
+    whole ladder against a stuck server).
+    """
+    limit = time.monotonic() + TITLE_REQUEST_TIMEOUT_SEC
+    if deadline is not None:
+        # The worker's overall budget caps a single read as well, so a slow
+        # drip cannot outlive TITLE_WORKER_TTL_SEC.
+        limit = min(limit, deadline)
+    chunks: list[bytes] = []
+    total = 0
+    probe = b""
+    cap = max(1, min(max_bytes, TITLE_MAX_RESPONSE_BYTES))
+    while total < cap:
+        try:
+            chunk = response.read1(TITLE_READ_CHUNK_BYTES)
+        except Exception as error:
+            # Timeout or a reset after the final event: keep what arrived,
+            # but leave a trace: this is a common silent failure.
+            _debug(f"title response read failed ({type(error).__name__}: {error})")
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        # Markers can straddle two reads; scanning the current chunk (not just
+        # a tail window) catches a terminator followed by keepalive padding.
+        window = probe + chunk
+        if any(marker in window for marker in _TITLE_STREAM_END):
+            break
+        probe = window[-64:]
+        if time.monotonic() >= limit:
+            break
+    raw = b"".join(chunks)[:cap]
+    # No bytes at all means the endpoint said nothing (clean 200 with an empty
+    # body, or a read failure); treat it as a transient shape failure so the
+    # ladder does not replay every shape six times for an empty answer.
+    return raw.decode("utf-8", "ignore"), bool(chunks)
+
+
 def _request_title(content: str) -> str:
     token = _api_token()
+    if not token:
+        _debug("title: no API token (ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY/apiKeyHelper)")
+        return ""
     model = _title_model()
-    if not token or not model:
+    if not model:
+        _debug(
+            "title: no model (CLAUDE_NOTIFY_TITLE_MODEL/ANTHROPIC_SMALL_FAST_MODEL/"
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL/ANTHROPIC_MODEL)"
+        )
         return ""
     base = _base_url()
     url = f"{base}/messages" if base.endswith("/v1") else f"{base}/v1/messages"
     payload = {
         "model": model,
         "max_tokens": 512,
+        # Stream like Claude Code's own client so routers that only expose the
+        # streaming route can serve the title request as well.
+        "stream": True,
         "system": TITLE_SYSTEM_PROMPT,
         "messages": [
             {"role": "user", "content": _title_user_prompt(_cap_title_input(content))}
@@ -837,60 +1138,204 @@ def _request_title(content: str) -> str:
         "anthropic-version": "2023-06-01",
     }
 
-    def call(body: dict) -> str:
+    def call(body: dict, deadline: float) -> tuple[str, bool]:
+        # urllib applies the socket timeout to connect, header read and body
+        # read separately; halving the remaining budget keeps those phases
+        # inside the overall deadline instead of tripling it.
+        remaining = max(0.5, deadline - time.monotonic())
+        timeout = min(float(TITLE_REQUEST_TIMEOUT_SEC), remaining / 2)
         request = urllib.request.Request(
             url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
             headers=headers,
         )
-        with _open_url(request, timeout=TITLE_REQUEST_TIMEOUT_SEC) as response:
-            return response.read().decode("utf-8", "ignore")
+        with _open_url(request, timeout=timeout) as response:
+            return _read_response(response, deadline)
 
-    def extract(raw: str) -> str:
+    # Streaming and structured output are optional extensions. If a router
+    # rejects either (an older proxy, or one that only serves the non-streaming
+    # route), step down instead of losing the title silently. Shape 2 restores
+    # the pre-streaming request (non-streaming + structured output); shape 3
+    # drops the schema for proxies that reject ``output_format`` outright.
+    non_stream = {key: value for key, value in payload.items() if key != "stream"}
+    shapes = [
+        payload,
+        {key: value for key, value in payload.items() if key != "output_format"},
+        non_stream,
+        {key: value for key, value in non_stream.items() if key != "output_format"},
+    ]
+    # A shape-level rejection (unknown field/route) advances the ladder.
+    # Transient failures (rate limit/5xx) also step down once: a gateway often
+    # fails only on the streaming route while the plain one still works.
+    rejectable = (400, 404, 405, 415, 422)
+    transient = (408, 425, 429)
+
+    def shape_label(shape: dict) -> str:
+        streaming = "stream" if shape.get("stream") else "non-stream"
+        schema = "+schema" if "output_format" in shape else ""
+        return streaming + schema
+
+    def attempt(shape: dict, label: str, deadline: float) -> tuple[str, str]:
+        """Return (status, title) with status rejected / transient / failed / ok.
+
+        A 200 response that yields no title is "ok": the shape works but the
+        model produced nothing usable, which the caller may retry or step down
+        from.
+        """
         try:
-            data = json.loads(raw)
-        except Exception:
-            return ""
-        blocks = data.get("content") if isinstance(data, dict) else None
-        if not isinstance(blocks, list):
-            return ""
-        text = "".join(
-            block.get("text", "")
-            for block in blocks
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        )
-        return _parse_title(text)
+            raw, usable = call(shape, deadline)
+        except urllib.error.HTTPError as error:
+            # The body carries the real reason (unknown model vs unsupported
+            # field); keep a bounded copy for the debug log before closing.
+            # Only read it when the debug trail is on, and bound it by the
+            # deadline: HTTPResponse.read() waits for the full byte count, so
+            # a slow-drip error body could outlive the worker.
+            body = ""
+            if _effective_env().get("CLAUDE_NOTIFY_DEBUG"):
+                try:
+                    stream = getattr(error, "fp", None)
+                    if stream is not None and hasattr(stream, "read1"):
+                        body = _read_response(
+                            stream, deadline, TITLE_MAX_DEBUG_BODY_BYTES
+                        )[0]
+                    else:
+                        body = error.read(TITLE_MAX_DEBUG_BODY_BYTES).decode(
+                            "utf-8", "ignore"
+                        )
+                except Exception:
+                    pass
+            error.close()
+            reason = _response_error(body)
+            detail = f" ({reason})" if reason else ""
+            if error.code in rejectable:
+                _debug(f"title {label}: rejected with HTTP {error.code}{detail}", secret=token)
+                return "rejected", ""
+            if error.code in transient or error.code >= 500:
+                _debug(f"title {label}: transient HTTP {error.code}{detail}", secret=token)
+                return "transient", ""
+            _debug(f"title {label}: failed with HTTP {error.code}{detail}", secret=token)
+            return "failed", ""
+        except (
+            http.client.RemoteDisconnected,
+            http.client.BadStatusLine,
+            http.client.IncompleteRead,
+            ConnectionResetError,
+            socket.timeout,
+            TimeoutError,
+        ) as error:
+            # A proxy that rejects streaming by dropping the connection or by
+            # hanging before the response headers: step down like a rejected
+            # shape. urllib only wraps connect/send errors in URLError;
+            # getresponse() raises a bare socket timeout.
+            _debug(
+                f"title {label}: connection dropped ({type(error).__name__})",
+                secret=token,
+            )
+            return "transient", ""
+        except urllib.error.URLError as error:
+            # A streaming request may time out or be dropped before headers
+            # while the plain route still answers; step down for those, but
+            # keep DNS/host errors fatal so a misconfigured URL does not
+            # replay the whole ladder.
+            reason = error.reason
+            if isinstance(reason, (socket.timeout, TimeoutError, ConnectionError)):
+                _debug(f"title {label}: connection failed transiently ({reason})", secret=token)
+                return "transient", ""
+            _debug(f"title {label}: unreachable ({reason})", secret=token)
+            return "failed", ""
+        except Exception as error:
+            _debug(f"title {label}: request failed ({type(error).__name__}: {error})", secret=token)
+            return "failed", ""
+        if not usable:
+            _debug(f"title {label}: no bytes received", secret=token)
+            return "transient", ""
+        title = _parse_title(_response_text(raw))
+        if not title:
+            # Keep a short body sample: a non-JSON error page (HTML login,
+            # plain-text gateway message) is otherwise indistinguishable from
+            # a thinking-only model reply.
+            reason = _response_error(raw) or raw.strip()[:120]
+            _debug(
+                f"title {label}: no usable title{f' ({reason})' if reason else ''}",
+                secret=token,
+            )
+        return "ok", title
 
     # DeepSeek-style routers occasionally return a thinking-only response even
-    # when the official query succeeds. Retry a couple of times; the child is
-    # detached and the parent hook never waits for it.
+    # when the official query succeeds: retry a couple of times. A 200 with no
+    # usable title also steps down, so a stream that answers 200 with an error
+    # payload still reaches the non-streaming route. Rejected shapes are
+    # dropped so the retries do not replay requests the endpoint already
+    # refused; the child is detached and the parent hook never waits for it.
+    budget_deadline = time.monotonic() + TITLE_TOTAL_BUDGET_SEC
     for _ in range(3):
-        try:
-            raw = call(payload)
-        except urllib.error.HTTPError as error:
-            if error.code not in (400, 404, 405, 415, 422):
+        index = 0
+        saw_transient = False
+        retry_ok: dict | None = None
+        retry_transient: dict | None = None
+        while index < len(shapes):
+            if time.monotonic() >= budget_deadline:
+                _debug("title: time budget exhausted")
                 return ""
-            payload.pop("output_format", None)
-            try:
-                raw = call(payload)
-            except Exception:
+            shape = shapes[index]
+            status, title = attempt(shape, shape_label(shape), budget_deadline)
+            if status == "failed":
                 return ""
-        except Exception:
+            if status == "rejected":
+                # The endpoint does not support this shape at all.
+                del shapes[index]
+                continue
+            if title:
+                return title
+            # A 200 without a title or a transient failure does not prove the
+            # shape wrong: keep a retry candidate, preferring a shape that at
+            # least answered 200 (thinking-only responses often succeed on
+            # retry) over one that only failed transiently.
+            if status == "ok":
+                if retry_ok is None:
+                    retry_ok = shape
+            elif retry_transient is None:
+                retry_transient = shape
+            if status == "transient" and shape.get("stream"):
+                # Rate limiting/5xx is shape-independent: skip the other
+                # streaming variants for this pass, but keep this shape so a
+                # streaming-only router that was merely busy is retried.
+                saw_transient = True
+                index += 1
+                while index < len(shapes) and shapes[index].get("stream"):
+                    index += 1
+                continue
+            if status == "transient":
+                saw_transient = True
+            index += 1
+        if not shapes:
+            _debug(
+                "title: all request shapes failed transiently"
+                if saw_transient
+                else "title: every request shape was refused"
+            )
             return ""
-        title = extract(raw)
-        if title:
-            return title
+        candidate = retry_ok or retry_transient
+        if candidate is None:
+            _debug("title: every request shape was refused")
+            return ""
+        # Later retries only need the best shape that was not refused.
+        shapes = [candidate]
         time.sleep(0.25)
+    _debug("title: no usable title after retries")
     return ""
 
 
-def _spawn_title_worker(session_id: str) -> None:
+def _spawn_title_worker(session_id: str, started_at: float) -> bool:
+    """Start the detached title worker; False means no worker will run.
+
+    The caller has already written the in-flight marker, so it must roll it
+    back when this returns False (otherwise title retries wait out the TTL).
+    """
     if not session_id:
-        return
+        return False
     if os.environ.get("CLAUDE_NOTIFY_TITLE_DISABLE") == "1":
-        return
+        return False
     try:
         kwargs: dict = {
             "stdin": subprocess.DEVNULL,
@@ -906,20 +1351,38 @@ def _spawn_title_worker(session_id: str) -> None:
         else:
             kwargs["start_new_session"] = True
         subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), "--generate-title", session_id],
+            [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--generate-title",
+                session_id,
+                repr(started_at),
+            ],
             **kwargs,
         )
-    except Exception:
-        pass
+        return True
+    except Exception as error:
+        _debug(f"title worker spawn failed ({type(error).__name__})")
+        return False
 
 
-def _generate_title_worker(session_id: str) -> int:
+def _generate_title_worker(session_id: str, started_at: float | None = None) -> int:
     try:
         return _generate_title_worker_inner(session_id)
     finally:
         # Clear the in-flight marker even when the worker fails or is killed
         # between attempts, so a later prompt can retry after the cooldown.
-        _update_state(session_id, title_started_at=None)
+        # Only clear our own marker: a slower worker that outlived the TTL may
+        # have been replaced by a newer one, and clearing that would let a
+        # third worker overlap. The compare and the write share the state lock.
+        if started_at is None:
+            _update_state(session_id, title_started_at=None)
+        else:
+            _update_state(
+                session_id,
+                title_started_at=None,
+                expected_title_at=started_at,
+            )
 
 
 def _generate_title_worker_inner(session_id: str) -> int:
@@ -1479,13 +1942,24 @@ def _task(payload: dict, event: str, titles: tuple[str, str]) -> str:
             and not recently_attempted
             and not in_flight
         ):
-            _update_state(
+            if _update_state(
                 session_id,
                 attempted=True,
                 attempted_at=now,
                 title_started_at=now,
-            )
-            _spawn_title_worker(session_id)
+            ):
+                if not _spawn_title_worker(session_id, now):
+                    # No worker will clear the in-flight marker itself, so
+                    # release it now instead of blocking retries for the TTL.
+                    _update_state(
+                        session_id,
+                        title_started_at=None,
+                        expected_title_at=now,
+                    )
+            else:
+                # Without a persisted cooldown/marker every prompt would spawn
+                # another worker; skip this attempt instead.
+                _debug("title: could not persist the in-flight marker")
 
         # Claude Code sends no hook on Ctrl+C/Esc; keep a watcher alive that
         # turns the tab green when the transcript records the interrupt. This
@@ -1799,7 +2273,12 @@ def main() -> int:
 
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--generate-title":
-        raise SystemExit(_generate_title_worker(sys.argv[2]))
+        try:
+            token = float(sys.argv[3]) if len(sys.argv) >= 4 else None
+        except ValueError:
+            _debug("title: invalid worker token on argv")
+            token = None
+        raise SystemExit(_generate_title_worker(sys.argv[2], token))
     if len(sys.argv) >= 7 and sys.argv[1] == "--watch-interrupt":
         raise SystemExit(
             _watch_interrupt(

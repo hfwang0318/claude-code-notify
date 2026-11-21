@@ -48,6 +48,7 @@ export class Store {
       localIp: options.localIp,
       admissionControl: true,
       maxPending: 8,
+      approvalInTerminal: false,
       quietHoursEnabled: false,
       quietHoursStart: '22:00',
       quietHoursEnd: '08:00',

@@ -92,7 +92,10 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
   `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`，避免被 Claude Code 内置标题覆盖。
   实测该变量会停止官方 AI 标题生成，因此 env=on 时按官方 `generateSessionTitle`
   的 system prompt、**第一条用户消息**输入、JSON schema 和 once-per-session 条件，
-  异步调用当前 Claude 模型端点生成会话标题；模型可用
+  异步调用当前 Claude 模型端点生成会话标题；请求与主会话一样使用
+  `stream: true` 并解析 SSE，也兼容整段 JSON 响应，只暴露流式路由的自建路由器
+  同样可用；端点拒绝流式时自动回退到非流式请求；`CLAUDE_NOTIFY_DEBUG=<文件>`
+  可记录请求失败原因（不记 token）；模型可用
   `CLAUDE_NOTIFY_TITLE_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_MODEL`
   覆盖。红色时追加阻塞详情（`Bash: ...` / `编辑 file.ts` / `回答：...` / `确认计划`），
   首次进入没有标题/任务时显示 `项目名 #短码`。关闭或移除时恢复 env 原值。
@@ -120,6 +123,7 @@ pnpm e2e:claude # 真实 Claude Code 双会话/resolved/超时（见 E2E.md）
 ### 桌面能力
 
 - 本机/远端部署都支持弹窗与通知两种模式；切换模式会提示重新接入/部署，不再假装“立即生效”
+- 设置 → 提醒 → 审批方式可开启“仅提醒，回终端处理”：所有审批都由终端亲自决定，应用只弹一张不可操作的“请在终端处理”提醒卡并发送系统通知，不让会话等待，自动放行规则在此期间暂停（立即生效，无需重新部署）
 - 单实例锁、托盘菜单、开机自启、系统通知、隐藏到托盘；托盘/Dock 按决策组显示待审批数，tooltip 给出组/条/会话/最早截止
 - 系统通知聚合最近 1.2 秒内到达的会话，显示最早截止时间，点击可直达具体请求；macOS 通知带“打开”动作；审批提醒与回合完成通知都支持按会话静音，并遵循“系统通知”总开关
 - 深色 / 浅色 / 跟随系统主题；浅色模式使用不透明窗口保证对比度

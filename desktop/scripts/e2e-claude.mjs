@@ -65,6 +65,7 @@ const sessionsFile = join(dataDir, 'sessions.json')
 const children = new Set()
 let app = null
 let cdp = null
+let mainCdp = null
 let port = 0
 let debugPortRef = 0
 let token = ''
@@ -396,6 +397,17 @@ async function ensurePopupCdp() {
   log('CDP 已连接 popup')
 }
 
+/** The terminal-only case never opens the popup, so prefs go through the main window. */
+async function ensureMainCdp() {
+  if (mainCdp) return
+  const target = await waitFor('main window CDP target', async () => {
+    const targets = await (await fetch(`http://127.0.0.1:${debugPortRef}/json`)).json()
+    return targets.find((entry) => entry.url.endsWith('#main')) || null
+  }, 20000, 200)
+  mainCdp = await connectCdp(target.webSocketDebuggerUrl)
+  log('CDP 已连接 main')
+}
+
 async function connectCdp(url) {
   const socket = new WebSocket(url)
   await new Promise((resolve, reject) => {
@@ -604,7 +616,7 @@ async function drainPending() {
 }
 
 async function runBypassCase() {
-  log('用例 1/5：bypass 权限下 Bash + 文件工具不触发审批')
+  log('用例 1/6：bypass 权限下 Bash + 文件工具不触发审批')
   const permissionMode = await runBypassProbe(
     'bypassPermissions',
     'work-bypass',
@@ -627,7 +639,7 @@ async function runBypassCase() {
 }
 
 async function runStopCase() {
-  log('用例 2/5：真实 Claude 回合结束触发 Stop 通知')
+  log('用例 2/6：真实 Claude 回合结束触发 Stop 通知')
   const logFile = join(dataDir, 'claude-notify.log')
   const before = existsSync(logFile) ? readFileSync(logFile, 'utf-8') : ''
   const session = startClaude(
@@ -655,7 +667,7 @@ async function runStopCase() {
 }
 
 async function runMultiSessionCase() {
-  log('用例 3/5：两路真实 Claude 会话并发 + 会话条切换')
+  log('用例 3/6：两路真实 Claude 会话并发 + 会话条切换')
   await drainPending()
   const first = startClaude(
     'work-a',
@@ -810,7 +822,7 @@ async function runMultiSessionCase() {
 }
 
 async function runResolvedCase() {
-  log('用例 4/5：终端侧已处理（/claude-approval-resolved）')
+  log('用例 4/6：终端侧已处理（/claude-approval-resolved）')
   await drainPending()
   const session = startClaude(
     'work-resolved',
@@ -855,7 +867,7 @@ async function runResolvedCase() {
 }
 
 async function runTimeoutCase() {
-  log('用例 5/5：真实 Claude 请求超时回退 + expired 确认')
+  log('用例 5/6：真实 Claude 请求超时回退 + expired 确认')
   await drainPending()
   const session = startClaude(
     'work-timeout',
@@ -878,6 +890,15 @@ async function runTimeoutCase() {
   // The countdown must survive a pause longer than the server timeout. The
   // hook process gets the same pause budget, otherwise it would abandon the
   // HTTP request while the user is still typing.
+  // The pending file is written before the card mounts; wait for the button so
+  // the click cannot race the renderer and silently no-op.
+  await waitFor(
+    '暂停按钮出现',
+    async () =>
+      (await cdp.eval("Boolean(document.querySelector('.popup-pause'))")) ? true : null,
+    5000,
+    100
+  )
   await cdp.eval("document.querySelector('.popup-pause')?.click()")
   await delay(6000)
   const pausedState = await getState()
@@ -917,6 +938,103 @@ async function runTimeoutCase() {
   log('  ✓ timeout、expired、确认清空、history=timeout/timeout 通过')
 }
 
+const TERMINAL_PROMPT = `${BASH_TOOL_HINT}Use the Bash tool to run: pwd && date +%s > result.txt . If the Bash tool does not succeed, do not use any other tool; reply with exactly BLOCKED.`
+
+function assertTerminalRecord(record) {
+  assert(record.decision === 'ask', `仅提醒模式决策应为 ask，实际 ${record.decision}`)
+  assert(
+    record.source === 'terminal',
+    `仅提醒模式来源应为 terminal，实际 ${record.source}`
+  )
+  assert(record.tool === 'Bash', `仅提醒模式记录工具应为 Bash，实际 ${record.tool}`)
+}
+
+async function runTerminalCase() {
+  log('用例 6/6：仅提醒模式（审批立即回退终端，只弹不可操作提醒卡）')
+  await drainPending()
+  await ensureMainCdp()
+  try {
+    // 前半：审批已在队列里时打开开关，必须立刻回退，不能等到超时。
+    const queued = startClaude('work-terminal-queued', randomUUID(), settingsFile, TERMINAL_PROMPT)
+    const queuedPending = await waitPendingWithToolCheck(1, [queued], 60000, [
+      queued.sessionId
+    ])
+    if (!queuedPending) {
+      log('  ⚠ 当前 Claude 会话没有触发 Bash 审批，仅提醒用例跳过')
+      queued.child.kill('SIGTERM')
+      await waitExit(queued.child, 5000)
+      return
+    }
+    await mainCdp.eval('window.desktop.setPrefs({ approvalInTerminal: true })', true)
+    await waitSessionPending(queued.sessionId, 0, 15000)
+    const queuedRecord = await waitFor(
+      '排队审批回退记录',
+      () => recordFor(queued) || null,
+      15000,
+      150
+    )
+    assertTerminalRecord(queuedRecord)
+    const queuedCode = await waitExit(queued.child, 120000)
+    assert(queuedCode !== null, '排队审批未在开关开启后释放（疑似仍被弹窗卡住）')
+    log('  ✓ 已有待审批在开关开启后立即回退终端')
+
+    // 后半：开关已开启时新到达的审批不进入 pending，只提醒；即使存在匹配的
+    // 自动放行规则也不能静默批准。
+    await mainCdp.eval(
+      "window.desktop.addRule({ scope: 'global', tool: '*', pattern: '*' })",
+      true
+    )
+    const incoming = startClaude('work-terminal', randomUUID(), settingsFile, TERMINAL_PROMPT)
+    let record = null
+    const deadline = Date.now() + 60000
+    while (Date.now() < deadline) {
+      record = recordFor(incoming)
+      if (record) break
+      const leaked = readJson(pendingFile, []).filter(
+        (item) => item.sessionId === incoming.sessionId
+      )
+      assert(
+        leaked.length === 0,
+        `仅提醒模式仍产生待审批（配置未生效）：${leaked.length} 条`
+      )
+      if (sessionToolUnavailable(incoming) || incoming.child.exitCode !== null) break
+      await delay(250)
+    }
+    if (!record) {
+      log('  ⚠ 第二个 Claude 会话没有触发 Bash 审批，跳过新到达审批断言')
+      incoming.child.kill('SIGTERM')
+      await waitExit(incoming.child, 5000)
+      return
+    }
+    assertTerminalRecord(record)
+    // 提醒卡在回退时同步显示；之后 Stop 通知可能替换它，所以现在就检查。
+    const noticed = await mainCdp.eval('window.desktop.getState()', true)
+    assert(
+      noticed.notice && noticed.notice.kind === 'terminal',
+      '仅提醒模式没有弹出“请在终端处理”提醒卡'
+    )
+    const code = await waitExit(incoming.child, 120000)
+    assert(code !== null, '仅提醒模式会话未在 120s 内结束（疑似被审批卡住）')
+    const state = await mainCdp.eval('window.desktop.getState()', true)
+    assert(
+      !state.pending.some((item) => item.sessionId === incoming.sessionId),
+      '仅提醒模式结束后仍有待审批'
+    )
+    log(
+      '  ✓ 无 pending、忽略自动放行规则、立即回退终端、会话正常结束、history=ask/terminal 通过'
+    )
+  } finally {
+    await mainCdp.eval('window.desktop.setPrefs({ approvalInTerminal: false })', true)
+    await mainCdp.eval(
+      `(async () => {
+        const state = await window.desktop.getState()
+        for (const rule of state.rules) await window.desktop.removeRule(rule.id)
+      })()`,
+      true
+    )
+  }
+}
+
 async function main() {
   console.log('Claude Notify · 真实 Claude Code E2E\n')
   checkPrerequisites()
@@ -932,6 +1050,7 @@ async function main() {
   if (shouldRun('multi')) await runMultiSessionCase()
   if (shouldRun('resolved')) await runResolvedCase()
   if (shouldRun('timeout')) await runTimeoutCase()
+  if (shouldRun('terminal')) await runTerminalCase()
 
   await drainPending()
   if (cdp) {
@@ -967,6 +1086,13 @@ function cleanup(success = false) {
   if (cdp) {
     try {
       cdp.close()
+    } catch {
+      // ignore
+    }
+  }
+  if (mainCdp) {
+    try {
+      mainCdp.close()
     } catch {
       // ignore
     }

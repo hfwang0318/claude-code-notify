@@ -36,7 +36,8 @@ const api: DesktopApi = {
   collapsePopup: () => ipcRenderer.invoke('popup:collapse'),
   pauseAll: (paused: boolean) => ipcRenderer.invoke('approval:pause-all', paused),
   muteAll: (minutes: number) => ipcRenderer.invoke('session:mute-all', minutes),
-  dismissNotice: () => ipcRenderer.invoke('notice:dismiss'),
+  dismissNotice: (id: string) => ipcRenderer.invoke('notice:dismiss', id),
+  holdNotice: (id: string) => ipcRenderer.send('notice:hold', id),
   selectApproval: (id: string) => ipcRenderer.invoke('approval:select', id),
   onSelectApproval: (callback: (id: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, id: string): void => callback(id)

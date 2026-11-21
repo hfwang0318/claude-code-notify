@@ -159,6 +159,7 @@ export const mockState: AppState = {
     localIp: '192.168.1.20',
     admissionControl: true,
     maxPending: 8,
+    approvalInTerminal: false,
     quietHoursEnabled: false,
     quietHoursStart: '22:00',
     quietHoursEnd: '08:00',

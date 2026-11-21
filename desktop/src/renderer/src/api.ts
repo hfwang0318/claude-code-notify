@@ -117,10 +117,11 @@ function createBrowserFallback(): DesktopApi {
       emit()
       toast(minutes > 0 ? `已静音所有等待会话（预览）` : '已取消全部静音（预览）')
     },
-    dismissNotice: async () => {
+    dismissNotice: async (_id: string) => {
       state = { ...state, notice: null }
       emit()
     },
+    holdNotice: (_id: string) => undefined,
     selectApproval: async () => {
       toast('浏览器预览模式：审批弹窗仅在 Electron 中显示')
     },
