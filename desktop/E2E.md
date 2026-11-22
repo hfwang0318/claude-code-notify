@@ -315,7 +315,7 @@ docker run --rm -v "$PWD":/app -w /app -v cn-linux-node-modules:/app/node_module
 在子进程里调用 `_claude_pid()` / `_claude_tty()` / `_spawn_interrupt_watcher()`。
 2026-11-11 实测结果：`COMM=claude`、`TTY=/dev/pts/0`，transcript 写入中断标记
 后 typescript 中捕获到三条 `🟢 修复登录超时` OSC；完整套件
-`283 passed | 1 skipped`。Windows-only 的存活探测用例如期跳过。
+`298 passed | 1 skipped`。Windows-only 的存活探测用例如期跳过。
 
 ### 远程 SSH 部署（Docker 容器）
 
